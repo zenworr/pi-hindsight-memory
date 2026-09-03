@@ -1,0 +1,8 @@
+{"timestamp":"2026-01-02T10:00:00.000Z","type":"session_meta","payload":{"session_id":"codex-fixture-001","id":"codex-rollout-001","cwd":"/home/test","originator":"codex-tui"}}
+{"timestamp":"2026-01-02T10:01:00.000Z","type":"response_item","payload":{"type":"message","id":"cu-1","role":"user","content":[{"type":"input_text","text":"Remember that tests use Node's test runner."}]}}
+{"timestamp":"2026-01-02T10:01:01.000Z","type":"response_item","payload":{"type":"message","id":"ca-1","role":"assistant","content":[{"type":"output_text","text":"I will inspect the test setup."}]}}
+{"timestamp":"2026-01-02T10:01:02.000Z","type":"response_item","payload":{"type":"function_call","id":"call-1","name":"memory_search","arguments":"{\"query\":\"test setup\"}"}}
+{"timestamp":"2026-01-02T10:01:03.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"Do not import this output"}}
+{"timestamp":"2026-01-02T10:01:04.000Z","type":"response_item","payload":{"type":"message","id":"ca-2","role":"assistant","content":[{"type":"output_text","text":"The test runner choice is recorded."}]}}
+{"timestamp":"2026-01-02T10:01:05.000Z","type":"response_item","payload":{"type":"message","id":"cd-1","role":"developer","content":[{"type":"input_text","text":"Developer instructions must not be retained."}]}}
+{"timestamp":"2026-01-02T10:01:06.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Hidden reasoning"}]}}

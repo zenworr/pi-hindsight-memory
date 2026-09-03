@@ -1,0 +1,15 @@
+{
+  "version": "1",
+  "bank": {
+    "retain_default_strategy": "conversation",
+    "retain_strategies": {
+      "conversation": {
+        "retain_extraction_mode": "chunks",
+        "retain_chunk_size": 30000,
+        "retain_structured_chunk_size": 30000
+      }
+    },
+    "enable_observations": false,
+    "enable_auto_consolidation": false
+  }
+}

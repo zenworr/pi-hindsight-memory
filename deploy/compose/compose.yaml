@@ -1,0 +1,38 @@
+services:
+  hindsight-db:
+    image: ${POSTGRES_IMAGE:?Run scripts/prepare-deployment.sh first}
+    container_name: hindsight-db
+    restart: unless-stopped
+    env_file:
+      - ${HINDSIGHT_ENV_FILE:?Set HINDSIGHT_ENV_FILE in .env}
+    volumes:
+      - hindsight_pg_data:/var/lib/postgresql/${HINDSIGHT_DB_VERSION:-18}/docker
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - hindsight-internal
+
+  hindsight-app:
+    image: ${HINDSIGHT_IMAGE:?Run scripts/prepare-deployment.sh first}
+    container_name: hindsight-app
+    restart: unless-stopped
+    env_file:
+      - ${HINDSIGHT_ENV_FILE:?Set HINDSIGHT_ENV_FILE in .env}
+    ports:
+      - "127.0.0.1:${HINDSIGHT_API_HOST_PORT:-8888}:8888"
+      - "127.0.0.1:${HINDSIGHT_UI_HOST_PORT:-9999}:9999"
+    depends_on:
+      hindsight-db:
+        condition: service_healthy
+    networks:
+      - hindsight-internal
+
+networks:
+  hindsight-internal:
+    driver: bridge
+
+volumes:
+  hindsight_pg_data:

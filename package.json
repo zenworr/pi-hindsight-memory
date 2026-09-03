@@ -1,0 +1,59 @@
+{
+  "name": "pi-hindsight-memory",
+  "version": "0.3.0",
+  "description": "Global, provenance-preserving memory for Pi backed by Hindsight.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "pi-hindsight-memory": "dist/src/importer/cli.js"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/src/extension/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/unit/*.test.js dist/test/integration/*.test.js",
+    "test:unit": "npm run build && node --test dist/test/unit/*.test.js",
+    "inventory": "node dist/src/importer/cli.js inventory",
+    "doctor": "node dist/src/importer/cli.js doctor",
+    "prepare": "npm run build"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.3"
+  },
+  "dependencies": {
+    "typebox": "1.3.7"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.3",
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zenworr/pi-hindsight-memory.git"
+  },
+  "homepage": "https://github.com/zenworr/pi-hindsight-memory#readme",
+  "bugs": {
+    "url": "https://github.com/zenworr/pi-hindsight-memory/issues"
+  },
+  "license": "MIT",
+  "files": [
+    "dist/src",
+    "deploy/compose/bank-config.json",
+    "deploy/compose/bank-config.no-llm.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "pi",
+    "hindsight",
+    "memory",
+    "coding-agent"
+  ]
+}

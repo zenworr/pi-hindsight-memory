@@ -1,0 +1,10 @@
+{"type":"session","version":3,"id":"pi-fixture-001","timestamp":"2026-01-01T10:00:00.000Z","cwd":"/home/test"}
+{"type":"model_change","id":"model-1","parentId":null,"timestamp":"2026-01-01T10:00:01.000Z","provider":"test","modelId":"test-model"}
+{"type":"message","id":"u-1","parentId":"model-1","timestamp":"2026-01-01T10:01:00.000Z","message":{"role":"user","content":[{"type":"text","text":"Use PostgreSQL for the memory index."}]}}
+{"type":"message","id":"a-1","parentId":"u-1","timestamp":"2026-01-01T10:01:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"I will inspect the current database code."},{"type":"toolCall","name":"read","arguments":{"path":"src/db.ts"}}]}}
+{"type":"message","id":"tool-1","parentId":"a-1","timestamp":"2026-01-01T10:01:02.000Z","message":{"role":"toolResult","content":[{"type":"text","text":"SECRET_TOOL_OUTPUT should not be retained"}]}}
+{"type":"message","id":"a-2","parentId":"tool-1","timestamp":"2026-01-01T10:01:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The file confirms the existing design."},{"type":"toolCall","name":"memory_search","arguments":{"query":"database decision"}}]}}
+{"type":"message","id":"tool-2","parentId":"a-2","timestamp":"2026-01-01T10:01:04.000Z","message":{"role":"toolResult","content":[{"type":"text","text":"Found old memory that must not be imported"}]}}
+{"type":"message","id":"a-3","parentId":"tool-2","timestamp":"2026-01-01T10:01:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The earlier decision supports PostgreSQL."}]}}
+{"type":"compaction","id":"compact-1","parentId":"a-3","timestamp":"2026-01-01T10:02:00.000Z","summary":"Generated summary must not be source evidence","retainedTail":[{"role":"user","content":"Derived tail"}]}
+{"type":"custom","id":"custom-1","parentId":"compact-1","timestamp":"2026-01-01T10:02:01.000Z","customType":"blackhole","data":{"reflection":"Generated memory"}}

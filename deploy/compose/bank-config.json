@@ -1,0 +1,22 @@
+{
+  "version": "1",
+  "bank": {
+    "retain_mission": "This is one global memory bank for the user across all coding-agent sessions and all directories. Extract the fewest durable facts that future coding work needs: explicit user preferences, corrections, constraints, technical decisions, environment facts, discoveries, successful methods, failures and their causes, and completed outcomes. Preserve exact identifiers and literal values. Keep timestamps and distinguish user statements from assistant reports. Treat assistant suggestions as non-authoritative. Treat assistant text marked memory-assisted as derived context, not independent proof. Explicit user corrections have the highest authority. Ignore greetings, status chatter, hidden reasoning, generated memory, injected context, transient progress, and raw tool output.",
+    "retain_default_strategy": "conversation",
+    "retain_extraction_mode": "concise",
+    "retain_chunk_size": 30000,
+    "retain_structured_chunk_size": 30000,
+    "retain_strategies": {
+      "conversation": {
+        "retain_mission": "This is a developer conversation represented as JSONL turns. Extract only durable outcomes: final decisions, exact rules and values, concrete changes, resolved problems, conventions, preferences, corrections, and useful failure causes. Do not emit one fact per message or action. Do not turn an assistant suggestion into a user preference. When the conversation revises itself, record the final state and mention a superseded state only when it helps explain the correction.",
+        "retain_extraction_mode": "concise",
+        "retain_chunk_size": 30000,
+        "retain_structured_chunk_size": 30000
+      }
+    },
+    "enable_observations": true,
+    "enable_auto_consolidation": false,
+    "observations_mission": "Create durable, evidence-backed observations for future coding sessions. Consolidate explicit user preferences, corrections, environment facts, technical decisions, conventions, recurring failure causes, and stable relationships. Preserve important temporal changes. When newer evidence corrects older evidence, make the current state clear and retain a concise trace of the old state. Never convert an assistant suggestion or generated memory into a user preference or independent proof.",
+    "entities_allow_free_form": true
+  }
+}
