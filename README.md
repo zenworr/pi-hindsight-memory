@@ -124,5 +124,6 @@ See also:
 - [Architecture](docs/ARCHITECTURE.md)
 - [Canonical format](docs/CANONICAL-FORMAT.md)
 - [Operations](docs/OPERATIONS.md)
+- [Remote deployment](docs/REMOTE-DEPLOYMENT.md)
 - [Security](docs/SECURITY.md)
 - [Testing](docs/TESTING.md)

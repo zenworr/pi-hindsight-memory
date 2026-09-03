@@ -30,6 +30,65 @@ test("setup configuration uses generic portable defaults and local overrides", a
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 });
 
+test("Compose persists PostgreSQL at its version-aware parent directory", async () => {
+  const compose = await fs.readFile(path.join(root, "deploy", "compose", "compose.yaml"), "utf8");
+  assert.match(compose, /hindsight_pg_data:\/var\/lib\/postgresql\n/);
+  assert.doesNotMatch(compose, /hindsight_pg_data:\/var\/lib\/postgresql\//);
+});
+
+test("Linux importer service can depend on a remote tunnel", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-portable-systemd-"));
+  const configHome = path.join(home, "config-root");
+  const bin = path.join(home, "bin");
+  await fs.mkdir(bin, { recursive: true });
+  await fs.mkdir(path.join(configHome, "pi-hindsight-memory"), { recursive: true });
+  await fs.writeFile(path.join(configHome, "pi-hindsight-memory", "config.json"), "{}\n", { mode: 0o600 });
+  await fs.writeFile(path.join(bin, "uname"), "#!/usr/bin/env bash\necho Linux\n", { mode: 0o700 });
+  for (const name of ["node", "npm", "systemctl"]) await fs.writeFile(path.join(bin, name), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_IMPORTER_DEPENDENCY: "pi-hindsight-tunnel.service" };
+  try {
+    const result = run("install-importer-service.sh", [], env);
+    assert.equal(result.status, 0, result.stderr);
+    const unit = await fs.readFile(path.join(home, ".config", "systemd", "user", "pi-hindsight-importer.service"), "utf8");
+    assert.match(unit, /^Wants=network-online\.target pi-hindsight-tunnel\.service$/m);
+    assert.match(unit, /^After=network-online\.target pi-hindsight-tunnel\.service$/m);
+  } finally { await fs.rm(home, { recursive: true, force: true }); }
+});
+
+test("remote backup streams PostgreSQL over SSH and snapshots local state", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-remote-backup-"));
+  const stateHome = path.join(home, "state-root");
+  const stateDirectory = path.join(stateHome, "pi-hindsight-memory");
+  const backupDirectory = path.join(home, "backups");
+  const bin = path.join(home, "bin");
+  await fs.mkdir(stateDirectory, { recursive: true });
+  await fs.mkdir(bin, { recursive: true });
+  await fs.writeFile(path.join(stateDirectory, "state.sqlite3"), "state-data\n", { mode: 0o600 });
+  await fs.writeFile(path.join(bin, "ssh"), `#!/usr/bin/env bash
+case "$*" in
+  *" ps --format "*) echo hindsight-db ;;
+  *" pg_dump "*) printf 'postgres-dump\\n' ;;
+  *) exit 2 ;;
+esac
+`, { mode: 0o700 });
+  await fs.writeFile(path.join(bin, "sqlite3"), `#!/usr/bin/env bash
+if [[ $2 == .backup* ]]; then target=\${2#*\\'}; target=\${target%\\'}; cp "$1" "$target"; else echo ok; fi
+`, { mode: 0o700 });
+  const env = { ...process.env, HOME: home, XDG_STATE_HOME: stateHome, PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_BACKUP_DIR: backupDirectory, PI_HINDSIGHT_SSH_HOST: "hindsight-test" };
+  try {
+    const result = run("backup.sh", [], env);
+    assert.equal(result.status, 0, result.stderr);
+    const files = await fs.readdir(backupDirectory);
+    const dump = files.find((name) => /^hindsight-.*\.dump$/.test(name));
+    const state = files.find((name) => /^state-.*\.sqlite3$/.test(name));
+    assert.ok(dump);
+    assert.ok(state);
+    assert.equal(await fs.readFile(path.join(backupDirectory, dump), "utf8"), "postgres-dump\n");
+    assert.equal(await fs.readFile(path.join(backupDirectory, state), "utf8"), "state-data\n");
+    assert.equal((await fs.stat(path.join(backupDirectory, dump))).mode & 0o777, 0o600);
+  } finally { await fs.rm(home, { recursive: true, force: true }); }
+});
+
 test("macOS importer service stays staged until explicit activation", async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-portable-launchd-"));
   const configHome = path.join(home, "config-root");

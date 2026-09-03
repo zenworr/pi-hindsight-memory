@@ -53,7 +53,9 @@ scripts/stack.sh logs --tail 100 hindsight-app
 scripts/verify-deployment.sh
 ```
 
-PostgreSQL has no host port. The API uses bearer authentication even though it is loopback-bound.
+PostgreSQL has no host port. The API uses bearer authentication even though it is loopback-bound. PostgreSQL 18 stores its versioned data directory below `/var/lib/postgresql`, so the Compose stack mounts the named volume at that parent path and does not create an anonymous parent volume.
+
+For an always-on service host with a workstation-side importer, use the [remote deployment guide](REMOTE-DEPLOYMENT.md).
 
 ## Startup
 

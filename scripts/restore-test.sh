@@ -32,7 +32,6 @@ expected_documents=$(sqlite3 -readonly -noheader "$STATE_BACKUP" "SELECT count(D
 value() { awk -F= -v key="$1" '$1==key {sub(/^[^=]*=/, ""); print; exit}' "$2"; }
 POSTGRES_IMAGE=$(value POSTGRES_IMAGE "$COMPOSE_ENV")
 HINDSIGHT_IMAGE=$(value HINDSIGHT_IMAGE "$COMPOSE_ENV")
-DB_VERSION=$(value HINDSIGHT_DB_VERSION "$COMPOSE_ENV")
 POSTGRES_USER=$(value POSTGRES_USER "$RUNTIME_ENV")
 POSTGRES_PASSWORD=$(value POSTGRES_PASSWORD "$RUNTIME_ENV")
 POSTGRES_DB=$(value POSTGRES_DB "$RUNTIME_ENV")
@@ -53,7 +52,7 @@ trap cleanup EXIT
 "$ENGINE" volume create "$volume" >/dev/null
 "$ENGINE" run -d --name "$name-db" --network "$network" \
   -e POSTGRES_USER="$POSTGRES_USER" -e POSTGRES_PASSWORD="$POSTGRES_PASSWORD" -e POSTGRES_DB="$POSTGRES_DB" \
-  -v "$volume:/var/lib/postgresql/${DB_VERSION:-18}/docker" "$POSTGRES_IMAGE" >/dev/null
+  -v "$volume:/var/lib/postgresql" "$POSTGRES_IMAGE" >/dev/null
 for _ in $(seq 1 60); do "$ENGINE" exec "$name-db" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && break; sleep 2; done
 "$ENGINE" exec "$name-db" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null
 "$ENGINE" cp "$BACKUP" "$name-db:/restore.dump"

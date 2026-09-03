@@ -9,6 +9,8 @@ START=0
 [[ "${1:-}" == "--start" ]] && START=1
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/pi-hindsight-memory/config.json"
 [[ -r "$CONFIG_FILE" ]] || { echo "Missing $CONFIG_FILE" >&2; exit 1; }
+DEPENDENCY="${PI_HINDSIGHT_IMPORTER_DEPENDENCY:-pi-hindsight-stack.service}"
+[[ -z "$DEPENDENCY" || "$DEPENDENCY" =~ ^[A-Za-z0-9@_.:-]+\.service$ ]] || { echo "Invalid PI_HINDSIGHT_IMPORTER_DEPENDENCY" >&2; exit 1; }
 
 if [[ "$(uname -s)" == Darwin ]]; then
   LABEL=dev.pi-hindsight-memory.importer
@@ -45,11 +47,17 @@ else
   UNIT_DIR="$HOME/.config/systemd/user"
   UNIT="$UNIT_DIR/pi-hindsight-importer.service"
   mkdir -p "$UNIT_DIR"
+  dependency_wants=""
+  dependency_after=""
+  if [[ -n "$DEPENDENCY" ]]; then
+    dependency_wants=" $DEPENDENCY"
+    dependency_after=" $DEPENDENCY"
+  fi
   cat > "$UNIT" <<EOF
 [Unit]
 Description=Global coding-agent session importer for Hindsight
-Wants=network-online.target
-After=network-online.target pi-hindsight-stack.service
+Wants=network-online.target$dependency_wants
+After=network-online.target$dependency_after
 
 [Service]
 Type=simple
