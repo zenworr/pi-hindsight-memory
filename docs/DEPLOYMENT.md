@@ -30,6 +30,7 @@ Set these variables before the first `scripts/prepare-deployment.sh` call when d
 
 ```text
 PI_HINDSIGHT_BANK_ID            default: coding-history
+PI_HINDSIGHT_BIND_ADDRESS       default: 127.0.0.1
 PI_HINDSIGHT_API_PORT           default: 8888
 PI_HINDSIGHT_UI_PORT            default: 9999
 PI_HINDSIGHT_WORKER_ID          default: pi-hindsight-worker
@@ -41,7 +42,7 @@ POSTGRES_TAG                    default: docker.io/pgvector/pgvector:pg18
 
 The script pulls the native image for the host architecture and records immutable image digests. Set `VERIFY_HINDSIGHT_SIGNATURE=1` to require Hindsight's documented keyless Cosign signature. PostgreSQL is digest-pinned but its signature is not asserted by this project.
 
-Generated secrets use mode `0600`. The generated runtime configuration uses no extraction LLM, local embeddings, local reranking, stored document text, external PostgreSQL, disabled automatic consolidation, and loopback-only API/UI ports.
+Generated secrets use mode `0600`. The generated runtime configuration uses no extraction LLM, local embeddings, local reranking, stored document text, external PostgreSQL, disabled automatic consolidation, and loopback-only API/UI ports. Set `PI_HINDSIGHT_BIND_ADDRESS` to a trusted LAN address only when a reverse proxy or private network must reach the service.
 
 ## Stack commands
 

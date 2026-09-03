@@ -22,8 +22,8 @@ services:
     env_file:
       - ${HINDSIGHT_ENV_FILE:?Set HINDSIGHT_ENV_FILE in .env}
     ports:
-      - "127.0.0.1:${HINDSIGHT_API_HOST_PORT:-8888}:8888"
-      - "127.0.0.1:${HINDSIGHT_UI_HOST_PORT:-9999}:9999"
+      - "${HINDSIGHT_BIND_ADDRESS:-127.0.0.1}:${HINDSIGHT_API_HOST_PORT:-8888}:8888"
+      - "${HINDSIGHT_BIND_ADDRESS:-127.0.0.1}:${HINDSIGHT_UI_HOST_PORT:-9999}:9999"
     depends_on:
       hindsight-db:
         condition: service_healthy

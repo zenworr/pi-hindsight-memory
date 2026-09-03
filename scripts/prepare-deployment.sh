@@ -13,6 +13,7 @@ HINDSIGHT_TAG=${HINDSIGHT_TAG:-ghcr.io/vectorize-io/hindsight:0.9.2}
 POSTGRES_TAG=${POSTGRES_TAG:-docker.io/pgvector/pgvector:pg18}
 existing_value() { awk -F= -v key="$1" '$1==key {print $2; exit}' "$DEPLOY/.env" 2>/dev/null || true; }
 existing_project=$(existing_value COMPOSE_PROJECT_NAME)
+existing_bind_address=$(existing_value HINDSIGHT_BIND_ADDRESS)
 existing_api_port=$(existing_value HINDSIGHT_API_HOST_PORT)
 existing_ui_port=$(existing_value HINDSIGHT_UI_HOST_PORT)
 CONFIG_FILE="$CONFIG_DIR/config.json"
@@ -25,6 +26,7 @@ if [[ -r "$CONFIG_FILE" ]] && command -v jq >/dev/null; then
   configured_ui_port=${configured_ui_url##*:}; configured_ui_port=${configured_ui_port%%/*}
 fi
 COMPOSE_PROJECT_NAME=${PI_HINDSIGHT_COMPOSE_PROJECT:-${existing_project:-pi-hindsight-memory}}
+BIND_ADDRESS=${PI_HINDSIGHT_BIND_ADDRESS:-${existing_bind_address:-127.0.0.1}}
 API_HOST_PORT=${PI_HINDSIGHT_API_PORT:-${configured_api_port:-${existing_api_port:-8888}}}
 UI_HOST_PORT=${PI_HINDSIGHT_UI_PORT:-${configured_ui_port:-${existing_ui_port:-9999}}}
 WORKER_ID=${PI_HINDSIGHT_WORKER_ID:-pi-hindsight-worker}
@@ -34,6 +36,7 @@ for command in openssl jq; do
   command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }
 done
 [[ "$CONCURRENCY" =~ ^[1-9][0-9]*$ ]] || { echo "PI_HINDSIGHT_CONCURRENCY must be a positive integer" >&2; exit 1; }
+[[ "$BIND_ADDRESS" =~ ^[0-9.]+$ ]] || { echo "PI_HINDSIGHT_BIND_ADDRESS must be an IPv4 address" >&2; exit 1; }
 
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR"
 chmod 700 "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR"
@@ -138,6 +141,7 @@ COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
 HINDSIGHT_ENV_FILE="$CONFIG_DIR/hindsight.env"
 HINDSIGHT_IMAGE=$HINDSIGHT_TAG@$HINDSIGHT_DIGEST
 POSTGRES_IMAGE=$POSTGRES_TAG@$POSTGRES_DIGEST
+HINDSIGHT_BIND_ADDRESS=$BIND_ADDRESS
 HINDSIGHT_API_HOST_PORT=$API_HOST_PORT
 HINDSIGHT_UI_HOST_PORT=$UI_HOST_PORT
 EOF

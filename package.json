@@ -1,6 +1,6 @@
 {
   "name": "pi-hindsight-memory",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Global, provenance-preserving memory for Pi backed by Hindsight.",
   "type": "module",
   "engines": {

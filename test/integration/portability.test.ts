@@ -34,6 +34,7 @@ test("Compose persists PostgreSQL at its version-aware parent directory", async 
   const compose = await fs.readFile(path.join(root, "deploy", "compose", "compose.yaml"), "utf8");
   assert.match(compose, /hindsight_pg_data:\/var\/lib\/postgresql\n/);
   assert.doesNotMatch(compose, /hindsight_pg_data:\/var\/lib\/postgresql\//);
+  assert.match(compose, /\$\{HINDSIGHT_BIND_ADDRESS:-127\.0\.0\.1\}/);
 });
 
 test("Linux importer service can depend on a remote tunnel", async () => {
@@ -52,6 +53,12 @@ test("Linux importer service can depend on a remote tunnel", async () => {
     const unit = await fs.readFile(path.join(home, ".config", "systemd", "user", "pi-hindsight-importer.service"), "utf8");
     assert.match(unit, /^Wants=network-online\.target pi-hindsight-tunnel\.service$/m);
     assert.match(unit, /^After=network-online\.target pi-hindsight-tunnel\.service$/m);
+
+    const direct = run("install-importer-service.sh", [], { ...env, PI_HINDSIGHT_IMPORTER_DEPENDENCY: "" });
+    assert.equal(direct.status, 0, direct.stderr);
+    const directUnit = await fs.readFile(path.join(home, ".config", "systemd", "user", "pi-hindsight-importer.service"), "utf8");
+    assert.match(directUnit, /^Wants=network-online\.target$/m);
+    assert.match(directUnit, /^After=network-online\.target$/m);
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 });
 

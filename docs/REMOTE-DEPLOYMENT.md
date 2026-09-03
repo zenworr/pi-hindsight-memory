@@ -19,6 +19,34 @@ For a small remote-provider deployment, start with four CPU cores, 8 GB RAM, and
 
 Install from a permanent checkout and configure the provider on the service host. Keep provider credentials and Compose overrides outside Git.
 
+## TLS reverse proxy
+
+A reverse proxy is the usual choice on a trusted private network. Bind the Compose ports to the service host's LAN address:
+
+```bash
+PI_HINDSIGHT_BIND_ADDRESS=192.0.2.10 scripts/prepare-deployment.sh
+```
+
+Replace the example address with the service host address. Use separate HTTPS names for the API and UI, and forward them to ports 8888 and 9999. Keep Hindsight bearer authentication enabled on the API. The UI access key is optional on a trusted network.
+
+The API proxy must preserve the `Authorization` header and accept canonical request bodies:
+
+```nginx
+client_max_body_size 128m;
+proxy_connect_timeout 60s;
+proxy_read_timeout 900s;
+proxy_send_timeout 900s;
+proxy_buffering off;
+```
+
+Set `hindsight.apiUrl` and `hindsight.uiUrl` to the two HTTPS URLs. Install the importer with no local stack dependency:
+
+```bash
+PI_HINDSIGHT_IMPORTER_DEPENDENCY='' scripts/install-importer-service.sh --start
+```
+
+API authentication protects access but does not encrypt plain HTTP. Use TLS when traffic leaves the host.
+
 ## SSH tunnel
 
 Use a dedicated SSH key and verify the service-host key. The following Linux user service forwards the standard local endpoints while keeping the service host private:

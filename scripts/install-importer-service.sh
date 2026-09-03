@@ -9,7 +9,7 @@ START=0
 [[ "${1:-}" == "--start" ]] && START=1
 CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/pi-hindsight-memory/config.json"
 [[ -r "$CONFIG_FILE" ]] || { echo "Missing $CONFIG_FILE" >&2; exit 1; }
-DEPENDENCY="${PI_HINDSIGHT_IMPORTER_DEPENDENCY:-pi-hindsight-stack.service}"
+DEPENDENCY="${PI_HINDSIGHT_IMPORTER_DEPENDENCY-pi-hindsight-stack.service}"
 [[ -z "$DEPENDENCY" || "$DEPENDENCY" =~ ^[A-Za-z0-9@_.:-]+\.service$ ]] || { echo "Invalid PI_HINDSIGHT_IMPORTER_DEPENDENCY" >&2; exit 1; }
 
 if [[ "$(uname -s)" == Darwin ]]; then
