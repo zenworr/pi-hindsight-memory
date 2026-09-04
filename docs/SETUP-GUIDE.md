@@ -351,7 +351,7 @@ scripts/importer-service.sh status
 scripts/install-backup-schedule.sh
 ```
 
-Restart Pi or run `/reload` in each existing Pi process. Verify that exactly one active tool is named `memory_search` and that it comes from `pi-hindsight-memory`. The extension checks for that tool-name collision before registration.
+Fully exit and restart each existing Pi process. Do not rely on `/reload` after installing or upgrading the package because a process that started with an older Pi runtime can keep stale extension state. Verify that exactly one active tool is named `memory_search` and that it comes from `pi-hindsight-memory`. The extension checks for that tool-name collision before registration.
 
 ## 11. Restart verification
 
@@ -375,4 +375,4 @@ scripts/importer-service.sh stop
 scripts/restore-pi-settings.sh /path/to/settings-backup.json
 ```
 
-Re-enable any integration that you disabled manually, then restart Pi or run `/reload`. This does not delete Hindsight, PostgreSQL, source sessions, or unrelated integration data.
+Re-enable any integration that you disabled manually, then fully exit and restart Pi. This does not delete Hindsight, PostgreSQL, source sessions, or unrelated integration data.

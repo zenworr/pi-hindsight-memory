@@ -48,5 +48,5 @@ fi
 
 success=1
 trap - EXIT
-echo "Pi extension installation complete. Restart Pi or run /reload in each existing Pi process."
+echo "Pi extension installation complete. Fully exit and restart each existing Pi process."
 echo "Settings backup: $backup"
