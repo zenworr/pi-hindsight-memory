@@ -19,7 +19,7 @@ export function readEnvironmentFile(pathname: string): Record<string, string> {
 }
 
 export function activeProvider(config: AppConfig): ActiveProvider {
-  const environment = readEnvironmentFile(config.hindsight.environmentFile || config.hindsightEnvironmentFile);
+  const environment = readEnvironmentFile(config.hindsight.environmentFile);
   return { provider: environment.HINDSIGHT_API_LLM_PROVIDER ?? "unknown", model: environment.HINDSIGHT_API_LLM_MODEL ?? "unknown" };
 }
 

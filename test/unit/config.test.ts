@@ -21,6 +21,7 @@ test("portable defaults are generic and follow XDG directories", () => {
     assert.equal(config.hindsight.minRelevanceScore, 0.01);
     assert.deepEqual(config.sessionExclusions.exactLabels, []);
     assert.equal(config.maxInflightDocuments, 4);
+    assert.equal(config.sessionSettleSeconds, 60);
     assert.equal(config.configPath, path.join(configRoot, "pi-hindsight-memory", "config.json"));
     assert.equal(config.stateDatabase, path.join(stateRoot, "pi-hindsight-memory", "state.sqlite3"));
   } finally {

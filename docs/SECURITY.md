@@ -7,7 +7,7 @@ The Pi extension and importer have full local filesystem access. Review the sour
 Native histories are read only. The importer writes only:
 
 - configuration and credentials under `~/.config/pi-hindsight-memory`;
-- state and dirty markers under `~/.local/state/pi-hindsight-memory`;
+- importer state under `~/.local/state/pi-hindsight-memory`;
 - temporary normalized documents under the state spool directory;
 - backups under the state directory or `PI_HINDSIGHT_BACKUP_DIR`.
 
@@ -29,7 +29,7 @@ Hindsight async operation rows can retain task payloads. The deployment sets `HI
 
 ## Authentication
 
-The API uses `ApiKeyTenantExtension` and a bearer token. PostgreSQL is on the internal container network only. The API and control plane are host-loopback-only by default. Set `HINDSIGHT_CP_ACCESS_KEY` in the private environment file if the local UI also needs a login prompt.
+The API uses `ApiKeyTenantExtension` and a bearer token. PostgreSQL is on the internal container network only and receives a separate minimal environment file without Hindsight API or provider credentials. The API and control plane are host-loopback-only by default. Set `HINDSIGHT_CP_ACCESS_KEY` in the private environment file if the local UI also needs a login prompt.
 
 ## Forgetting
 

@@ -3,9 +3,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { defaultConfig } from "../../src/common/config.js";
 import { HindsightClient } from "../../src/hindsight/client.js";
 import piHindsightMemory, { createMemorySearchTool } from "../../src/extension/index.js";
-import { markerName, writeDirtyMarker } from "../../src/importer/dirty-markers.js";
+import { collectHindsightStatus, HINDSIGHT_STATUS_REQUEST_EVENT, registerHindsightStatusProvider, type HindsightStatusSnapshotV1 } from "../../src/extension/status.js";
 
 function client(response: unknown): HindsightClient {
   return new HindsightClient({ apiUrl: "http://example.test", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: 1000, retainWallTimeoutMs: 1000, recallMaxTokens: 2500, recallChunksMaxTokens: 2500, recallSourceFactsMaxTokens: 1500, operationPollMs: 1, operationPollTimeoutMs: 1000, operationRetentionDays: 14 }, async () => new Response(JSON.stringify(response), { status: 200 }), "token");
@@ -33,6 +34,7 @@ test("extension registers memory_search only after the Pi runtime starts", async
       getAllTools: () => tools,
       registerTool: (tool: any) => { tools.push(tool); },
       on: (event: string, handler: (...args: any[]) => unknown) => { handlers.set(event, handler); },
+      events: { on: () => () => {}, emit: () => {} },
     };
     piHindsightMemory(fakePi);
     assert.equal(tools.length, 0);
@@ -57,6 +59,7 @@ test("runtime collision check refuses an existing memory_search tool", async () 
       getAllTools: () => [{ name: "memory_search", sourceInfo: { path: "/other/extension.ts" } }],
       registerTool: () => assert.fail("must not replace an existing memory_search"),
       on: (event: string, handler: (...args: any[]) => unknown) => { if (event === "session_start") start = handler; },
+      events: { on: () => () => {}, emit: () => {} },
     };
     piHindsightMemory(fakePi);
     assert.throws(() => start?.({}, {}), /already registered by \/other\/extension\.ts/);
@@ -66,39 +69,63 @@ test("runtime collision check refuses an existing memory_search tool", async () 
   }
 });
 
+test("status provider exposes queue and service health without secrets", async () => {
+  const config = defaultConfig("/home/test");
+  const executor = {
+    async exec() { return { stdout: "2|1|3|4|5\n", stderr: "", code: 0 }; },
+  };
+  const statusClient = {
+    async health() { return { status: "healthy", database: "connected" }; },
+    async getBankStats() {
+      return {
+        total_documents: 42,
+        pending_operations: 2,
+        failed_operations: 6,
+        pending_consolidation: 7,
+        failed_consolidation: 8,
+        operations_by_status: { processing: 1 },
+      };
+    },
+    async listOperations() { return [{ id: "op-1", status: "processing", task_type: "consolidation" }]; },
+  } as unknown as HindsightClient;
+  const direct = await collectHindsightStatus(config, executor, statusClient);
+  assert.deepEqual(direct.importer, { queued: 2, submitted: 1, processing: 3, failed: 4, cleanupPending: 5 });
+  assert.equal(direct.service.documents, 42);
+  assert.equal(direct.service.consolidationActive, true);
+  assert.deepEqual(direct.issues, []);
+  assert.doesNotMatch(JSON.stringify(direct), /token|password/i);
+
+  (statusClient as any).listOperations = async () => [{ id: "op-2", status: "processing", task_type: "retain" }];
+  const retaining = await collectHindsightStatus(config, executor, statusClient);
+  assert.equal(retaining.service.processingOperations, 1);
+  assert.equal(retaining.service.consolidationActive, false);
+
+  let listener: ((data: unknown) => void) | undefined;
+  let removed = false;
+  const fakePi: any = {
+    exec: executor.exec,
+    events: {
+      on(channel: string, handler: (data: unknown) => void) {
+        assert.equal(channel, HINDSIGHT_STATUS_REQUEST_EVENT);
+        listener = handler;
+        return () => { removed = true; };
+      },
+    },
+  };
+  const unregister = registerHindsightStatusProvider(fakePi, config, statusClient);
+  let response: Promise<HindsightStatusSnapshotV1> | undefined;
+  listener?.({ protocolVersion: 1, respond(value: Promise<HindsightStatusSnapshotV1>) { response = value; } });
+  assert.equal((await response)?.service.documents, 42);
+  unregister();
+  assert.equal(removed, true);
+});
+
 test("empty memory search queries fail before contacting Hindsight", async () => {
   let calls = 0;
   const hindsight = new HindsightClient({ apiUrl: "http://example.test", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: 1000, retainWallTimeoutMs: 1000, recallMaxTokens: 2500, recallChunksMaxTokens: 2500, recallSourceFactsMaxTokens: 1500, operationPollMs: 1, operationPollTimeoutMs: 1000, operationRetentionDays: 14 }, async () => { calls += 1; return new Response("{}", { status: 200 }); }, "token");
   const tool = createMemorySearchTool(hindsight);
   await assert.rejects(() => tool.execute("call", { query: "   " }, undefined, undefined, {} as any), /must not be empty/);
   assert.equal(calls, 0);
-});
-
-test("dirty markers are atomic and contain no transcript text", async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-marker-"));
-  const sessionFile = "/home/test/session.jsonl";
-  assert.equal(writeDirtyMarker(directory, { source: "pi", sessionFile, sessionId: "s1", reason: "session_shutdown" }), true);
-  const marker = path.join(directory, "pi", markerName(sessionFile));
-  const content = JSON.parse(await fs.readFile(marker, "utf8"));
-  assert.deepEqual(content.session_file, sessionFile);
-  assert.equal(content.transcript, undefined);
-  await fs.rm(directory, { recursive: true, force: true });
-});
-
-test("10,000 dirty-marker writes stay within the foreground budget", async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-marker-perf-"));
-  const samples: number[] = [];
-  for (let index = 0; index < 10_000; index += 1) {
-    const started = process.hrtime.bigint();
-    writeDirtyMarker(directory, { source: "pi", sessionFile: `/home/test/session-${index % 10}.jsonl`, sessionId: `s-${index % 10}`, reason: "session_compact" });
-    samples.push(Number(process.hrtime.bigint() - started) / 1e6);
-  }
-  samples.sort((a, b) => a - b);
-  assert.ok(samples[Math.floor(samples.length * 0.5)]! < 10);
-  assert.ok(samples[Math.floor(samples.length * 0.99)]! < 50);
-  // Hosted CI runners can suspend the process between the two clock reads.
-  if (!process.env.CI) assert.ok(samples.at(-1)! < 250);
-  await fs.rm(directory, { recursive: true, force: true });
 });
 
 test("extension source has no automatic retrieval lifecycle handlers", async () => {

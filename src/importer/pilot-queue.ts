@@ -1,7 +1,7 @@
 import type { AppConfig, Source } from "../common/types.js";
-import { ADAPTER_VERSION, CANONICAL_SCHEMA, REDACTION_POLICY_VERSION } from "../common/types.js";
+import { CANONICAL_SCHEMA } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
-import { effectiveReference } from "./scanner.js";
+import { effectiveReference, processingSignature } from "./scanner.js";
 import { queueGeneration } from "./queue.js";
 import { StateDatabase } from "./state-db.js";
 import type { PilotEntry } from "./pilot.js";
@@ -24,7 +24,7 @@ export async function queuePilot(config: AppConfig, state: StateDatabase, entrie
       try {
         const after = await adapter.fingerprint(reference);
         if (JSON.stringify(fingerprint) !== JSON.stringify(after)) throw new Error("source changed during pilot normalization; retry");
-        state.upsertSession({ source: session.source, nativeSessionId: session.nativeSessionId, documentId: session.documentId, sourceLocator: session.sourceLocator, sourceSize: after.size, sourceMtime: after.mtimeMs, sourceFingerprint: { ...after, processing_signature: `${CANONICAL_SCHEMA}|${ADAPTER_VERSION}|${REDACTION_POLICY_VERSION}` } as any, canonicalHash: session.canonicalHash, canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, canonicalSchema: CANONICAL_SCHEMA, sessionStartedAt: session.sessionStartedAt, sessionUpdatedAt: session.sessionUpdatedAt, status: session.emptyAfterNormalization ? "empty_after_normalization" : "discovered", lastSeenAt: new Date().toISOString() });
+        state.upsertSession({ source: session.source, nativeSessionId: session.nativeSessionId, documentId: session.documentId, sourceLocator: session.sourceLocator, sourceSize: after.size, sourceMtime: after.mtimeMs, sourceFingerprint: { ...after, processing_signature: processingSignature(config) }, canonicalHash: session.canonicalHash, canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, canonicalSchema: CANONICAL_SCHEMA, sessionStartedAt: session.sessionStartedAt, sessionUpdatedAt: session.sessionUpdatedAt, status: session.emptyAfterNormalization ? "empty_after_normalization" : "discovered", lastSeenAt: new Date().toISOString() });
         state.addAlias(session.source, reference.locator, session.nativeSessionId);
         const generation = queueGeneration(state, session, config.hindsight.bankId);
         if (generation) summary.queued += 1; else summary.alreadyKnown += 1;

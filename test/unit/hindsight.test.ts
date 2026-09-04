@@ -41,6 +41,20 @@ test("ensureBank creates a missing bank with PUT at the documented endpoint", as
   assert.deepEqual(JSON.parse(requests[1]?.body ?? "{}"), { name: "coding-history" });
 });
 
+test("operation listing filters by status and follows pagination", async () => {
+  const urls: string[] = [];
+  const client = new HindsightClient(config(), async (url) => {
+    urls.push(String(url));
+    const offset = Number(new URL(String(url)).searchParams.get("offset"));
+    const count = offset === 0 ? 100 : 1;
+    return jsonResponse({ operations: Array.from({ length: count }, (_, index) => ({ id: `op-${offset + index}`, status: "processing", task_type: "consolidation" })), total: 101 });
+  }, "token");
+  const operations = await client.listOperations("processing");
+  assert.equal(operations.length, 101);
+  assert.equal(new URL(urls[0]!).searchParams.get("status"), "processing");
+  assert.equal(new URL(urls[1]!).searchParams.get("offset"), "100");
+});
+
 test("configuration and retain use the v0.9.2 request envelopes", async () => {
   const requests: Array<{ url: string; method: string; body?: any }> = [];
   const client = new HindsightClient(config(), async (url, request) => {

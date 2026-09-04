@@ -24,7 +24,8 @@ The suite covers:
 - configurable weak-result filtering;
 - scanner, worker, cleanup, and readiness transitions;
 - generic configuration, provider rollback, and service installation;
-- dirty-marker behavior and foreground latency.
+- active-session settling and forced final scans;
+- versioned status integration without credential exposure.
 
 GitHub Actions runs the suite on macOS ARM64 and Ubuntu with supported Node.js versions.
 

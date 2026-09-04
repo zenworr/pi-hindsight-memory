@@ -19,7 +19,7 @@ export async function importAll(config: AppConfig, state: StateDatabase, client:
   let offset = 0;
   for (;;) {
     if (Date.now() - started >= maxMs) throw new Error(`historical import exceeded ${maxMs} ms`);
-    const scanResult = await scan(config, state, { offset, limit: cohortSize });
+    const scanResult = await scan(config, state, { offset, limit: cohortSize, force: true });
     if (scanResult.discovered === 0) break;
     summary.scanned += scanResult.discovered;
     summary.queued += scanResult.queued;

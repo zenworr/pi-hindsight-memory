@@ -9,6 +9,7 @@ STATE_DIR=$(state_dir)
 CONFIG_FILE="$CONFIG_DIR/config.json"
 BANK_ID=${PI_HINDSIGHT_BANK_ID:-coding-history}
 MAX_INFLIGHT=${PI_HINDSIGHT_MAX_INFLIGHT:-4}
+SETTLE_SECONDS=${PI_HINDSIGHT_SETTLE_SECONDS:-60}
 API_PORT=${PI_HINDSIGHT_API_PORT:-8888}
 PI_AGENT_DIR=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
 CODEX_DIR=${CODEX_HOME:-$HOME/.codex}
@@ -23,8 +24,8 @@ OPENCODE_DB=${PI_HINDSIGHT_OPENCODE_DB:-$OPENCODE_DIR/opencode.db}
 FORCE=0
 [[ "${1:-}" == "--force" ]] && FORCE=1
 
-mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$STATE_DIR/dirty" "$STATE_DIR/reports" "$STATE_DIR/canonical"
-chmod 700 "$CONFIG_DIR" "$STATE_DIR" "$STATE_DIR/dirty" "$STATE_DIR/reports" "$STATE_DIR/canonical"
+mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$STATE_DIR/reports" "$STATE_DIR/canonical"
+chmod 700 "$CONFIG_DIR" "$STATE_DIR" "$STATE_DIR/reports" "$STATE_DIR/canonical"
 if [[ -e "$CONFIG_FILE" && "$FORCE" -ne 1 ]]; then
   echo "Keeping existing $CONFIG_FILE"
   exit 0
@@ -44,19 +45,19 @@ jq -n \
   --arg api "http://127.0.0.1:$API_PORT" \
   --arg ui "http://127.0.0.1:${PI_HINDSIGHT_UI_PORT:-9999}" \
   --argjson maxInflight "$MAX_INFLIGHT" \
+  --argjson settleSeconds "$SETTLE_SECONDS" \
   '{
     stateDirectory:$state,
     stateDatabase:($state + "/state.sqlite3"),
-    dirtyDirectory:($state + "/dirty"),
     reportDirectory:($state + "/reports"),
     spoolDirectory:($state + "/canonical"),
     approvalFile:($config + "/import-approval.json"),
     sessionExclusions:{exactLabels:[]},
+    sessionSettleSeconds:$settleSeconds,
     maxInflightDocuments:$maxInflight,
     sourceRoots:{pi:$piSessions,codex:$codexSessions,claude:$claudeSessions,opencode:$opencodeDir},
     codexStateDatabase:$codexDb,
     opencodeDatabase:$opencodeDb,
-    hindsightEnvironmentFile:($config + "/hindsight.env"),
     hindsight:{
       apiUrl:$api,
       uiUrl:$ui,

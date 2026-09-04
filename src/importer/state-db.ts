@@ -193,6 +193,13 @@ export class StateDatabase {
         estimated_cost_usd REAL NOT NULL,
         reserved_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS scan_candidates (
+        source TEXT NOT NULL,
+        native_session_id TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        first_observed_at TEXT NOT NULL,
+        PRIMARY KEY (source, native_session_id)
+      );
     `);
     const exists = this.db.prepare("SELECT version FROM schema_migrations WHERE version = 1").get();
     if (!exists) this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (1, ?)").run(new Date().toISOString());
@@ -255,6 +262,8 @@ export class StateDatabase {
       `);
       this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (2, ?)").run(new Date().toISOString());
     }
+    const settleMigration = this.db.prepare("SELECT version FROM schema_migrations WHERE version = 3").get();
+    if (!settleMigration) this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?)").run(new Date().toISOString());
   }
 
   close(): void { this.db.close(); }
@@ -273,6 +282,22 @@ export class StateDatabase {
   markScanStarted(source: Source, at: string): void { this.db.prepare("UPDATE sources SET last_scan_started_at=? WHERE source=?").run(at, source); }
   markScanCompleted(source: Source, at: string, watermark?: string): void { this.db.prepare("UPDATE sources SET last_scan_completed_at=?, watermark=?, last_error=NULL WHERE source=?").run(at, watermark ?? null, source); }
   markScanError(source: Source, error: string): void { this.db.prepare("UPDATE sources SET last_error=? WHERE source=?").run(error.slice(0, 2000), source); }
+
+  observeScanCandidate(source: Source, nativeSessionId: string, fingerprint: string, observedAt: string, settleMs: number): boolean {
+    return this.transaction(() => {
+      const row = this.db.prepare("SELECT fingerprint, first_observed_at FROM scan_candidates WHERE source=? AND native_session_id=?").get(source, nativeSessionId) as { fingerprint: string; first_observed_at: string } | undefined;
+      if (!row || row.fingerprint !== fingerprint) {
+        this.db.prepare(`INSERT INTO scan_candidates(source,native_session_id,fingerprint,first_observed_at) VALUES (?,?,?,?)
+          ON CONFLICT(source,native_session_id) DO UPDATE SET fingerprint=excluded.fingerprint, first_observed_at=excluded.first_observed_at`).run(source, nativeSessionId, fingerprint, observedAt);
+        return false;
+      }
+      return Date.parse(observedAt) - Date.parse(row.first_observed_at) >= settleMs;
+    });
+  }
+
+  clearScanCandidate(source: Source, nativeSessionId: string): void {
+    this.db.prepare("DELETE FROM scan_candidates WHERE source=? AND native_session_id=?").run(source, nativeSessionId);
+  }
 
   getSession(source: Source, nativeSessionId: string): SessionStateRecord | undefined {
     const row = this.db.prepare("SELECT * FROM sessions WHERE source=? AND native_session_id=?").get(source, nativeSessionId) as Record<string, unknown> | undefined;

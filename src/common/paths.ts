@@ -25,7 +25,6 @@ export function defaultRuntimePaths(home = homeDirectory()) {
     environmentPath: path.join(configDirectory, "hindsight.env"),
     stateDirectory,
     stateDatabase: path.join(stateDirectory, "state.sqlite3"),
-    dirtyDirectory: path.join(stateDirectory, "dirty"),
     reportDirectory: path.join(stateDirectory, "reports"),
     spoolDirectory: path.join(stateDirectory, "canonical"),
     lockPath: path.join(stateDirectory, "daemon.lock"),

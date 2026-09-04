@@ -42,7 +42,7 @@ POSTGRES_TAG                    default: docker.io/pgvector/pgvector:pg18
 
 The script pulls the native image for the host architecture and records immutable image digests. Set `VERIFY_HINDSIGHT_SIGNATURE=1` to require Hindsight's documented keyless Cosign signature. PostgreSQL is digest-pinned but its signature is not asserted by this project.
 
-Generated secrets use mode `0600`. The generated runtime configuration uses no extraction LLM, local embeddings, local reranking, stored document text, external PostgreSQL, disabled automatic consolidation, and loopback-only API/UI ports. Set `PI_HINDSIGHT_BIND_ADDRESS` to a trusted LAN address only when a reverse proxy or private network must reach the service.
+Generated secrets use mode `0600`. PostgreSQL reads a minimal `postgres.env` containing only its user, password, and database name; it never receives Hindsight API or provider credentials. The separate `hindsight.env` contains the database URL and application settings. The generated runtime configuration uses no extraction LLM, local embeddings, local reranking, stored document text, external PostgreSQL, disabled automatic consolidation, and loopback-only API/UI ports. Set `PI_HINDSIGHT_BIND_ADDRESS` to a trusted LAN address only when a reverse proxy or private network must reach the service.
 
 ## Stack commands
 

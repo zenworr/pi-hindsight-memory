@@ -50,7 +50,7 @@ async function withLock<T>(config: ReturnType<typeof loadConfig>, fn: (state: St
 }
 
 function usage(): void {
-  process.stdout.write(`pi-hindsight-memory\n\nUsage:\n  inventory [--output FILE] [--source SOURCE] [--limit N]\n  scan [--source SOURCE] [--limit N]\n  daemon [--once] [--no-scan]\n  drain [--max-ms N] [--no-scan]\n  process-queued [--max-ms N]\n  import-all [--cohort N] [--max-ms N]\n  verify-import\n  verify-ready\n  plan-cleanup [--output FILE] [--include-ambiguous]
+  process.stdout.write(`pi-hindsight-memory\n\nUsage:\n  inventory [--output FILE] [--source SOURCE] [--limit N]\n  scan [--source SOURCE] [--limit N] [--force]\n  daemon [--once] [--no-scan]\n  drain [--max-ms N] [--no-scan]\n  process-queued [--max-ms N]\n  import-all [--cohort N] [--max-ms N]\n  verify-import\n  verify-ready\n  plan-cleanup [--output FILE] [--include-ambiguous]
   cleanup-subagents --apply --plan FILE\n  status\n  pause | resume\n  configure-bank [--file FILE]\n  consolidate\n  enable-auto-consolidation\n  retry-failed\n  cancel-queued\n  dry-run-extract CANONICAL_FILE [--mode concise|verbose]\n  select-pilot INVENTORY_JSON [--count N] [--max-bytes N] [--include-largest]\n  queue-pilot PILOT_JSON\n  run-pilot PILOT_JSON OUTPUT_JSON\n  export-canonical SOURCE SESSION_ID OUTPUT_FILE\n  doctor\n`);
 }
 
@@ -196,7 +196,7 @@ async function main(): Promise<void> {
   }
   if (command === "scan") {
     const limitText = value(args, "--limit");
-    const result = await withLock(config, (state) => scan(config, state, { source: sourceArg(args), limit: limitText ? Number(limitText) : undefined }));
+    const result = await withLock(config, (state) => scan(config, state, { source: sourceArg(args), limit: limitText ? Number(limitText) : undefined, force: has(args, "--force") }));
     await writeJson("-", result); return;
   }
   if (command === "daemon") { await runDaemon(config, { once: has(args, "--once"), scanFirst: !has(args, "--no-scan") }); return; }

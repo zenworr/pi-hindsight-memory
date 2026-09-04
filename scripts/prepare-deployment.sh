@@ -72,17 +72,36 @@ if [[ ! -s "$CONFIG_DIR/api-token" ]]; then
   umask 077
   openssl rand -hex 32 > "$CONFIG_DIR/api-token"
 fi
+POSTGRES_ENV="$CONFIG_DIR/postgres.env"
+HINDSIGHT_ENV="$CONFIG_DIR/hindsight.env"
+env_value() { awk -F= -v key="$1" '$1==key {sub(/^[^=]*=/, ""); print; exit}' "$2" 2>/dev/null || true; }
+if [[ ! -s "$POSTGRES_ENV" ]]; then
+  DB_USER=$(env_value POSTGRES_USER "$HINDSIGHT_ENV")
+  DB_PASSWORD=$(env_value POSTGRES_PASSWORD "$HINDSIGHT_ENV")
+  DB_NAME=$(env_value POSTGRES_DB "$HINDSIGHT_ENV")
+  DB_USER=${DB_USER:-hindsight_user}
+  DB_PASSWORD=${DB_PASSWORD:-$(openssl rand -hex 32)}
+  DB_NAME=${DB_NAME:-hindsight}
+  umask 077
+  cat > "$POSTGRES_ENV" <<EOF
+POSTGRES_USER=$DB_USER
+POSTGRES_PASSWORD=$DB_PASSWORD
+POSTGRES_DB=$DB_NAME
+EOF
+fi
+chmod 600 "$POSTGRES_ENV"
+DB_USER=$(env_value POSTGRES_USER "$POSTGRES_ENV")
+DB_PASSWORD=$(env_value POSTGRES_PASSWORD "$POSTGRES_ENV")
+DB_NAME=$(env_value POSTGRES_DB "$POSTGRES_ENV")
+[[ "$DB_USER" =~ ^[A-Za-z0-9_]+$ && "$DB_NAME" =~ ^[A-Za-z0-9_]+$ && "$DB_PASSWORD" =~ ^[A-Za-z0-9._~-]+$ ]] || { echo "PostgreSQL environment contains unsupported values" >&2; exit 1; }
+
 created_environment=0
-if [[ ! -s "$CONFIG_DIR/hindsight.env" ]]; then
+if [[ ! -s "$HINDSIGHT_ENV" ]]; then
   created_environment=1
   umask 077
-  DB_PASSWORD=$(openssl rand -hex 32)
   API_TOKEN=$(<"$CONFIG_DIR/api-token")
-  cat > "$CONFIG_DIR/hindsight.env" <<EOF
-POSTGRES_USER=hindsight_user
-POSTGRES_PASSWORD=$DB_PASSWORD
-POSTGRES_DB=hindsight
-HINDSIGHT_API_DATABASE_URL=postgresql://hindsight_user:$DB_PASSWORD@hindsight-db:5432/hindsight
+  cat > "$HINDSIGHT_ENV" <<EOF
+HINDSIGHT_API_DATABASE_URL=postgresql://$DB_USER:$DB_PASSWORD@hindsight-db:5432/$DB_NAME
 HINDSIGHT_API_HOST=0.0.0.0
 HINDSIGHT_API_PORT=8888
 HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension
@@ -124,10 +143,15 @@ HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION=false
 HINDSIGHT_API_ENABLE_OBSERVATIONS=true
 HINDSIGHT_API_RETAIN_BATCH_ENABLED=false
 EOF
-  chmod 600 "$CONFIG_DIR/hindsight.env"
 else
-  echo "Keeping existing $CONFIG_DIR/hindsight.env"
+  echo "Keeping existing $HINDSIGHT_ENV"
 fi
+# PostgreSQL receives only its own three variables.
+tmp=$(mktemp "$HINDSIGHT_ENV.XXXXXX")
+{ grep -Ev '^POSTGRES_(USER|PASSWORD|DB)=' "$HINDSIGHT_ENV" || true; } > "$tmp"
+[[ -s "$tmp" ]] || { rm -f "$tmp"; echo "Hindsight environment is empty" >&2; exit 1; }
+chmod 600 "$tmp"
+mv "$tmp" "$HINDSIGHT_ENV"
 
 cat > "$DEPLOY/versions.env" <<EOF
 # Generated locally by scripts/prepare-deployment.sh.
@@ -138,7 +162,8 @@ HINDSIGHT_SIGNATURE_STATUS=$signature_status
 EOF
 cat > "$DEPLOY/.env" <<EOF
 COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
-HINDSIGHT_ENV_FILE="$CONFIG_DIR/hindsight.env"
+HINDSIGHT_ENV_FILE="$HINDSIGHT_ENV"
+POSTGRES_ENV_FILE="$POSTGRES_ENV"
 HINDSIGHT_IMAGE=$HINDSIGHT_TAG@$HINDSIGHT_DIGEST
 POSTGRES_IMAGE=$POSTGRES_TAG@$POSTGRES_DIGEST
 HINDSIGHT_BIND_ADDRESS=$BIND_ADDRESS

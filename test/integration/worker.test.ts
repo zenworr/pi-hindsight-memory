@@ -37,6 +37,52 @@ test("worker reclassifies a queued modern Pi child before retain", async () => {
   } finally { state.close(); await fs.rm(root, { recursive: true, force: true }); }
 });
 
+test("worker shutdown leaves submitted work recoverable instead of failed", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-worker-abort-"));
+  const sourcePath = path.join(root, "session.jsonl");
+  await fs.copyFile(path.resolve("test/fixtures/pi/session.jsonl"), sourcePath);
+  const config = defaultConfig(root);
+  config.stateDirectory = path.join(root, "state");
+  config.stateDatabase = ":memory:";
+  config.spoolDirectory = path.join(root, "spool");
+  config.sourceRoots.pi = root;
+  config.sourceRoots.codex = path.join(root, "none-codex");
+  config.sourceRoots.claude = path.join(root, "none-claude");
+  config.opencodeDatabase = path.join(root, "none-opencode.db");
+  config.requireImportApproval = false;
+  const adapter = new PiAdapter(root);
+  let reference: any;
+  for await (const candidate of adapter.discover()) if (candidate.nativeSessionId === "pi-fixture-001") reference = candidate;
+  const canonical = await adapter.load(reference, { spoolDirectory: config.spoolDirectory, maxCanonicalBytes: 10_000_000 });
+  const state = new StateDatabase(":memory:");
+  const operationId = operationIdFor(config.hindsight.bankId, canonical.documentId, canonical.canonicalHash);
+  state.upsertSession({ source: "pi", nativeSessionId: canonical.nativeSessionId, documentId: canonical.documentId, sourceLocator: sourcePath, sourceSize: 1, sourceMtime: 1, sourceFingerprint: { size: 1, mtimeMs: 1, sampleHash: "x", stableLocator: sourcePath }, canonicalHash: canonical.canonicalHash, canonicalBytes: canonical.canonicalBytes, canonicalTurns: canonical.canonicalTurns, canonicalSchema: "agent-session-v1", sessionStartedAt: canonical.sessionStartedAt, sessionUpdatedAt: canonical.sessionUpdatedAt, status: "discovered", lastSeenAt: new Date().toISOString() });
+  state.upsertGeneration({ source: "pi", nativeSessionId: canonical.nativeSessionId, canonicalHash: canonical.canonicalHash, operationId, state: "queued", queuedAt: new Date().toISOString(), attemptCount: 0 });
+  await canonical.cleanup();
+  const controller = new AbortController();
+  const fakeClient = {
+    ensureBank: async () => undefined,
+    assertBankConfiguration: async () => ({}),
+    assertExtractionAvailable: async () => undefined,
+    retainWithOperationId: async () => ({ operation_id: operationId }),
+    waitForOperation: async (_id: string, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      return new Promise((_, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+      });
+    },
+  };
+  try {
+    const running = new ImportWorker(config, state, fakeClient as any).runOnce(1, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    const result = await running;
+    assert.equal(result.deferred, 1);
+    assert.equal(result.failed, 0);
+    assert.equal(state.getGeneration("pi", canonical.nativeSessionId, canonical.canonicalHash)?.state, "submitted");
+  } finally { state.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test("worker never submits two mutable generations for one document at once", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-worker-"));
   const sourcePath = path.join(root, "session.jsonl");

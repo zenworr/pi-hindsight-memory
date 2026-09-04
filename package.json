@@ -1,6 +1,6 @@
 {
   "name": "pi-hindsight-memory",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Global, provenance-preserving memory for Pi backed by Hindsight.",
   "type": "module",
   "engines": {
@@ -15,7 +15,8 @@
     ]
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/unit/*.test.js dist/test/integration/*.test.js",
     "test:unit": "npm run build && node --test dist/test/unit/*.test.js",

@@ -15,7 +15,7 @@ for command in jq node npm pi; do command -v "$command" >/dev/null || { echo "Mi
 [[ -r "$SETTINGS" ]] || { echo "Missing Pi settings: $SETTINGS" >&2; exit 1; }
 cd "$ROOT"
 npm run build >/dev/null
-node dist/src/importer/cli.js scan >/dev/null
+node dist/src/importer/cli.js scan --force >/dev/null
 node dist/src/importer/cli.js verify-ready >/dev/null || {
   echo "Pi installation readiness failed. Run 'node dist/src/importer/cli.js verify-ready' for details." >&2
   exit 1

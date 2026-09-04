@@ -23,26 +23,27 @@ export class ImportWorker {
     this.logger = logger ?? new Logger("import-worker");
   }
 
-  async preflight(): Promise<ImportApproval | undefined> {
+  async preflight(signal?: AbortSignal): Promise<ImportApproval | undefined> {
     if (!this.config.requireImportApproval) return undefined;
     const approval = assertImportApproval(this.config);
-    await this.client.ensureBank();
-    await this.client.assertBankConfiguration({ requireExtraction: true, bulk: this.bulkMode });
-    await this.client.assertExtractionAvailable();
+    await this.client.ensureBank(signal);
+    await this.client.assertBankConfiguration({ requireExtraction: true, bulk: this.bulkMode, signal });
+    await this.client.assertExtractionAvailable(signal);
     return approval;
   }
 
-  async runOnce(limit = 100): Promise<WorkerSummary> {
+  async runOnce(limit = 100, signal?: AbortSignal): Promise<WorkerSummary> {
     const priority: Record<string, number> = { processing: 0, submitted: 0, queued: 1, failed: 2 };
     const candidates = [...this.state.listGenerations()]
       .filter((generation) => ["queued", "submitted", "processing"].includes(generation.state) || generation.state === "failed" && generation.attemptCount < 3)
       .sort((a, b) => (priority[a.state] ?? 9) - (priority[b.state] ?? 9) || a.queuedAt.localeCompare(b.queuedAt))
       .slice(0, limit);
     if (candidates.length === 0) return { selected: 0, completed: 0, failed: 0, deferred: 0 };
-    const approval = await this.preflight();
+    const approval = await this.preflight(signal);
     const summary: WorkerSummary = { selected: candidates.length, completed: 0, failed: 0, deferred: 0 };
     await Promise.all(candidates.map((generation) => this.limiter.run(async () => {
-      const result = await this.process(generation, approval);
+      if (signal?.aborted) { summary.deferred += 1; return; }
+      const result = await this.process(generation, approval, signal);
       if (result === "completed") summary.completed += 1;
       else if (result === "failed") summary.failed += 1;
       else summary.deferred += 1;
@@ -51,13 +52,13 @@ export class ImportWorker {
     return summary;
   }
 
-  async drain(maxMs = 60 * 60 * 1000): Promise<WorkerSummary> {
+  async drain(maxMs = 60 * 60 * 1000, signal?: AbortSignal): Promise<WorkerSummary> {
     const started = Date.now();
     const total: WorkerSummary = { selected: 0, completed: 0, failed: 0, deferred: 0 };
-    while (Date.now() - started < maxMs) {
+    while (Date.now() - started < maxMs && !signal?.aborted) {
       const before = this.state.listGenerations().filter((generation) => ["queued", "submitted", "processing"].includes(generation.state)).length;
       if (before === 0) break;
-      const batch = await this.runOnce(Math.max(1000, this.config.maxInflightDocuments * 100));
+      const batch = await this.runOnce(Math.max(1000, this.config.maxInflightDocuments * 100), signal);
       total.selected += batch.selected; total.completed += batch.completed; total.failed += batch.failed; total.deferred += batch.deferred;
       const after = this.state.listGenerations().filter((generation) => ["queued", "submitted", "processing"].includes(generation.state)).length;
       if (batch.selected === 0 || (batch.completed === 0 && batch.failed === 0) || after >= before && batch.deferred === batch.selected) break;
@@ -65,7 +66,7 @@ export class ImportWorker {
     return total;
   }
 
-  private async process(generation: GenerationRecord, approval?: ImportApproval): Promise<"completed" | "failed" | "deferred"> {
+  private async process(generation: GenerationRecord, approval?: ImportApproval, shutdownSignal?: AbortSignal): Promise<"completed" | "failed" | "deferred"> {
     if (generation.state === "failed" && generation.attemptCount >= 3) return "deferred";
     if (!this.state.claimGeneration(generation)) return "deferred";
     const claimed = this.state.getGeneration(generation.source, generation.nativeSessionId, generation.canonicalHash) ?? generation;
@@ -78,9 +79,10 @@ export class ImportWorker {
     if (!adapter) { this.markFailure(generation, `No adapter for ${generation.source}`); return "failed"; }
     const reference = referenceFromState(sessionState);
     let session;
-    const deadlineController = new AbortController();
-    const deadlineTimer = setTimeout(() => deadlineController.abort(), this.config.hindsight.retainWallTimeoutMs);
+    const deadlineSignal = AbortSignal.timeout(this.config.hindsight.retainWallTimeoutMs);
+    const operationSignal = shutdownSignal ? AbortSignal.any([shutdownSignal, deadlineSignal]) : deadlineSignal;
     try {
+      operationSignal.throwIfAborted();
       const structuralClassification = await adapter.classify(reference);
       const currentClassification = configuredExclusion(structuralClassification.label, this.config.sessionExclusions) ?? structuralClassification;
       if (currentClassification.kind !== "primary") {
@@ -93,6 +95,7 @@ export class ImportWorker {
         return "deferred";
       }
       session = await adapter.load(reference, { spoolDirectory: this.config.spoolDirectory, maxCanonicalBytes: this.config.maxCanonicalBytes });
+      operationSignal.throwIfAborted();
       if (session.canonicalHash !== generation.canonicalHash) {
         this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "superseded", { error: "Source changed before this generation was submitted" });
         await session.cleanup();
@@ -125,21 +128,21 @@ export class ImportWorker {
       let operation: HindsightOperation | undefined;
       const persistedOperation = this.state.getOperation(generation.operationId);
       if (persistedOperation) {
-        try { operation = await this.client.waitForOperation(generation.operationId, deadlineController.signal, this.config.hindsight.retainWallTimeoutMs); }
+        try { operation = await this.client.waitForOperation(generation.operationId, operationSignal, this.config.hindsight.retainWallTimeoutMs); }
         catch (error) {
           if (!(error instanceof HindsightHttpError) || error.status !== 404) throw error;
         }
       }
       if (!operation) {
         this.state.upsertOperation({ operationId: generation.operationId, documentId: session.documentId, canonicalHash: generation.canonicalHash, retryCount: Math.max(0, attemptCount - 1), submittedAt: new Date().toISOString() });
-        await this.client.ensureBank(deadlineController.signal);
-        await this.client.assertBankConfiguration({ requireExtraction: true, bulk: this.bulkMode, signal: deadlineController.signal });
-        await this.client.assertExtractionAvailable(deadlineController.signal);
-        const response = await this.client.retainWithOperationId(session, generation.operationId, deadlineController.signal);
+        await this.client.ensureBank(operationSignal);
+        await this.client.assertBankConfiguration({ requireExtraction: true, bulk: this.bulkMode, signal: operationSignal });
+        await this.client.assertExtractionAvailable(operationSignal);
+        const response = await this.client.retainWithOperationId(session, generation.operationId, operationSignal);
         if (response.operation_id && response.operation_id !== generation.operationId) throw new Error(`Hindsight ignored requested operation_id ${generation.operationId} and returned ${response.operation_id}`);
         this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { submittedAt: new Date().toISOString(), attemptCount });
         this.state.upsertOperation({ operationId: generation.operationId, documentId: session.documentId, canonicalHash: generation.canonicalHash, hindsightStatus: "pending", submittedAt: new Date().toISOString(), retryCount: Math.max(0, attemptCount - 1), responseSummary: JSON.stringify({ operation_id: generation.operationId, items_count: response.items_count ?? null }) });
-        operation = await this.client.waitForOperation(generation.operationId, deadlineController.signal, this.config.hindsight.retainWallTimeoutMs);
+        operation = await this.client.waitForOperation(generation.operationId, operationSignal, this.config.hindsight.retainWallTimeoutMs);
       }
       this.state.upsertOperation({ operationId: generation.operationId, documentId: session.documentId, canonicalHash: generation.canonicalHash, hindsightStatus: String(operation.status ?? "completed"), lastPolledAt: new Date().toISOString(), retryCount: Math.max(0, attemptCount - 1), responseSummary: JSON.stringify({ operation_id: generation.operationId, status: operation.status ?? "completed", result_metadata: operation.result_metadata ?? null }) });
       this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "completed", { completedAt: new Date().toISOString(), attemptCount });
@@ -148,13 +151,16 @@ export class ImportWorker {
       await session.cleanup();
       return "completed";
     } catch (error) {
+      if (shutdownSignal?.aborted) {
+        this.logger.info("Session import interrupted by shutdown", { source: generation.source, session: generation.nativeSessionId });
+        if (session) await session.cleanup().catch(() => undefined);
+        return "deferred";
+      }
       const message = errorMessage(error);
       this.markFailure(generation, message);
       this.logger.error("Session import failed", { source: generation.source, session: generation.nativeSessionId, error: message });
       if (session) await session.cleanup().catch(() => undefined);
       return "failed";
-    } finally {
-      clearTimeout(deadlineTimer);
     }
   }
 

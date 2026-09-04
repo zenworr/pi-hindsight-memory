@@ -3,17 +3,17 @@
 A split deployment keeps the session importer on the workstation and runs Hindsight with PostgreSQL on an always-on Linux host.
 
 ```text
-workstation                         service host
-session files                       Hindsight
-importer       -- SSH tunnel -->    PostgreSQL
-Pi extension                        extraction provider
+workstation                              service host
+session files                            Hindsight
+importer       -- authenticated link --> PostgreSQL
+Pi extension                             extraction provider
 ```
 
 This keeps source histories local. The service host can continue extraction and consolidation after the workstation disconnects, but it cannot discover session changes that the workstation has not submitted.
 
 ## Service host
 
-Use Docker or Podman Compose with persistent local SSD storage. The default Compose ports bind to loopback. Keep this default when an SSH tunnel provides access.
+Use Docker or Podman Compose with persistent local SSD storage. The default Compose ports bind to loopback. Keep this default for a same-host client or SSH tunnel; bind to a private address only when a reverse proxy or private network requires it.
 
 For a small remote-provider deployment, start with four CPU cores, 8 GB RAM, and 50 GB of SSD storage. A local LLM needs separate model-specific resources.
 
@@ -39,7 +39,14 @@ proxy_send_timeout 900s;
 proxy_buffering off;
 ```
 
-Set `hindsight.apiUrl` and `hindsight.uiUrl` to the two HTTPS URLs. Install the importer with no local stack dependency:
+Set `hindsight.apiUrl` and `hindsight.uiUrl` to the two HTTPS URLs. Keep only the service host's provider and model identity in the workstation's configured `hindsight.env`; provider credentials and database settings stay on the service host:
+
+```text
+HINDSIGHT_API_LLM_PROVIDER=<provider>
+HINDSIGHT_API_LLM_MODEL=<model>
+```
+
+Install the importer with no local stack dependency:
 
 ```bash
 PI_HINDSIGHT_IMPORTER_DEPENDENCY='' scripts/install-importer-service.sh --start
@@ -90,11 +97,11 @@ PI_HINDSIGHT_IMPORTER_DEPENDENCY=pi-hindsight-tunnel.service \
 3. Create and verify a logical PostgreSQL backup and an importer-state backup.
 4. Restore PostgreSQL on the service host with the same Hindsight version and embedding dimensions.
 5. Start Hindsight and verify health, provider access, document counts, recall, and bank configuration.
-6. Stop the local Hindsight stack.
-7. Start the SSH tunnel on the same local ports.
-8. Start the workstation importer and let it submit changes made during migration.
+6. Verify the chosen HTTPS, VPN, or SSH-tunnel access path from the workstation.
+7. Update the workstation URLs and importer service dependency.
+8. Stop the local Hindsight stack, then start the workstation importer against the remote service.
 9. Verify another retain, consolidation, known recall, and unanswerable-query abstention.
-10. Keep the stopped local volumes until the remote service is proven stable.
+10. Keep the stopped local volumes until a fresh remote backup passes an isolated restore; then they can be removed.
 
 Do not copy the importer state to the service host when the importer continues to run on the workstation.
 
@@ -104,6 +111,7 @@ The workstation state database and remote PostgreSQL database form one recovery 
 
 ```bash
 PI_HINDSIGHT_SSH_HOST=hindsight-host scripts/backup.sh
+PI_HINDSIGHT_SSH_HOST=hindsight-host scripts/install-backup-schedule.sh
 ```
 
 The SSH account must be able to run Docker without an interactive password. Set `PI_HINDSIGHT_REMOTE_ENGINE=podman` when the service host uses Podman. `PI_HINDSIGHT_DB_USER` and `PI_HINDSIGHT_DB_NAME` override the PostgreSQL defaults.
@@ -113,7 +121,7 @@ Also keep logical PostgreSQL backups on the service host, so consolidation data 
 ## Security
 
 - Do not expose the plain HTTP API or UI to an untrusted network.
-- Prefer an SSH tunnel, private VPN, or authenticated TLS reverse proxy.
+- Prefer an authenticated TLS reverse proxy or private VPN; an SSH tunnel is suitable for a single client.
 - Use a dedicated, revocable SSH key.
 - Keep Hindsight bearer tokens and provider credentials mode `0600`.
 - Keep PostgreSQL on the internal container network.

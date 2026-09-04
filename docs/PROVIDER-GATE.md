@@ -31,7 +31,7 @@ scripts/create-import-approval.sh \
   OUTPUT_USD_PER_MILLION
 ```
 
-The importer checks that the approval provider and model equal the active server configuration. It transactionally reserves estimated input and cost before each retain.
+The importer checks the approval against the provider and model recorded in its local `hindsight.env` metadata, then verifies that the server reports extraction support. In a split-host deployment, keep those two local metadata values aligned with the service host. The importer transactionally reserves estimated input and cost before each retain.
 
 The estimate is a guardrail, not a provider invoice. Prompt overhead and consolidation can increase actual use. Configure a provider-side budget or rate limit as well.
 

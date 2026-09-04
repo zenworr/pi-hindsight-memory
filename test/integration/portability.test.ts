@@ -23,6 +23,7 @@ test("setup configuration uses generic portable defaults and local overrides", a
     const config = JSON.parse(await fs.readFile(pathname, "utf8"));
     assert.equal(config.hindsight.bankId, "team-history");
     assert.equal(config.maxInflightDocuments, 6);
+    assert.equal(config.sessionSettleSeconds, 60);
     assert.deepEqual(config.sessionExclusions.exactLabels, []);
     assert.equal(config.sourceRoots.pi, path.join(home, ".pi", "agent", "sessions"));
     assert.equal(config.opencodeDatabase, path.join(home, ".local", "share", "opencode", "opencode.db"));
@@ -30,11 +31,48 @@ test("setup configuration uses generic portable defaults and local overrides", a
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 });
 
+test("deployment preparation isolates PostgreSQL from application secrets", async () => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-split-env-"));
+  const project = path.join(temporary, "project");
+  const home = path.join(temporary, "home");
+  const bin = path.join(home, "bin");
+  await fs.mkdir(path.join(project, "scripts", "lib"), { recursive: true });
+  await fs.mkdir(path.join(project, "deploy", "compose"), { recursive: true });
+  await fs.mkdir(bin, { recursive: true });
+  await fs.copyFile(path.join(root, "scripts", "prepare-deployment.sh"), path.join(project, "scripts", "prepare-deployment.sh"));
+  await fs.copyFile(path.join(root, "scripts", "lib", "runtime.sh"), path.join(project, "scripts", "lib", "runtime.sh"));
+  await fs.copyFile(path.join(root, "deploy", "compose", "compose.yaml"), path.join(project, "deploy", "compose", "compose.yaml"));
+  await fs.writeFile(path.join(bin, "docker"), `#!/usr/bin/env bash
+set -e
+if [[ $1 == info || $1 == pull ]]; then exit 0; fi
+if [[ $1 == image && $2 == inspect ]]; then
+  if [[ $* == *Architecture* ]]; then echo "\${TEST_IMAGE_ARCH:-amd64}"; else echo "$3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; fi
+  exit 0
+fi
+exit 2
+`, { mode: 0o700 });
+  const configHome = path.join(temporary, "config");
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: path.join(temporary, "state"), PATH: `${bin}:/usr/bin:/bin`, PI_HINDSIGHT_CONTAINER_ENGINE: "docker", TEST_IMAGE_ARCH: process.arch === "arm64" ? "arm64" : "amd64" };
+  try {
+    const result = spawnSync("bash", [path.join(project, "scripts", "prepare-deployment.sh")], { cwd: project, env, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    const postgres = await fs.readFile(path.join(configHome, "pi-hindsight-memory", "postgres.env"), "utf8");
+    const hindsight = await fs.readFile(path.join(configHome, "pi-hindsight-memory", "hindsight.env"), "utf8");
+    assert.deepEqual(postgres.split("\n").filter(Boolean).map((line) => line.split("=")[0]), ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"]);
+    assert.doesNotMatch(postgres, /HINDSIGHT|LLM|API/);
+    assert.doesNotMatch(hindsight, /^POSTGRES_(?:USER|PASSWORD|DB)=/m);
+    assert.equal((await fs.stat(path.join(configHome, "pi-hindsight-memory", "postgres.env"))).mode & 0o777, 0o600);
+  } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+});
+
 test("Compose persists PostgreSQL at its version-aware parent directory", async () => {
   const compose = await fs.readFile(path.join(root, "deploy", "compose", "compose.yaml"), "utf8");
   assert.match(compose, /hindsight_pg_data:\/var\/lib\/postgresql\n/);
   assert.doesNotMatch(compose, /hindsight_pg_data:\/var\/lib\/postgresql\//);
   assert.match(compose, /\$\{HINDSIGHT_BIND_ADDRESS:-127\.0\.0\.1\}/);
+  const database = compose.slice(compose.indexOf("  hindsight-db:"), compose.indexOf("  hindsight-app:"));
+  assert.match(database, /POSTGRES_ENV_FILE/);
+  assert.doesNotMatch(database, /HINDSIGHT_ENV_FILE/);
 });
 
 test("Linux importer service can depend on a remote tunnel", async () => {
@@ -53,12 +91,47 @@ test("Linux importer service can depend on a remote tunnel", async () => {
     const unit = await fs.readFile(path.join(home, ".config", "systemd", "user", "pi-hindsight-importer.service"), "utf8");
     assert.match(unit, /^Wants=network-online\.target pi-hindsight-tunnel\.service$/m);
     assert.match(unit, /^After=network-online\.target pi-hindsight-tunnel\.service$/m);
+    assert.match(unit, /^TimeoutStopSec=300$/m);
 
     const direct = run("install-importer-service.sh", [], { ...env, PI_HINDSIGHT_IMPORTER_DEPENDENCY: "" });
     assert.equal(direct.status, 0, direct.stderr);
     const directUnit = await fs.readFile(path.join(home, ".config", "systemd", "user", "pi-hindsight-importer.service"), "utf8");
     assert.match(directUnit, /^Wants=network-online\.target$/m);
     assert.match(directUnit, /^After=network-online\.target$/m);
+  } finally { await fs.rm(home, { recursive: true, force: true }); }
+});
+
+test("macOS backup schedule supports a remote host without local Docker", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-remote-backup-launchd-"));
+  const stateHome = path.join(home, "state-root");
+  const bin = path.join(home, "bin");
+  await fs.mkdir(bin, { recursive: true });
+  await fs.writeFile(path.join(bin, "uname"), "#!/usr/bin/env bash\necho Darwin\n", { mode: 0o700 });
+  for (const name of ["launchctl", "plutil", "sqlite3", "ssh"]) await fs.writeFile(path.join(bin, name), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
+  const env = { ...process.env, HOME: home, XDG_STATE_HOME: stateHome, PATH: `${bin}:/usr/bin:/bin`, PI_HINDSIGHT_SSH_HOST: "hindsight-test" };
+  try {
+    const result = run("install-backup-schedule.sh", [], env);
+    assert.equal(result.status, 0, result.stderr);
+    const plist = await fs.readFile(path.join(home, "Library", "LaunchAgents", "dev.pi-hindsight-memory.backup.plist"), "utf8");
+    assert.match(plist, /<key>PI_HINDSIGHT_SSH_HOST<\/key><string>hindsight-test<\/string>/);
+    assert.match(plist, /<key>PI_HINDSIGHT_REMOTE_ENGINE<\/key><string>docker<\/string>/);
+  } finally { await fs.rm(home, { recursive: true, force: true }); }
+});
+
+test("Linux backup schedule preserves remote SSH configuration", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-remote-backup-unit-"));
+  const bin = path.join(home, "bin");
+  await fs.mkdir(bin, { recursive: true });
+  await fs.writeFile(path.join(bin, "uname"), "#!/usr/bin/env bash\necho Linux\n", { mode: 0o700 });
+  await fs.writeFile(path.join(bin, "systemctl"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
+  const env = { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_SSH_HOST: "hindsight-test" };
+  try {
+    const result = run("install-backup-schedule.sh", [], env);
+    assert.equal(result.status, 0, result.stderr);
+    const unit = await fs.readFile(path.join(home, ".config", "systemd", "user", "pi-hindsight-backup.service"), "utf8");
+    assert.match(unit, /^After=network-online\.target$/m);
+    assert.match(unit, /^Environment=PI_HINDSIGHT_SSH_HOST=hindsight-test$/m);
+    assert.doesNotMatch(unit, /pi-hindsight-stack\.service/);
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 });
 

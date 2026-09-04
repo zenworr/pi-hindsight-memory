@@ -81,6 +81,7 @@ export interface SourceFingerprint {
   mtimeMs: number;
   sampleHash: string;
   stableLocator: string;
+  processing_signature?: string;
 }
 
 export interface AdapterLoadOptions {
@@ -97,7 +98,7 @@ export interface InventorySessionResult {
   source: Source;
   nativeSessionId: string;
   locator: string;
-  status: "eligible" | "empty_after_normalization" | "excluded_subagent" | "excluded_configured" | "ambiguous" | "malformed" | "too_large" | "error";
+  status: "eligible" | "active" | "empty_after_normalization" | "excluded_subagent" | "excluded_configured" | "ambiguous" | "malformed" | "too_large" | "error";
   sourceBytes?: number;
   canonicalBytes?: number;
   canonicalTurns?: number;
@@ -162,16 +163,14 @@ export interface AppConfig {
   configPath: string;
   stateDirectory: string;
   stateDatabase: string;
-  dirtyDirectory: string;
   reportDirectory: string;
   spoolDirectory: string;
   approvalFile: string;
-  hindsightEnvironmentFile: string;
   sessionExclusions: SessionExclusionConfig;
   maxCanonicalBytes: number;
   scanIntervalSeconds: number;
+  sessionSettleSeconds: number;
   maxInflightDocuments: number;
-  sourceOverlapMs: number;
   requireImportApproval: boolean;
   sourceRoots: {
     pi: string;
@@ -233,6 +232,7 @@ export interface RecallResponse {
 }
 
 export interface HindsightBankStats {
+  total_documents?: number;
   pending_consolidation?: number;
   failed_consolidation?: number;
   pending_operations?: number;
@@ -245,6 +245,7 @@ export interface HindsightOperation {
   id?: string;
   status?: string;
   operation_type?: string;
+  task_type?: string;
   error_message?: string | null;
   progress?: Record<string, unknown> | null;
   result_metadata?: Record<string, unknown> | null;

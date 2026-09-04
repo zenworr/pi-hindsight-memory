@@ -16,7 +16,7 @@ Importer logs are under the local state directory on macOS. On Linux, use:
 journalctl --user -u pi-hindsight-importer.service -n 100
 ```
 
-Logs contain source IDs, counts, hashes, and bounded errors. They must not contain transcript text or original secret values.
+Logs contain source IDs, counts, hashes, and bounded errors. They must not contain transcript text or original secret values. Normal scans defer a changed fingerprint until scanner observations show it stable for `sessionSettleSeconds`; `active` in a scan summary is a deferred count, not an error. Use `scan --force` only for a controlled final catch-up after writers are closed.
 
 ## Pause and resume
 
@@ -47,7 +47,7 @@ scripts/restore-test.sh \
 scripts/install-backup-schedule.sh
 ```
 
-Set `PI_HINDSIGHT_BACKUP_DIR` to use another persistent location. PostgreSQL uses `pg_dump`; importer state uses SQLite `.backup`. The script retains four backup pairs and checksum files.
+Set `PI_HINDSIGHT_BACKUP_DIR` to use another persistent location. PostgreSQL uses `pg_dump`; importer state uses SQLite `.backup`. The script retains four backup pairs and checksum files. For a split-host deployment, set `PI_HINDSIGHT_SSH_HOST` as described in [REMOTE-DEPLOYMENT.md](REMOTE-DEPLOYMENT.md).
 
 ## Source missing
 

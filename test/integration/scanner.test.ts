@@ -11,15 +11,56 @@ async function configFor(root: string) {
   const config = defaultConfig(root);
   config.stateDirectory = path.join(root, "state");
   config.stateDatabase = path.join(root, "state", "state.sqlite3");
-  config.dirtyDirectory = path.join(root, "state", "dirty");
   config.reportDirectory = path.join(root, "state", "reports");
   config.spoolDirectory = path.join(root, "state", "canonical");
+  config.sessionSettleSeconds = 0;
   config.sourceRoots.pi = path.join(root, "pi");
   config.sourceRoots.codex = path.join(root, "codex");
   config.sourceRoots.claude = path.join(root, "claude");
   config.sourceRoots.opencode = path.join(root, "opencode.db");
   return config;
 }
+
+test("scanner requires an unchanged observation window unless a scan is forced", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-settle-"));
+  const config = await configFor(root);
+  config.sessionSettleSeconds = 0.001;
+  await fs.mkdir(config.sourceRoots.pi, { recursive: true });
+  await fs.writeFile(path.join(config.sourceRoots.pi, "session.jsonl"), '{"type":"session","version":3,"id":"active-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/home/test"}\n{"type":"message","id":"u-1","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"still active"}}\n', "utf8");
+  const state = new StateDatabase(config.stateDatabase);
+  try {
+    const deferred = await scan(config, state, { source: "pi" });
+    assert.equal(deferred.active, 1);
+    assert.equal(deferred.queued, 0);
+    assert.equal(state.listGenerations().length, 0);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const settled = await scan(config, state, { source: "pi" });
+    assert.equal(settled.active, 0);
+    assert.equal(settled.queued, 1);
+
+    await fs.appendFile(path.join(config.sourceRoots.pi, "session.jsonl"), '{"type":"message","id":"u-2","parentId":"u-1","timestamp":"2026-01-01T00:00:02.000Z","message":{"role":"user","content":"changed again"}}\n');
+    const changed = await scan(config, state, { source: "pi" });
+    assert.equal(changed.active, 1);
+    assert.equal(changed.queued, 0);
+    const forced = await scan(config, state, { source: "pi", force: true });
+    assert.equal(forced.active, 0);
+    assert.equal(forced.queued, 1);
+  } finally { state.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("scanner stops promptly when shutdown is requested", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-scan-abort-"));
+  const config = await configFor(root);
+  await fs.mkdir(config.sourceRoots.pi, { recursive: true });
+  await fs.writeFile(path.join(config.sourceRoots.pi, "session.jsonl"), '{"type":"session","version":3,"id":"abort-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/home/test"}\n', "utf8");
+  const state = new StateDatabase(config.stateDatabase);
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    await assert.rejects(() => scan(config, state, { source: "pi", signal: controller.signal }), /abort/i);
+    assert.equal(state.listGenerations().length, 0);
+  } finally { state.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
 
 test("scanner excludes a configured session label before canonicalization or queueing", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-exclusion-"));

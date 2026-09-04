@@ -20,16 +20,14 @@ export function defaultConfig(home = homeDirectory()): AppConfig {
     configPath: paths.configPath,
     stateDirectory: paths.stateDirectory,
     stateDatabase: paths.stateDatabase,
-    dirtyDirectory: paths.dirtyDirectory,
     reportDirectory: paths.reportDirectory,
     spoolDirectory: paths.spoolDirectory,
     approvalFile: path.join(paths.configDirectory, "import-approval.json"),
-    hindsightEnvironmentFile: paths.environmentPath,
     sessionExclusions: { exactLabels: [] },
     maxCanonicalBytes: 100 * 1024 * 1024,
     scanIntervalSeconds: 300,
+    sessionSettleSeconds: 60,
     maxInflightDocuments: 4,
-    sourceOverlapMs: 5 * 60 * 1000,
     requireImportApproval: true,
     sourceRoots: {
       pi: path.join(piAgentDirectory, "sessions"),
@@ -83,8 +81,8 @@ function validateConfig(config: AppConfig): AppConfig {
   if (!Array.isArray(config.sessionExclusions.exactLabels) || config.sessionExclusions.exactLabels.some((label) => typeof label !== "string" || !label.trim())) throw new Error("sessionExclusions.exactLabels must contain non-empty strings");
   assertPositiveNumber(config.maxCanonicalBytes, "maxCanonicalBytes");
   assertPositiveNumber(config.scanIntervalSeconds, "scanIntervalSeconds");
+  assertPositiveNumber(config.sessionSettleSeconds, "sessionSettleSeconds", true);
   assertPositiveNumber(config.maxInflightDocuments, "maxInflightDocuments");
-  assertPositiveNumber(config.sourceOverlapMs, "sourceOverlapMs", true);
   assertPositiveNumber(config.hindsight.requestTimeoutMs, "hindsight.requestTimeoutMs");
   assertPositiveNumber(config.hindsight.retainWallTimeoutMs, "hindsight.retainWallTimeoutMs");
   assertPositiveNumber(config.hindsight.recallMaxTokens, "hindsight.recallMaxTokens", true);
@@ -122,11 +120,9 @@ export function loadConfig(configPath?: string, home = homeDirectory()): AppConf
   config.opencodeDatabase = absolutePath(config.opencodeDatabase, home);
   config.stateDirectory = absolutePath(config.stateDirectory, home);
   config.stateDatabase = absolutePath(config.stateDatabase, home);
-  config.dirtyDirectory = absolutePath(config.dirtyDirectory, home);
   config.reportDirectory = absolutePath(config.reportDirectory, home);
   config.spoolDirectory = absolutePath(config.spoolDirectory, home);
   config.approvalFile = absolutePath(config.approvalFile, home);
-  config.hindsightEnvironmentFile = absolutePath(config.hindsightEnvironmentFile, home);
   config.hindsight.environmentFile = absolutePath(config.hindsight.environmentFile, home);
   config.hindsight.apiTokenFile = absolutePath(config.hindsight.apiTokenFile, home);
 
@@ -136,6 +132,7 @@ export function loadConfig(configPath?: string, home = homeDirectory()): AppConf
   if (process.env.PI_HINDSIGHT_API_TOKEN_FILE) config.hindsight.apiTokenFile = absolutePath(process.env.PI_HINDSIGHT_API_TOKEN_FILE, home);
   if (process.env.PI_HINDSIGHT_MAX_INFLIGHT) config.maxInflightDocuments = Number(process.env.PI_HINDSIGHT_MAX_INFLIGHT);
   if (process.env.PI_HINDSIGHT_SCAN_INTERVAL) config.scanIntervalSeconds = Number(process.env.PI_HINDSIGHT_SCAN_INTERVAL);
+  if (process.env.PI_HINDSIGHT_SETTLE_SECONDS) config.sessionSettleSeconds = Number(process.env.PI_HINDSIGHT_SETTLE_SECONDS);
   if (process.env.PI_HINDSIGHT_REQUIRE_APPROVAL !== undefined) config.requireImportApproval = process.env.PI_HINDSIGHT_REQUIRE_APPROVAL !== "0";
 
   return validateConfig(config);

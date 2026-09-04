@@ -64,6 +64,7 @@ Type=simple
 ExecStart=$NODE $ROOT/dist/src/importer/cli.js daemon --config $CONFIG_FILE
 Restart=on-failure
 RestartSec=10
+TimeoutStopSec=300
 Nice=10
 IOSchedulingClass=idle
 UMask=0077

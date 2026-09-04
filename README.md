@@ -64,14 +64,17 @@ It controls:
 - all four session locations;
 - the Codex and OpenCode databases;
 - exact session-label exclusions;
-- scan interval, import concurrency, and weak-result relevance floor;
+- scan interval, active-session settle delay, import concurrency, and weak-result relevance floor;
 - state, spool, report, and approval locations.
 
-Provider secrets are separate:
+For a single-host deployment, application/provider settings and PostgreSQL credentials use separate private files:
 
 ```text
 ~/.config/pi-hindsight-memory/hindsight.env
+~/.config/pi-hindsight-memory/postgres.env
 ```
+
+In a split-host deployment, the full file stays on the service host. The workstation needs only matching `HINDSIGHT_API_LLM_PROVIDER` and `HINDSIGHT_API_LLM_MODEL` metadata for its approval gate.
 
 Use `scripts/configure-provider.sh --model MODEL_ID` to set an OpenAI or OpenAI-compatible API key without placing the key in the repository or shell history. The provider defaults to `openai-responses`; the model and optional reasoning effort are explicit operator choices and must be supported by the selected endpoint.
 
@@ -100,6 +103,7 @@ A stopped or interrupted import is resumable. Caller-owned operation IDs and the
 ## Safety properties
 
 - Source histories are opened read-only and are never modified.
+- Active sessions must settle before normal ingestion; forced final scans remain available.
 - Active JSONL tails are retried instead of treated as complete records.
 - Sessions use stable mutable document IDs.
 - Credentials are redacted before provider requests.
@@ -126,4 +130,5 @@ See also:
 - [Operations](docs/OPERATIONS.md)
 - [Remote deployment](docs/REMOTE-DEPLOYMENT.md)
 - [Security](docs/SECURITY.md)
+- [Status integration](docs/STATUS-INTEGRATION.md)
 - [Testing](docs/TESTING.md)

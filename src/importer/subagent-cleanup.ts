@@ -1,7 +1,6 @@
 import { documentIdFor, replayOperationIdFor, sha256 } from "../common/hashing.js";
 import type { AppConfig, SessionClassification, Source } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
-import type { SessionAdapter } from "../adapters/adapter.js";
 import { errorMessage } from "../common/logging.js";
 import { configuredExclusion } from "./exclusions.js";
 import { HindsightClient, HindsightHttpError } from "../hindsight/client.js";
@@ -116,7 +115,7 @@ function targetForGeneration(config: AppConfig, state: StateDatabase, generation
   return undefined;
 }
 
-function planGenerationCleanup(config: AppConfig, state: StateDatabase, generation: GenerationRecord, target: { kind: "subagent" | "ambiguous" | "configured-exclusion" | "primary_replay"; reason: string; newOperationId?: string }): boolean {
+function planGenerationCleanup(state: StateDatabase, generation: GenerationRecord, target: { kind: "subagent" | "ambiguous" | "configured-exclusion" | "primary_replay"; reason: string; newOperationId?: string }): boolean {
   const session = state.getSession(generation.source, generation.nativeSessionId);
   const oldOperation = state.getOperation(generation.operationId);
   const job: CleanupJobRecord = {
@@ -170,7 +169,7 @@ export async function cleanupSubagents(config: AppConfig, state: StateDatabase, 
   const summary: SubagentCleanupSummary = { artifacts: state.listArtifacts().length, subagentArtifacts: state.listArtifacts("subagent").length, configuredArtifacts: state.listArtifacts("configured-exclusion").length, ambiguousArtifacts: state.listArtifacts("ambiguous").length, primaryArtifacts: state.listArtifacts("primary").length, planned: 0, remoteDeleted: 0, excluded: 0, replayed: 0 };
   for (const generation of state.listGenerations()) {
     const target = targetForGeneration(config, state, generation, groups, persistedArtifacts, options.includeAmbiguous === true);
-    if (target && planGenerationCleanup(config, state, generation, target)) summary.planned += 1;
+    if (target && planGenerationCleanup(state, generation, target)) summary.planned += 1;
   }
 
   const remoteDocuments = await client.listDocumentIds();

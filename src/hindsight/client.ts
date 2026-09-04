@@ -70,7 +70,6 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export class HindsightClient {
-  private lastToken: string | undefined;
   private bankEnsured = false;
   private bankConfigurationVerified = false;
   private extractionAvailabilityVerified = false;
@@ -88,7 +87,6 @@ export class HindsightClient {
     if (this.fixedToken !== undefined) return this.fixedToken;
     const token = (await fs.readFile(this.config.apiTokenFile, "utf8")).trim();
     if (!token) throw new Error(`Hindsight API token file is empty: ${this.config.apiTokenFile}`);
-    this.lastToken = token;
     return token;
   }
 
@@ -97,7 +95,6 @@ export class HindsightClient {
     try {
       const current = (await fs.readFile(this.config.apiTokenFile, "utf8")).trim();
       if (!current || current === previous) return false;
-      this.lastToken = current;
       return true;
     } catch { return false; }
   }
@@ -240,6 +237,20 @@ export class HindsightClient {
 
   async getOperation(operationId: string, signal?: AbortSignal): Promise<HindsightOperation> {
     return this.requestJson<HindsightOperation>("GET", this.bankUrl(`/operations/${encodeURIComponent(operationId)}`), undefined, signal);
+  }
+
+  async listOperations(status?: string, signal?: AbortSignal): Promise<HindsightOperation[]> {
+    const operations: HindsightOperation[] = [];
+    const limit = 100;
+    for (let offset = 0; ; offset += limit) {
+      const query = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+      if (status) query.set("status", status);
+      const response = await this.requestJson<{ operations?: HindsightOperation[]; total?: number }>("GET", this.bankUrl(`/operations?${query}`), undefined, signal);
+      const page = response.operations ?? [];
+      operations.push(...page);
+      if (page.length < limit || response.total !== undefined && operations.length >= response.total) break;
+    }
+    return operations;
   }
 
   async waitForOperation(operationId: string, signal?: AbortSignal, timeoutMs = this.config.operationPollTimeoutMs): Promise<HindsightOperation> {

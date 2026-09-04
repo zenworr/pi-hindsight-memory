@@ -2,7 +2,6 @@ import fs from "node:fs/promises";
 import type { AppConfig, InventoryReport, InventorySessionResult, Source } from "../common/types.js";
 import { ADAPTER_VERSION, CANONICAL_SCHEMA, REDACTION_POLICY_VERSION, SOURCES } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
-import type { SessionAdapter } from "../adapters/adapter.js";
 import { errorMessage } from "../common/logging.js";
 import { configuredExclusion } from "./exclusions.js";
 

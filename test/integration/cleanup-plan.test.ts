@@ -24,7 +24,6 @@ async function cleanupConfig(root: string) {
   const config = defaultConfig(root);
   config.stateDirectory = path.join(root, "state");
   config.stateDatabase = path.join(root, "state", "state.sqlite3");
-  config.dirtyDirectory = path.join(root, "state", "dirty");
   config.reportDirectory = path.join(root, "state", "reports");
   config.spoolDirectory = path.join(root, "state", "canonical");
   config.sourceRoots.pi = path.join(root, "pi");
