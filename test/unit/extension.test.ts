@@ -30,18 +30,30 @@ test("extension registers memory_search only after the Pi runtime starts", async
   try {
     const handlers = new Map<string, (...args: any[]) => unknown>();
     const tools: any[] = [];
+    let statusListeners = 0;
     const fakePi: any = {
       getAllTools: () => tools,
       registerTool: (tool: any) => { tools.push(tool); },
       on: (event: string, handler: (...args: any[]) => unknown) => { handlers.set(event, handler); },
-      events: { on: () => () => {}, emit: () => {} },
+      events: {
+        on: () => {
+          statusListeners += 1;
+          return () => { statusListeners -= 1; };
+        },
+        emit: () => {},
+      },
     };
     piHindsightMemory(fakePi);
     assert.equal(tools.length, 0);
+    assert.equal(statusListeners, 0);
     await handlers.get("session_start")?.({}, {});
     assert.deepEqual(tools.map((tool) => tool.name), ["memory_search"]);
+    assert.equal(statusListeners, 1);
+    await handlers.get("session_shutdown")?.({}, {});
+    assert.equal(statusListeners, 0);
     await handlers.get("session_start")?.({}, {});
     assert.equal(tools.length, 1);
+    assert.equal(statusListeners, 1);
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
     await fs.rm(directory, { recursive: true, force: true });

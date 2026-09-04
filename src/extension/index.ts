@@ -42,14 +42,18 @@ export function createMemorySearchTool(client: HindsightClient, minRelevanceScor
 export default function piHindsightMemory(pi: ExtensionAPI): void {
   const config = loadConfig();
   const client = new HindsightClient(config.hindsight);
-  const unregisterStatusProvider = registerHindsightStatusProvider(pi, config, client);
+  let unregisterStatusProvider: (() => void) | undefined;
   let toolRegistered = false;
   pi.on("session_start", () => {
+    unregisterStatusProvider ??= registerHindsightStatusProvider(pi, config, client);
     if (toolRegistered) return;
     const collision = pi.getAllTools().find((tool) => tool.name === "memory_search");
     if (collision) throw new Error(`pi-hindsight-memory refused to load: memory_search is already registered by ${collision.sourceInfo?.path ?? "another extension"}`);
     pi.registerTool(createMemorySearchTool(client, config.hindsight.minRelevanceScore));
     toolRegistered = true;
   });
-  pi.on("session_shutdown", () => { unregisterStatusProvider(); });
+  pi.on("session_shutdown", () => {
+    unregisterStatusProvider?.();
+    unregisterStatusProvider = undefined;
+  });
 }

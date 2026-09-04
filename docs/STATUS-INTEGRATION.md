@@ -62,6 +62,6 @@ interface StatusSnapshot {
 }
 ```
 
-The requester owns polling and rendering. A 15-second interval is normally sufficient. Requests have a bounded four-second collection deadline. The response never includes credentials, transcript text, recalled memory, or provider responses.
+The requester owns polling and rendering. A 15-second interval is normally sufficient. The provider is session-scoped, so a request made while Pi is starting or reloading can have no immediate responder; retry it after session startup completes. Requests have a bounded four-second collection deadline. The response never includes credentials, transcript text, recalled memory, or provider responses.
 
-`pendingConsolidation` counts extracted memory units awaiting consolidation; it is not a count of consolidation jobs. `consolidationActive` indicates that pending units and a processing Hindsight operation are both present.
+`pendingConsolidation` counts extracted memory units awaiting consolidation; it is not a count of consolidation jobs. `consolidationActive` is true only when Hindsight reports a processing operation whose task type is `consolidation`.
