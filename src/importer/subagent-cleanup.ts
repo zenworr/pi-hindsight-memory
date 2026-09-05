@@ -1,9 +1,8 @@
-import { documentIdFor, replayOperationIdFor, sha256 } from "../common/hashing.js";
+import { documentIdFor, sha256 } from "../common/hashing.js";
 import type { AppConfig, SessionClassification, Source } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
-import { errorMessage } from "../common/logging.js";
 import { configuredExclusion } from "./exclusions.js";
-import { HindsightClient, HindsightHttpError } from "../hindsight/client.js";
+import { HindsightClient, HindsightHttpError, HindsightOperationError } from "../hindsight/client.js";
 import type { CleanupJobRecord, GenerationRecord, SessionArtifactRecord, StateDatabase } from "./state-db.js";
 
 export interface ClassifiedGroup {
@@ -86,7 +85,7 @@ function cleanupJobId(generation: GenerationRecord, targetKind: CleanupJobRecord
   return sha256(["subagent-cleanup-v1", targetKind, generation.source, generation.nativeSessionId, generation.canonicalHash].join("\n"));
 }
 
-function targetForGeneration(config: AppConfig, state: StateDatabase, generation: GenerationRecord, groups: Map<string, ClassifiedGroup>, persistedArtifacts: Map<string, SessionArtifactRecord>, includeAmbiguous: boolean): { kind: "subagent" | "ambiguous" | "configured-exclusion" | "primary_replay"; reason: string; newOperationId?: string } | undefined {
+function targetForGeneration(state: StateDatabase, generation: GenerationRecord, groups: Map<string, ClassifiedGroup>, persistedArtifacts: Map<string, SessionArtifactRecord>, includeAmbiguous: boolean): { kind: "subagent" | "ambiguous" | "configured-exclusion" | "primary_replay"; reason: string; newOperationId?: string } | undefined {
   if (["excluded", "superseded"].includes(generation.state)) return undefined;
   const live = groups.get(nativeKey(generation.source, generation.nativeSessionId));
   const session = state.getSession(generation.source, generation.nativeSessionId);
@@ -103,15 +102,9 @@ function targetForGeneration(config: AppConfig, state: StateDatabase, generation
       classification = persisted.classification;
     }
   }
+  if (session?.status === "ambiguous_preserved" && classification?.kind !== "configured-exclusion" && !includeAmbiguous) return undefined;
   if (classification?.kind === "ambiguous" && !includeAmbiguous) return undefined;
   if (classification && classification.kind !== "primary") return { kind: classification.kind, reason: classification.reason };
-  if (generation.state === "submitted" || generation.state === "processing") {
-    return {
-      kind: "primary_replay",
-      reason: "Delete completed or interrupted retain before replaying the primary generation",
-      newOperationId: replayOperationIdFor(config.hindsight.bankId, documentIdFor(generation.source, generation.nativeSessionId), generation.canonicalHash, 1),
-    };
-  }
   return undefined;
 }
 
@@ -148,12 +141,13 @@ async function settleOperation(client: HindsightClient, operationId: string): Pr
   if (status === "processing" || status === "pending") {
     try { operation = await client.waitForOperation(operationId, undefined, 24 * 60 * 60 * 1000); }
     catch (error) {
-      if (!(error instanceof HindsightHttpError && error.status === 404)) throw error;
-      return "not_found";
+      if (error instanceof HindsightOperationError) return error.status;
+      throw error;
     }
     status = String(operation.status ?? "").toLowerCase();
   }
-  return status || "unknown";
+  if (!["completed", "failed", "cancelled", "error"].includes(status)) throw new Error(`Operation completion is unknown; cleanup cannot safely continue: ${operationId}`);
+  return status;
 }
 
 async function deleteDocumentIdempotently(client: HindsightClient, documentId: string): Promise<void> {
@@ -168,7 +162,7 @@ export async function cleanupSubagents(config: AppConfig, state: StateDatabase, 
   const persistedArtifacts = new Map(state.listArtifacts().map((artifact) => [artifactKey(artifact.source, artifact.nativeSessionId, artifact.locator), artifact]));
   const summary: SubagentCleanupSummary = { artifacts: state.listArtifacts().length, subagentArtifacts: state.listArtifacts("subagent").length, configuredArtifacts: state.listArtifacts("configured-exclusion").length, ambiguousArtifacts: state.listArtifacts("ambiguous").length, primaryArtifacts: state.listArtifacts("primary").length, planned: 0, remoteDeleted: 0, excluded: 0, replayed: 0 };
   for (const generation of state.listGenerations()) {
-    const target = targetForGeneration(config, state, generation, groups, persistedArtifacts, options.includeAmbiguous === true);
+    const target = targetForGeneration(state, generation, groups, persistedArtifacts, options.includeAmbiguous === true);
     if (target && planGenerationCleanup(state, generation, target)) summary.planned += 1;
   }
 
@@ -177,11 +171,11 @@ export async function cleanupSubagents(config: AppConfig, state: StateDatabase, 
     if (job.phase === "state_finalized" || options.jobIds && !options.jobIds.has(job.jobId)) continue;
     if (job.phase === "planned") {
       if (job.oldOperationId) {
-        const status = await settleOperation(client, job.oldOperationId);
-        if (["processing", "pending"].includes(status)) throw new Error(`Cleanup operation remained active: ${job.oldOperationId}`);
-        const operation = await client.getOperation(job.oldOperationId);
+        const storedStatus = state.getOperation(job.oldOperationId)?.hindsightStatus;
+        const localOnly = ["prepared", "ready", "rejected"].includes(storedStatus ?? "");
+        const terminal = ["completed", "failed", "cancelled", "error"].includes(storedStatus ?? "");
+        const status = localOnly ? "not_submitted" : terminal ? storedStatus! : await settleOperation(client, job.oldOperationId);
         state.upsertOperation({ operationId: job.oldOperationId, documentId: job.documentId, canonicalHash: job.canonicalHash ?? "", hindsightStatus: status, lastPolledAt: new Date().toISOString(), retryCount: 0, responseSummary: JSON.stringify({ cleanup: true, status }) });
-        if (String(operation.status ?? "").toLowerCase() === "failed") state.updateCleanupJob(job.jobId, "planned", `Previous operation failed; document cleanup will continue: ${errorMessage(operation.error_message ?? "unknown")}`);
       }
       if (remoteDocuments.has(job.documentId)) {
         await deleteDocumentIdempotently(client, job.documentId);

@@ -2,9 +2,10 @@ export const SOURCES = ["pi", "codex", "claude", "opencode"] as const;
 export type Source = (typeof SOURCES)[number];
 
 export const CANONICAL_SCHEMA = "agent-session-v1" as const;
-export const ADAPTER_VERSION = "0.1.0" as const;
-export const REDACTION_POLICY_VERSION = "2" as const;
-export const CLASSIFICATION_POLICY_VERSION = "2" as const;
+export const ADAPTER_VERSION = "0.2.0" as const;
+export const REDACTION_POLICY_VERSION = "3" as const;
+export const CLASSIFICATION_POLICY_VERSION = "3" as const;
+export const RETAIN_POLICY_VERSION = "2" as const;
 
 export type CanonicalRole = "system" | "user" | "assistant" | "action";
 export type Provenance = "original" | "memory-assisted";
@@ -85,6 +86,7 @@ export interface SourceFingerprint {
 }
 
 export interface AdapterLoadOptions {
+  signal?: AbortSignal;
   spoolDirectory: string;
   maxCanonicalBytes: number;
   persistedFallbackTimestamp?: string;
@@ -163,6 +165,8 @@ export interface AppConfig {
   configPath: string;
   stateDirectory: string;
   stateDatabase: string;
+  evidenceDatabase: string;
+  reviewedFactsFile: string;
   reportDirectory: string;
   spoolDirectory: string;
   approvalFile: string;

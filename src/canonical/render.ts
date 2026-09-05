@@ -45,8 +45,10 @@ export class CanonicalSpool {
     await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
     const file = path.join(directory, `${randomUUID()}.jsonl`);
     const spool = new CanonicalSpool(file, maxBytes);
-    await spool.add({ role: "system", content: `REF-ID: ${documentId}`, timestamp });
-    return spool;
+    try {
+      await spool.add({ role: "system", content: `REF-ID: ${documentId}`, timestamp });
+      return spool;
+    } catch (error) { await spool.cleanup(); throw error; }
   }
 
   async add(turn: CanonicalTurn): Promise<void> {
@@ -76,7 +78,14 @@ export class CanonicalSpool {
 
   get stats() { return { hash: this.hash.copy().digest("hex"), bytes: this.bytes, turns: this.turns, redactions: this.redactions }; }
 
-  async cleanup(): Promise<void> { await fs.promises.rm(this.path, { force: true }); }
+  async cleanup(): Promise<void> {
+    if (!this.stream.closed) {
+      const closed = once(this.stream, "close").catch(() => undefined);
+      this.stream.destroy();
+      await closed;
+    }
+    await fs.promises.rm(this.path, { force: true });
+  }
 }
 
 export async function finishCanonicalSession(args: {

@@ -4,7 +4,7 @@ import { sampleFileHash, sha256, documentIdFor } from "../common/hashing.js";
 import type { AdapterLoadOptions, CanonicalSession, CanonicalSessionMetadata, CanonicalTurn, SessionClassification, SessionReference, Source, SourceFingerprint } from "../common/types.js";
 import { ADAPTER_VERSION, CANONICAL_SCHEMA, REDACTION_POLICY_VERSION } from "../common/types.js";
 import { CanonicalSpool, finishCanonicalSession, normalizeText } from "../canonical/render.js";
-import { stripInjectedMemory } from "../canonical/injected-memory.js";
+import { stripHarnessContext, stripInjectedMemory } from "../canonical/injected-memory.js";
 
 export interface SessionAdapter {
   readonly source: Source;
@@ -22,6 +22,7 @@ export class MalformedJsonLineError extends Error {
 }
 
 export interface JsonLineOptions {
+  signal?: AbortSignal;
   maxLineBytes?: number;
   onIncompleteFinalLine?: (lineNumber: number) => void;
 }
@@ -33,7 +34,8 @@ export async function forEachJsonLine(
   options: JsonLineOptions = {},
 ): Promise<void> {
   const maxLineBytes = options.maxLineBytes ?? 256 * 1024 * 1024;
-  const input = fs.createReadStream(filePath, { encoding: "utf8", highWaterMark: 64 * 1024 });
+  options.signal?.throwIfAborted();
+  const input = fs.createReadStream(filePath, { encoding: "utf8", highWaterMark: 64 * 1024, signal: options.signal });
   let buffer = "";
   let lineNumber = 0;
   try {
@@ -41,6 +43,7 @@ export async function forEachJsonLine(
       buffer += String(chunk);
       let newline = buffer.indexOf("\n");
       while (newline !== -1) {
+        options.signal?.throwIfAborted();
         const line = buffer.slice(0, newline).replace(/\r$/, "");
         buffer = buffer.slice(newline + 1);
         lineNumber += 1;
@@ -49,7 +52,7 @@ export async function forEachJsonLine(
           try { await callback(JSON.parse(line), lineNumber); }
           catch (error) {
             if (error instanceof MalformedJsonLineError) throw error;
-            if (error instanceof SyntaxError) throw new MalformedJsonLineError(filePath, lineNumber, error.message);
+            if (error instanceof SyntaxError) throw new MalformedJsonLineError(filePath, lineNumber, "Malformed JSON record");
             throw error;
           }
         }
@@ -81,7 +84,7 @@ export async function firstJsonLine(filePath: string): Promise<unknown | undefin
       const line = buffer.slice(0, newline).replace(/\r$/, "");
       if (!line.trim()) { buffer = buffer.slice(newline + 1); continue; }
       try { return JSON.parse(line); }
-      catch (error) { throw new MalformedJsonLineError(filePath, 1, error instanceof Error ? error.message : String(error)); }
+      catch { throw new MalformedJsonLineError(filePath, 1, "Malformed JSON header"); }
     }
     // A header without a terminating newline is also provisional. The next scan will read it
     // after the writer completes the record.
@@ -182,7 +185,8 @@ export async function addTextTurn(
   provenance?: "original" | "memory-assisted",
 ): Promise<boolean> {
   if (typeof content !== "string") return false;
-  const text = stripInjectedMemory(normalizeText(content));
+  const normalized = normalizeText(content);
+  const text = stripInjectedMemory(role === "user" ? stripHarnessContext(normalized) : normalized);
   if (!text) return false;
   const turn: CanonicalTurn = { role, content: text, timestamp };
   if (nativeEntryId !== undefined) turn.native_entry_id = nativeEntryId;

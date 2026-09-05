@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-NODE=$(command -v node || true)
+NODE="${PI_HINDSIGHT_NODE:-$(command -v node || true)}"
 [[ -n "$NODE" ]] || { echo "node is required" >&2; exit 1; }
+NODE=$("$NODE" -p 'require("node:fs").realpathSync(process.execPath)')
+"$NODE" -e 'const [major,minor]=process.versions.node.split(".").map(Number);if(major<22||(major===22&&minor<19))throw new Error("Node.js 22.19 or newer is required")'
 cd "$ROOT"
 npm run build
 START=0

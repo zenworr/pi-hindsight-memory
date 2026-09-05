@@ -2,6 +2,9 @@ import fs from "node:fs/promises";
 import type { HindsightBankConfigResponse, HindsightBankStats, HindsightConfig, HindsightOperation, HindsightVersionResponse, RecallResponse } from "../common/types.js";
 import type { CanonicalSession } from "../common/types.js";
 import { errorMessage } from "../common/logging.js";
+import { redactText } from "../canonical/redact.js";
+import { RETAIN_POLICY_VERSION } from "../common/types.js";
+import { expectedRetainMission } from "../common/retention-policy.js";
 
 export interface FetchLike {
   (input: string | URL, init?: RequestInit): Promise<Response>;
@@ -15,6 +18,21 @@ export class HindsightHttpError extends Error {
 }
 
 export class HindsightRateLimitError extends HindsightHttpError {}
+
+export class HindsightOperationError extends Error {
+  constructor(readonly status: string, readonly operationId: string) {
+    super(`Hindsight operation ${operationId} ended ${status}`);
+  }
+}
+
+export class HindsightPollTimeoutError extends Error {}
+
+export interface HindsightDocument {
+  id: string;
+  content_hash?: string;
+  original_text?: string;
+  retain_params?: { metadata?: Record<string, string> };
+}
 
 export interface RetainItem {
   content: string;
@@ -180,7 +198,8 @@ export class HindsightClient {
       if (extractionMode === "chunks" || extractionMode !== "concise" && extractionMode !== "verbose") throw new Error(`Hindsight conversation strategy has invalid extraction mode: ${String(extractionMode)}`);
       if (config.enable_observations !== true) throw new Error("Hindsight observations are disabled for the production bank");
       if (typeof config.observations_mission !== "string" || !config.observations_mission.trim()) throw new Error("Hindsight observations mission is missing");
-      if (typeof config.retain_mission !== "string" || !config.retain_mission.includes("global")) throw new Error("Hindsight global retain mission is missing");
+      const effectiveMission = (conversation as Record<string, unknown>).retain_mission ?? config.retain_mission;
+      if (effectiveMission !== await expectedRetainMission()) throw new Error("Hindsight effective conversation mission does not match the required evidence policy");
       if (config.retain_default_strategy !== "conversation") throw new Error("Hindsight default retain strategy is not conversation");
       if (options.bulk && config.enable_auto_consolidation !== false) throw new Error("Hindsight auto-consolidation must be disabled during bulk import");
     }
@@ -220,7 +239,8 @@ export class HindsightClient {
       adapter_version: session.metadata.adapter_version,
       redaction_policy_version: session.metadata.redaction_policy_version,
       canonical_hash: session.canonicalHash,
-    }).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+      retain_policy_version: RETAIN_POLICY_VERSION,
+    }).filter((entry): entry is [string, string] => typeof entry[1] === "string").map(([key, value]) => [key, redactText(value).text]));
     const item: RetainItem = {
       content,
       context: `Global coding-agent session from ${session.source}`,
@@ -262,11 +282,11 @@ export class HindsightClient {
         throw new HindsightHttpError(404, "GET", this.bankUrl(`/operations/${encodeURIComponent(operationId)}`), "");
       }
       if (["completed", "failed", "cancelled", "error"].includes(status)) {
-        if (status !== "completed") throw new Error(`Hindsight operation ${operationId} ended ${status}: ${operation.error_message ?? "unknown error"}`);
+        if (status !== "completed") throw new HindsightOperationError(status, operationId);
         return operation;
       }
       if (signal?.aborted) throw new Error(`Hindsight operation ${operationId} was aborted`);
-      if (Date.now() - started >= timeoutMs) throw new Error(`Hindsight operation ${operationId} exceeded ${timeoutMs} ms`);
+      if (Date.now() - started >= timeoutMs) throw new HindsightPollTimeoutError(`Hindsight operation ${operationId} is still pending after ${timeoutMs} ms`);
       await sleep(Math.min(this.config.operationPollMs, Math.max(1, timeoutMs - (Date.now() - started))), signal);
     }
   }
@@ -302,15 +322,24 @@ export class HindsightClient {
   }
 
   async listDocumentIds(signal?: AbortSignal): Promise<Set<string>> {
-    const ids = new Set<string>();
+    return new Set((await this.listDocuments(signal)).map((document) => document.id));
+  }
+
+  async listDocuments(signal?: AbortSignal): Promise<HindsightDocument[]> {
+    const documents: HindsightDocument[] = [];
     const limit = 100;
     for (let offset = 0; ; offset += limit) {
-      const response = await this.requestJson<{ items?: Array<{ id?: string; document_id?: string }>; total?: number }>("GET", this.bankUrl(`/documents?limit=${limit}&offset=${offset}`), undefined, signal);
+      const response = await this.requestJson<{ items?: HindsightDocument[]; total?: number }>("GET", this.bankUrl(`/documents?limit=${limit}&offset=${offset}`), undefined, signal);
       const items = response.items ?? [];
-      for (const item of items) { const id = item.id ?? item.document_id; if (id) ids.add(id); }
-      if (items.length < limit || response.total !== undefined && ids.size >= response.total) break;
+      documents.push(...items);
+      if (items.length < limit || response.total !== undefined && documents.length >= response.total) break;
     }
-    return ids;
+    return documents;
+  }
+
+  async getDocument(documentId: string, signal?: AbortSignal): Promise<HindsightDocument | undefined> {
+    try { return await this.requestJson<HindsightDocument>("GET", this.bankUrl(`/documents/${encodeURIComponent(documentId)}`), undefined, signal); }
+    catch (error) { if (error instanceof HindsightHttpError && error.status === 404) return undefined; throw error; }
   }
 
   async cancelOperation(operationId: string, signal?: AbortSignal): Promise<boolean> {

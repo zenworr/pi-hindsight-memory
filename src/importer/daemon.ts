@@ -8,6 +8,9 @@ import { DaemonLock } from "./lock.js";
 import { sleep } from "./scheduler.js";
 import { StateDatabase } from "./state-db.js";
 import { ImportWorker } from "./worker.js";
+import { verifyFullImport } from "./verify.js";
+import { redactText } from "../canonical/redact.js";
+import { removePendingPayload } from "./pending-payload.js";
 
 export interface DaemonOptions { once?: boolean; maxMs?: number; scanFirst?: boolean; }
 
@@ -16,7 +19,11 @@ export async function runImportCycle(config: AppConfig, state: StateDatabase, cl
   await worker.preflight(signal);
   const scanResult = await scan(config, state, { signal });
   const workerResult = await worker.runOnce(Math.max(1000, config.maxInflightDocuments * 100), signal);
-  logger.info("Import cycle complete", { discovered: scanResult.discovered, queued: scanResult.queued, unchanged: scanResult.unchanged, active: scanResult.active, completed: workerResult.completed, failed: workerResult.failed, deferred: workerResult.deferred });
+  if (state.pendingWorkCount() === 0 && !signal?.aborted) {
+    const verification = await verifyFullImport(config, client, { signal });
+    if (!verification.documentAccountingReady) throw new Error("Remote document accounting or hashes differ from importer state; run verify-import before repair");
+  }
+  logger.info("Import cycle complete", { discovered: scanResult.discovered, queued: scanResult.queued, unchanged: scanResult.unchanged, active: scanResult.active, completed: workerResult.completed, failed: workerResult.failed, deferred: workerResult.deferred, scanErrors: scanResult.errors });
   return { scan: scanResult, worker: workerResult };
 }
 
@@ -25,9 +32,20 @@ export async function runDaemon(config: AppConfig, options: DaemonOptions = {}):
   const lock = new DaemonLock(path.join(config.stateDirectory, "daemon.lock"));
   lock.acquire();
   const state = new StateDatabase(config.stateDatabase);
+  try {
+    for (const name of await fs.readdir(path.join(config.spoolDirectory, "pending"))) {
+      if (!/^[a-f0-9-]+\.json$/.test(name)) continue;
+      const id = name.slice(0, -5);
+      if (state.getOperation(id)?.hindsightStatus === "completed") await removePendingPayload(config.spoolDirectory, id);
+    }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") logger.warn("Completed payload cleanup requires attention"); }
   const client = new HindsightClient(config.hindsight);
   const abort = new AbortController();
   const stop = () => abort.abort();
+  let phase = "starting";
+  let lastError: string | undefined;
+  state.heartbeat(phase);
+  const heartbeat = setInterval(() => state.heartbeat(phase, lastError), 15_000);
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
@@ -39,20 +57,37 @@ export async function runDaemon(config: AppConfig, options: DaemonOptions = {}):
     let nextFullScan = 0;
     while (!abort.signal.aborted) {
       const paused = await isPaused(config);
+      phase = paused ? "paused" : "idle";
       const shouldRun = !paused && Date.now() >= nextFullScan;
       if (shouldRun) {
-        try { await runImportCycle(config, state, client, logger, abort.signal); }
-        catch (error) { if (!abort.signal.aborted) logger.error("Import cycle failed", { error: errorMessage(error) }); }
+        phase = "working";
+        try { await runImportCycle(config, state, client, logger, abort.signal); lastError = undefined; }
+        catch (error) {
+          if (!abort.signal.aborted) {
+            lastError = redactText(errorMessage(error)).text;
+            state.heartbeat("error", lastError);
+            logger.error("Import cycle failed", { error: lastError });
+          }
+        }
         nextFullScan = Date.now() + config.scanIntervalSeconds * 1000;
       } else if (!paused && state.pendingWorkCount() > 0) {
+        phase = "working";
         try {
           const worker = new ImportWorker(config, state, client, logger);
           await worker.runOnce(Math.max(1000, config.maxInflightDocuments * 100), abort.signal);
-        } catch (error) { if (!abort.signal.aborted) logger.error("Queued import failed", { error: errorMessage(error) }); }
+        } catch (error) {
+          if (!abort.signal.aborted) {
+            lastError = redactText(errorMessage(error)).text;
+            state.heartbeat("error", lastError);
+            logger.error("Queued import failed", { error: lastError });
+          }
+        }
       }
       try { await sleep(Math.min(1000, Math.max(100, nextFullScan - Date.now())), abort.signal); } catch { break; }
     }
   } finally {
+    clearInterval(heartbeat);
+    state.heartbeat("stopped");
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
     state.close();
@@ -67,11 +102,11 @@ export async function drainImporter(config: AppConfig, maxMs?: number, scanFirst
   const state = new StateDatabase(config.stateDatabase);
   const client = new HindsightClient(config.hindsight);
   try {
-    const worker = new ImportWorker(config, state, client, logger, true);
-    await worker.preflight();
-    if (scanFirst) await scan(config, state);
+    const worker = new ImportWorker(config, state, client, logger, false);
+    if (scanFirst) { await worker.preflight(); await scan(config, state); }
     const result = await worker.drain(maxMs ?? config.hindsight.operationPollTimeoutMs);
     logger.info("Importer drained", { ...result });
+    if (result.failed > 0) throw new Error("Importer drain finished with failed generations");
   } finally { state.close(); lock.release(); }
 }
 

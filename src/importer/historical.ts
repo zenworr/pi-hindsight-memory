@@ -23,7 +23,7 @@ export async function importAll(config: AppConfig, state: StateDatabase, client:
     if (scanResult.discovered === 0) break;
     summary.scanned += scanResult.discovered;
     summary.queued += scanResult.queued;
-    const cohort = await worker.runOnce(cohortSize);
+    const cohort = await worker.drain(Math.max(1, maxMs - (Date.now() - started)));
     if (cohort.failed > 0) throw new Error(`historical import stopped after ${cohort.failed} failed generation(s)`);
     if (cohort.completed > 0) {
       summary.imported += cohort.completed;

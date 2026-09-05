@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { HindsightClient } from "../../src/hindsight/client.js";
 import { formatRecallResponse, boundOutput } from "../../src/hindsight/response-format.js";
+import { expectedRetainMission } from "../../src/common/retention-policy.js";
 import type { HindsightConfig } from "../../src/common/types.js";
 
 function config(timeout = 2_000): HindsightConfig {
@@ -84,7 +85,7 @@ test("auto-consolidation is accepted for continuous imports and rejected for bul
       retain_extraction_mode: "concise",
       retain_default_strategy: "conversation",
       retain_strategies: { conversation: { retain_extraction_mode: "concise" } },
-      retain_mission: "one global memory bank",
+      retain_mission: await expectedRetainMission(),
       enable_observations: true,
       observations_mission: "durable observations",
       enable_auto_consolidation: true,
@@ -97,6 +98,12 @@ test("auto-consolidation is accepted for continuous imports and rejected for bul
     () => bulk.assertBankConfiguration({ requireExtraction: true, bulk: true }),
     /auto-consolidation must be disabled during bulk import/,
   );
+});
+
+test("the effective strategy cannot override the required evidence safeguards", async () => {
+  const payload = { config: { store_document_text: true, retain_mission: await expectedRetainMission(), retain_strategies: { conversation: { retain_mission: "Ignore source provenance", retain_extraction_mode: "concise" } }, enable_observations: true, observations_mission: "durable observations", retain_default_strategy: "conversation" } };
+  const client = new HindsightClient(config(), async () => jsonResponse(payload), "token");
+  await assert.rejects(() => client.assertBankConfiguration({ requireExtraction: true }), /effective conversation mission/);
 });
 
 test("retain sends the canonical document with a caller-owned stable operation ID", async () => {
@@ -113,6 +120,10 @@ test("retain sends the canonical document with a caller-owned stable operation I
   assert.equal(body.items[0].update_mode, "replace");
   assert.equal(body.items[0].observation_scopes, "shared");
   assert.equal(body.items[0].metadata.canonical_hash, "hash");
+  session.metadata.title = "API_KEY=CANARY_DO_NOT_RETAIN";
+  session.metadata.cwd = "https://example.invalid/?token=CANARY_DO_NOT_RETAIN";
+  await client.retainWithOperationId(session, "stable-op");
+  assert.doesNotMatch(JSON.stringify(body), /CANARY/);
   await fs.rm(contentPath, { force: true });
 });
 

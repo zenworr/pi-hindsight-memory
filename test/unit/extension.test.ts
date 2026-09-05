@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { StateDatabase } from "../../src/importer/state-db.js";
 import { defaultConfig } from "../../src/common/config.js";
 import { HindsightClient } from "../../src/hindsight/client.js";
 import piHindsightMemory, { createMemorySearchTool } from "../../src/extension/index.js";
@@ -82,7 +83,11 @@ test("runtime collision check refuses an existing memory_search tool", async () 
 });
 
 test("status provider exposes queue and service health without secrets", async () => {
-  const config = defaultConfig("/home/test");
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-status-"));
+  const config = defaultConfig(root);
+  const state = new StateDatabase(config.stateDatabase);
+  state.heartbeat("idle");
+  state.close();
   const executor = {
     async exec() { return { stdout: "2|1|3|4|5\n", stderr: "", code: 0 }; },
   };
@@ -101,7 +106,9 @@ test("status provider exposes queue and service health without secrets", async (
     async listOperations() { return [{ id: "op-1", status: "processing", task_type: "consolidation" }]; },
   } as unknown as HindsightClient;
   const direct = await collectHindsightStatus(config, executor, statusClient);
-  assert.deepEqual(direct.importer, { queued: 2, submitted: 1, processing: 3, failed: 4, cleanupPending: 5 });
+  assert.deepEqual([direct.importer.queued, direct.importer.submitted, direct.importer.processing, direct.importer.failed, direct.importer.cleanupPending], [2, 1, 3, 4, 5]);
+  assert.equal(direct.importer.running, true);
+  assert.equal(direct.importer.scanErrors, 0);
   assert.equal(direct.service.documents, 42);
   assert.equal(direct.service.consolidationActive, true);
   assert.deepEqual(direct.issues, []);
@@ -130,6 +137,7 @@ test("status provider exposes queue and service health without secrets", async (
   assert.equal((await response)?.service.documents, 42);
   unregister();
   assert.equal(removed, true);
+  await fs.rm(root, { recursive: true, force: true });
 });
 
 test("empty memory search queries fail before contacting Hindsight", async () => {

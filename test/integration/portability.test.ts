@@ -83,7 +83,8 @@ test("Linux importer service can depend on a remote tunnel", async () => {
   await fs.mkdir(path.join(configHome, "pi-hindsight-memory"), { recursive: true });
   await fs.writeFile(path.join(configHome, "pi-hindsight-memory", "config.json"), "{}\n", { mode: 0o600 });
   await fs.writeFile(path.join(bin, "uname"), "#!/usr/bin/env bash\necho Linux\n", { mode: 0o700 });
-  for (const name of ["node", "npm", "systemctl"]) await fs.writeFile(path.join(bin, name), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
+  await fs.symlink(process.execPath, path.join(bin, "node"));
+  for (const name of ["npm", "systemctl"]) await fs.writeFile(path.join(bin, name), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_IMPORTER_DEPENDENCY: "pi-hindsight-tunnel.service" };
   try {
     const result = run("install-importer-service.sh", [], env);
@@ -92,6 +93,7 @@ test("Linux importer service can depend on a remote tunnel", async () => {
     assert.match(unit, /^Wants=network-online\.target pi-hindsight-tunnel\.service$/m);
     assert.match(unit, /^After=network-online\.target pi-hindsight-tunnel\.service$/m);
     assert.match(unit, /^TimeoutStopSec=300$/m);
+    assert.ok(unit.includes(`ExecStart=${await fs.realpath(process.execPath)} `));
 
     const direct = run("install-importer-service.sh", [], { ...env, PI_HINDSIGHT_IMPORTER_DEPENDENCY: "" });
     assert.equal(direct.status, 0, direct.stderr);
@@ -178,7 +180,8 @@ test("macOS importer service stays staged until explicit activation", async () =
   await fs.mkdir(path.join(configHome, "pi-hindsight-memory"), { recursive: true });
   await fs.writeFile(path.join(configHome, "pi-hindsight-memory", "config.json"), "{}\n", { mode: 0o600 });
   await fs.writeFile(path.join(bin, "uname"), "#!/usr/bin/env bash\necho Darwin\n", { mode: 0o700 });
-  for (const name of ["node", "npm", "plutil"]) await fs.writeFile(path.join(bin, name), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
+  await fs.symlink(process.execPath, path.join(bin, "node"));
+  for (const name of ["npm", "plutil"]) await fs.writeFile(path.join(bin, name), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
   const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: stateHome, PATH: `${bin}:${process.env.PATH}` };
   try {
     const result = run("install-importer-service.sh", [], env);

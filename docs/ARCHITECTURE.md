@@ -21,7 +21,11 @@ The sanitized snapshot contains configured URLs, bank identity, importer generat
 
 The importer runs outside Pi. One periodic scanner handles all four agents, renders the same canonical format, compares hashes, and queues asynchronous Hindsight operations. A changed session fingerprint must remain unchanged across scanner observations for the configured settle delay before normal processing; an explicit forced scan bypasses that delay for final catch-up.
 
-Its SQLite state database is an index of work state. It does not replace native histories and does not store full canonical documents.
+Its SQLite state database records desired generations, acknowledged remote hashes and policy versions, operation state, scan errors, and a daemon heartbeat. It does not replace native histories.
+
+Pending operations have immutable redacted payload files. Preparation, deletion during reviewed repair, submission, and completion use durable checkpoints. A failed operation keeps its payload for retry. Successful operations remove it. These background writes do not run in Pi's foreground lifecycle.
+
+A separate SQLite FTS5 index stores source-linked transcript passages for explicit retrieval. It can be rebuilt without model calls. Reviewed current facts are optional, dated administrative records; they are not inferred automatically.
 
 ### Hindsight
 
@@ -46,8 +50,11 @@ POST /v1/default/banks/<configured-bank>/memories/recall
           ▼
 world + experience + observation results
           │
+          ├── local transcript passages
+          └── optional reviewed facts
+          │
           ▼
-bounded text with source facts and provenance
+bounded text with explicit provenance and recording dates
 ```
 
 The formatter does not call `reflect`. Hindsight result scores are relative. The formatter rejects results below the configurable `hindsight.minRelevanceScore` floor.
@@ -67,4 +74,7 @@ No session is final. A later scan can replace the same document after an old ses
 - A source parsing failure affects one source session, not the daemon.
 - An Hindsight outage leaves the generation queued or failed for retry.
 - A stale or missing source document is retained in Hindsight.
-- A Hindsight operation ID is deterministic for one bank/document/canonical hash, so a lost HTTP response is safe to retry.
+- A lost response retries the same immutable payload and operation ID.
+- A terminal failure, content reversion, or reviewed policy repair gets a fresh replay identity.
+- An uncertain remote outcome continues to block newer versions of that document.
+- Idle import cycles verify remote document accounting and hashes, so divergence is not hidden behind an empty queue.

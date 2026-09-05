@@ -85,8 +85,7 @@ export class ClaudeAdapter implements SessionAdapter {
   async *discover(): AsyncIterable<SessionReference> {
     const files = await walkFiles(this.root);
     for (const sourcePath of files) {
-      let first: unknown;
-      try { first = await firstJsonLine(sourcePath); } catch { first = undefined; }
+      const first = await firstJsonLine(sourcePath);
       const meta = metaFor(sourcePath, first);
       const identityIsFallback = !meta.id;
       const nativeId = meta.id ?? stableFallbackId(this.source, path.relative(this.root, sourcePath), meta.startedAt);
@@ -131,13 +130,14 @@ export class ClaudeAdapter implements SessionAdapter {
         const parentId = stringOrUndefined(record.parentUuid ?? undefined);
         memoryPending = parentId ? pendingByEntry.get(parentId) ?? false : sequentialPending;
         const provenance = memoryPending ? "memory-assisted" as const : "original" as const;
-        for (const text of textParts(content)) await addTextTurn(spool, role, text, timestamp, nativeId, parentId, role === "assistant" ? provenance : undefined);
+        for (const text of textParts(content)) {
+          if (await addTextTurn(spool, role, text, timestamp, nativeId, parentId, role === "assistant" ? provenance : undefined) && role === "user") memoryPending = false;
+        }
         for (const block of blocks) await addTextTurn(spool, "action", actionText(block.name, block.input), timestamp, nativeId, parentId);
-        if (memoryPending && textParts(content).length > 0) memoryPending = false;
         if (hasToolCall(content) || blocks.some((block) => isMemorySearchToolName(block.name))) memoryPending = true;
         pendingByEntry.set(nativeId, memoryPending);
         sequentialPending = memoryPending;
-      });
+      }, { signal: options.signal });
       return await completeSession({ source: this.source, nativeSessionId: nativeId, sourceLocator: sourcePath, metadata, startedAt: meta.startedAt, updatedAt, spool, options, classification: sessionClassification });
     } catch (error) {
       await spool.cleanup().catch(() => undefined);

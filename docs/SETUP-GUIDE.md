@@ -87,9 +87,11 @@ The defaults are:
 }
 ```
 
+For original transcript search, reviewed facts, and degraded operation, see [Memory retrieval](MEMORY-RETRIEVAL.md). For an existing installation affected by a policy upgrade, use [Historical repair](HISTORICAL-REPAIR.md), not the new-bank import sequence.
+
 The generated file contains absolute paths instead of `~`. A normal scan defers a changed session until the same fingerprint has been observed unchanged for `sessionSettleSeconds`; this avoids repeatedly replacing a document while an agent is actively writing it. With the default five-minute scan interval, a changed session normally needs two matching observations before ingestion. `minRelevanceScore` is a starting floor for weak nearest-neighbor results, not a confidence value. Adjust it only after testing known and unanswerable queries against the local corpus.
 
-OpenCode documents the same `~/.local/share/opencode` storage location on macOS and Linux. Initial configuration honors `PI_CODING_AGENT_DIR`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `XDG_DATA_HOME`. You can also edit any generated path directly.
+OpenCode documents the same `~/.local/share/opencode` storage location on macOS and Linux. Initial configuration honors `PI_CODING_AGENT_DIR`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `XDG_DATA_HOME`. You can also edit any generated path directly. If Codex sessions exist, the configured label database must be readable and have supported name or title columns; errors block discovery instead of silently bypassing label exclusions.
 
 To exclude known generated sessions, add exact labels only:
 
@@ -350,6 +352,8 @@ scripts/install-importer-service.sh --start
 scripts/importer-service.sh status
 scripts/install-backup-schedule.sh
 ```
+
+The service installer records the resolved physical Node executable, not a mutable shell alias or symlink. Set `PI_HINDSIGHT_NODE=/absolute/path/to/node` before installation to select a specific runtime. Reinstall the service deliberately after changing that runtime.
 
 Fully exit and restart each existing Pi process. Do not rely on `/reload` after installing or upgrading the package because a process that started with an older Pi runtime can keep stale extension state. Verify that exactly one active tool is named `memory_search` and that it comes from `pi-hindsight-memory`. The extension checks for that tool-name collision before registration.
 

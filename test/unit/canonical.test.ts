@@ -64,4 +64,26 @@ test("actions are compact, bounded, and redacted", () => {
   assert.ok(Buffer.byteLength(action, "utf8") <= 800);
 });
 
+test("common shell, JSON, and signed URL secrets are removed before actions leave the host", () => {
+  const examples = [
+    "export DATABASE_PASSWORD=CANARY_DO_NOT_RETAIN",
+    "API_KEY=CANARY_DO_NOT_RETAIN",
+    "DATABASE_PASSWORD=\"firstpart CANARY_DO_NOT_RETAIN\"",
+    JSON.stringify({ password: 'firstpart"CANARY_DO_NOT_RETAIN' }),
+    JSON.stringify({ dbPassword: "CANARY_DO_NOT_RETAIN" }),
+    "https://example.invalid/path?X-Amz-Signature=CANARY_DO_NOT_RETAIN",
+    "https://example.invalid/path?X-Goog-Signature=CANARY_DO_NOT_RETAIN",
+    "Bearer CANARY123",
+    "command; TOKEN=CANARY_DO_NOT_RETAIN other-command",
+    "{\"password\":\"CANARY_DO_NOT_RETAIN\",\"key\":\"ordinary\"}",
+  ];
+  for (const text of examples) {
+    const redacted = redactText(text).text;
+    assert.doesNotMatch(redacted, /CANARY/, text);
+    assert.doesNotMatch(actionText("bash", { command: text }), /CANARY/, text);
+    assert.equal(redactText(redacted).text, redacted, "redaction is idempotent");
+  }
+  assert.equal(redactText("token count: 120; password policy: strong; normal=value").text, "token count: 120; password policy: strong; normal=value");
+});
+
 test("hash helper is stable", () => { assert.equal(sha256("abc"), sha256("abc")); });

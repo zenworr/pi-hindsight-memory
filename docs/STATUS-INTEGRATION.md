@@ -46,6 +46,16 @@ interface StatusSnapshot {
     processing: number;
     failed: number;
     cleanupPending: number;
+    running: boolean;
+    paused: boolean;
+    heartbeatAt?: string;
+    phase?: string;
+    lastError?: string;
+    scanErrors: number;
+    deferred: number;
+    unprocessed: number;
+    staleSources: number;
+    uncertain: number;
   };
   service: {
     healthy: boolean;
@@ -63,5 +73,7 @@ interface StatusSnapshot {
 ```
 
 The requester owns polling and rendering. A 15-second interval is normally sufficient. The provider is session-scoped, so a request made while Pi is starting or reloading can have no immediate responder; retry it after session startup completes. Requests have a bounded four-second collection deadline. The response never includes credentials, transcript text, recalled memory, or provider responses.
+
+Importer issues include pause, missing or stale heartbeat, stale scans, recorded cycle errors, source errors, and uncertain remote operations. `deferred` counts sessions waiting for a stable source fingerprint; it is informational, not a failed operation. A consumer can display it as a separate settling count.
 
 `pendingConsolidation` counts extracted memory units awaiting consolidation; it is not a count of consolidation jobs. `consolidationActive` is true only when Hindsight reports a processing operation whose task type is `consolidation`.

@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import fs from "node:fs";
 import path from "node:path";
-import { CLASSIFICATION_POLICY_VERSION } from "../common/types.js";
+import { CLASSIFICATION_POLICY_VERSION, RETAIN_POLICY_VERSION } from "../common/types.js";
 import type { GenerationState, SessionClassification, Source, SourceFingerprint } from "../common/types.js";
 
 export interface SessionStateRecord {
@@ -13,6 +13,8 @@ export interface SessionStateRecord {
   sourceMtime: number;
   sourceFingerprint: SourceFingerprint;
   canonicalHash?: string;
+  acknowledgedHash?: string;
+  acknowledgedPolicy?: string;
   canonicalBytes?: number;
   canonicalTurns?: number;
   canonicalSchema?: string;
@@ -73,6 +75,8 @@ export interface GenerationRecord {
   completedAt?: string;
   attemptCount: number;
   error?: string;
+  retainPolicyVersion?: string;
+  repair?: boolean;
 }
 
 export interface OperationRecord {
@@ -264,6 +268,22 @@ export class StateDatabase {
     }
     const settleMigration = this.db.prepare("SELECT version FROM schema_migrations WHERE version = 3").get();
     if (!settleMigration) this.db.prepare("INSERT INTO schema_migrations(version, applied_at) VALUES (3, ?)").run(new Date().toISOString());
+    if (!this.db.prepare("SELECT version FROM schema_migrations WHERE version=4").get()) {
+      this.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE sessions ADD COLUMN acknowledged_hash TEXT;
+          ALTER TABLE sessions ADD COLUMN acknowledged_policy TEXT;
+          ALTER TABLE generations ADD COLUMN retain_policy_version TEXT NOT NULL DEFAULT '1';
+          ALTER TABLE generations ADD COLUMN repair INTEGER NOT NULL DEFAULT 0;
+          UPDATE sessions SET acknowledged_hash=(SELECT canonical_hash FROM generations g WHERE g.source=sessions.source AND g.native_session_id=sessions.native_session_id AND g.state='completed' ORDER BY g.completed_at DESC,g.queued_at DESC LIMIT 1);
+          UPDATE sessions SET acknowledged_policy='1' WHERE acknowledged_hash IS NOT NULL;
+          UPDATE generations SET state='submitted' WHERE state='failed' AND EXISTS (SELECT 1 FROM operations o WHERE o.operation_id=generations.operation_id AND COALESCE(o.hindsight_status,'unknown') NOT IN ('completed','failed','cancelled','error'));
+          CREATE TABLE scan_errors (source TEXT NOT NULL, locator TEXT NOT NULL, error TEXT NOT NULL, observed_at TEXT NOT NULL, PRIMARY KEY(source,locator));
+          CREATE TABLE daemon_status (id INTEGER PRIMARY KEY CHECK(id=1), pid INTEGER NOT NULL, heartbeat_at TEXT NOT NULL, phase TEXT NOT NULL, last_error TEXT);
+        `);
+        this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (4,?)").run(new Date().toISOString());
+      });
+    }
   }
 
   close(): void { this.db.close(); }
@@ -274,6 +294,12 @@ export class StateDatabase {
     catch (error) { try { this.db.exec("ROLLBACK"); } catch { /* preserve original error */ } throw error; }
   }
 
+  durableTransaction<T>(fn: () => T): T {
+    this.db.exec("PRAGMA synchronous = FULL");
+    try { return this.transaction(fn); }
+    finally { this.db.exec("PRAGMA synchronous = NORMAL"); }
+  }
+
   upsertSource(source: Source, root: string): void {
     this.db.prepare(`INSERT INTO sources(source, root, enabled) VALUES (?, ?, 1)
       ON CONFLICT(source) DO UPDATE SET root=excluded.root`).run(source, root);
@@ -282,6 +308,23 @@ export class StateDatabase {
   markScanStarted(source: Source, at: string): void { this.db.prepare("UPDATE sources SET last_scan_started_at=? WHERE source=?").run(at, source); }
   markScanCompleted(source: Source, at: string, watermark?: string): void { this.db.prepare("UPDATE sources SET last_scan_completed_at=?, watermark=?, last_error=NULL WHERE source=?").run(at, watermark ?? null, source); }
   markScanError(source: Source, error: string): void { this.db.prepare("UPDATE sources SET last_error=? WHERE source=?").run(error.slice(0, 2000), source); }
+
+  recordScanError(source: Source, locator: string, error: string): void {
+    this.db.prepare("INSERT INTO scan_errors(source,locator,error,observed_at) VALUES (?,?,?,?) ON CONFLICT(source,locator) DO UPDATE SET error=excluded.error,observed_at=excluded.observed_at").run(source, locator, error.slice(0, 1000), new Date().toISOString());
+    this.markScanError(source, error);
+  }
+
+  clearScanError(source: Source, locator: string): void {
+    this.db.prepare("DELETE FROM scan_errors WHERE source=? AND locator=?").run(source, locator);
+  }
+
+  heartbeat(phase: string, error?: string): void {
+    this.db.prepare("INSERT INTO daemon_status(id,pid,heartbeat_at,phase,last_error) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,phase=excluded.phase,last_error=excluded.last_error").run(process.pid, new Date().toISOString(), phase, error?.slice(0, 1000) ?? null);
+  }
+
+  acknowledgeGeneration(generation: GenerationRecord): void {
+    this.db.prepare("UPDATE sessions SET acknowledged_hash=?,acknowledged_policy=?,status=CASE WHEN canonical_hash=? AND status IN ('discovered','imported') THEN 'imported' ELSE status END WHERE source=? AND native_session_id=?").run(generation.canonicalHash, generation.retainPolicyVersion ?? RETAIN_POLICY_VERSION, generation.canonicalHash, generation.source, generation.nativeSessionId);
+  }
 
   observeScanCandidate(source: Source, nativeSessionId: string, fingerprint: string, observedAt: string, settleMs: number): boolean {
     return this.transaction(() => {
@@ -455,6 +498,8 @@ export class StateDatabase {
       sourceMtime: Number(row.source_mtime),
       sourceFingerprint: fingerprint,
       canonicalHash: nullableString(row.canonical_hash),
+      acknowledgedHash: nullableString(row.acknowledged_hash),
+      acknowledgedPolicy: nullableString(row.acknowledged_policy),
       canonicalBytes: row.canonical_bytes == null ? undefined : Number(row.canonical_bytes),
       canonicalTurns: row.canonical_turns == null ? undefined : Number(row.canonical_turns),
       canonicalSchema: nullableString(row.canonical_schema),
@@ -472,14 +517,17 @@ export class StateDatabase {
   }
 
   upsertGeneration(record: GenerationRecord): void {
-    this.db.prepare(`INSERT INTO generations(source,native_session_id,canonical_hash,operation_id,state,queued_at,submitted_at,completed_at,attempt_count,error)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    this.db.prepare(`INSERT INTO generations(source,native_session_id,canonical_hash,operation_id,state,queued_at,submitted_at,completed_at,attempt_count,error,retain_policy_version,repair)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(source,native_session_id,canonical_hash) DO UPDATE SET
       operation_id=excluded.operation_id,state=excluded.state,queued_at=excluded.queued_at,submitted_at=excluded.submitted_at,
-      completed_at=excluded.completed_at,attempt_count=excluded.attempt_count,error=excluded.error`).run(
+      completed_at=excluded.completed_at,attempt_count=excluded.attempt_count,error=excluded.error,
+      retain_policy_version=excluded.retain_policy_version,repair=excluded.repair`).run(
       record.source, record.nativeSessionId, record.canonicalHash, record.operationId, record.state, record.queuedAt,
       record.submittedAt ?? null, record.completedAt ?? null, record.attemptCount, record.error ?? null,
+      record.retainPolicyVersion ?? RETAIN_POLICY_VERSION, record.repair ? 1 : 0,
     );
+    if (record.state === "completed") this.acknowledgeGeneration(record);
   }
 
   releaseBudget(operationId: string): void {
@@ -593,7 +641,7 @@ export class StateDatabase {
   }
 
   resetFailed(): number {
-    const result = this.db.prepare("UPDATE generations SET state='queued', error=NULL WHERE state='failed' AND EXISTS (SELECT 1 FROM sessions WHERE sessions.source=generations.source AND sessions.native_session_id=generations.native_session_id AND sessions.classification='primary')").run();
+    const result = this.db.prepare("UPDATE generations SET state='queued', attempt_count=0, error=NULL WHERE state='failed' AND EXISTS (SELECT 1 FROM sessions WHERE sessions.source=generations.source AND sessions.native_session_id=generations.native_session_id AND sessions.classification='primary')").run();
     return Number(result.changes);
   }
 
@@ -618,6 +666,10 @@ export class StateDatabase {
 
   setGenerationState(source: Source, nativeSessionId: string, hash: string, state: GenerationState, fields: { submittedAt?: string; completedAt?: string; attemptCount?: number; error?: string } = {}): void {
     this.db.prepare("UPDATE generations SET state=?, submitted_at=COALESCE(?, submitted_at), completed_at=COALESCE(?, completed_at), attempt_count=COALESCE(?, attempt_count), error=? WHERE source=? AND native_session_id=? AND canonical_hash=?").run(state, fields.submittedAt ?? null, fields.completedAt ?? null, fields.attemptCount ?? null, fields.error ?? null, source, nativeSessionId, hash);
+    if (state === "completed") {
+      const generation = this.getGeneration(source, nativeSessionId, hash);
+      if (generation) this.acknowledgeGeneration(generation);
+    }
   }
 
   supersedeOlder(source: Source, nativeSessionId: string, keepHash: string): void {
@@ -659,6 +711,8 @@ export class StateDatabase {
       completedAt: nullableString(row.completed_at),
       attemptCount: Number(row.attempt_count),
       error: nullableString(row.error),
+      retainPolicyVersion: String(row.retain_policy_version ?? "1"),
+      repair: Number(row.repair) === 1,
     };
   }
 

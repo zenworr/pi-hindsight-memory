@@ -1,6 +1,6 @@
 # pi-hindsight-memory
 
-Global, provenance-preserving memory for the Pi coding agent, backed by a local [Hindsight](https://github.com/vectorize-io/hindsight) service.
+Global, provenance-preserving memory for the Pi coding agent, backed by a local or remote [Hindsight](https://github.com/vectorize-io/hindsight) service.
 
 It imports existing Pi, Codex, Claude Code, and OpenCode sessions into one Hindsight bank and keeps mutable sessions up to date. Pi receives one explicit retrieval tool:
 
@@ -8,7 +8,7 @@ It imports existing Pi, Codex, Claude Code, and OpenCode sessions into one Hinds
 memory_search({ query: string })
 ```
 
-Memory is never injected automatically.
+Memory is never injected automatically. Search combines Hindsight-derived memories with a local index of original transcript passages and optional reviewed, dated facts.
 
 ## Supported hosts
 
@@ -28,10 +28,10 @@ Pi / Codex / Claude Code / OpenCode histories
                          │
                          ▼
              redacted canonical sessions
-                         │
-                         ▼
-        local Hindsight + PostgreSQL containers
-                         │
+                    ┌────┴────┐
+                    ▼         ▼
+             local index   Hindsight + PostgreSQL
+                    └────┬────┘   (local or remote)
                          ▼
                Pi memory_search tool
 ```
@@ -65,7 +65,7 @@ It controls:
 - the Codex and OpenCode databases;
 - exact session-label exclusions;
 - scan interval, active-session settle delay, import concurrency, and weak-result relevance floor;
-- state, spool, report, and approval locations.
+- state, source-index, reviewed-fact, spool, report, and approval locations.
 
 For a single-host deployment, application/provider settings and PostgreSQL credentials use separate private files:
 
@@ -107,7 +107,10 @@ A stopped or interrupted import is resumable. Caller-owned operation IDs and the
 - Active JSONL tails are retried instead of treated as complete records.
 - Sessions use stable mutable document IDs.
 - Credentials are redacted before provider requests.
-- Raw tool results, hidden reasoning, generated memory, injected context, and retrieved memory are excluded as evidence.
+- Raw tool results, hidden reasoning, generated memory, and harness startup context are excluded.
+- Memory-assisted reports remain marked as derived, not independent proof.
+- Interrupted submissions retain immutable payloads and block newer document versions until their outcomes are known.
+- Readiness checks source errors, deferred work, document hashes, and importer health.
 - Structural subagents are excluded before canonicalization.
 - Unknown child-session shapes fail closed as ambiguous.
 - Hindsight and its UI bind only to loopback by default.
@@ -128,6 +131,8 @@ See also:
 - [Architecture](docs/ARCHITECTURE.md)
 - [Canonical format](docs/CANONICAL-FORMAT.md)
 - [Operations](docs/OPERATIONS.md)
+- [Memory retrieval and source evidence](docs/MEMORY-RETRIEVAL.md)
+- [Historical repair](docs/HISTORICAL-REPAIR.md)
 - [Remote deployment](docs/REMOTE-DEPLOYMENT.md)
 - [Security](docs/SECURITY.md)
 - [Status integration](docs/STATUS-INTEGRATION.md)

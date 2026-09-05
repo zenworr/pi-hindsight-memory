@@ -1,14 +1,13 @@
 {
   "version": "1",
   "bank": {
-    "retain_mission": "This is one global memory bank for the user across all coding-agent sessions and all directories. Extract the fewest durable facts that future coding work needs: explicit user preferences, corrections, constraints, technical decisions, environment facts, discoveries, successful methods, failures and their causes, and completed outcomes. Preserve exact identifiers and literal values. Keep timestamps and distinguish user statements from assistant reports. Treat assistant suggestions as non-authoritative. Treat assistant text marked memory-assisted as derived context, not independent proof. Explicit user corrections have the highest authority. Ignore greetings, status chatter, hidden reasoning, generated memory, injected context, transient progress, and raw tool output.",
+    "retain_mission": "Evidence policy 2. Write extracted facts in English for the English embedding model, while preserving names, code, and literal values. This is one global memory bank across the user's coding-agent sessions. Extract the fewest durable facts: explicit user preferences, corrections, constraints, final technical decisions, environment facts, successful methods, useful failure causes, and completed outcomes. Preserve exact identifiers and values. Keep the named task, project, machine, and conditions; do not turn a scoped setting into a global preference. A user statement is not the same as an assistant report. Attribute unverified assistant claims as reports, not independently verified facts. Explicit user corrections have the highest authority. Assistant text marked memory-assisted is derived context and must not create independent evidence. Ignore generated memory, harness instructions, injected context, greetings, connectivity-test chatter without a technical outcome, transient status reports, and progress chatter. A compact action records an attempted action, not proof of its result. Follow source-entry timestamps and parent links; different branches are alternatives, not a single sequence of decisions. Record the latest supported state with the earlier state explicitly marked superseded when useful. Preserve the time zone of an explicit timestamp. Never label an unqualified prose time as UTC or invent an exact date. Distinguish when a statement was recorded from when its described event occurred. If the source does not support a fact, do not extract it.",
     "retain_default_strategy": "conversation",
     "retain_extraction_mode": "concise",
     "retain_chunk_size": 30000,
     "retain_structured_chunk_size": 30000,
     "retain_strategies": {
       "conversation": {
-        "retain_mission": "This is a developer conversation represented as JSONL turns. Extract only durable outcomes: final decisions, exact rules and values, concrete changes, resolved problems, conventions, preferences, corrections, and useful failure causes. Do not emit one fact per message or action. Do not turn an assistant suggestion into a user preference. When the conversation revises itself, record the final state and mention a superseded state only when it helps explain the correction.",
         "retain_extraction_mode": "concise",
         "retain_chunk_size": 30000,
         "retain_structured_chunk_size": 30000
@@ -16,7 +15,7 @@
     },
     "enable_observations": true,
     "enable_auto_consolidation": false,
-    "observations_mission": "Create durable, evidence-backed observations for future coding sessions. Consolidate explicit user preferences, corrections, environment facts, technical decisions, conventions, recurring failure causes, and stable relationships. Preserve important temporal changes. When newer evidence corrects older evidence, make the current state clear and retain a concise trace of the old state. Never convert an assistant suggestion or generated memory into a user preference or independent proof.",
+    "observations_mission": "Write evidence-backed observations in English for future coding sessions, preserving names, code, and literal values. Distinguish user statements, assistant reports, and verified outcomes. Do not promote suggestions, generated memory, memory-assisted prose, or attempted actions to independent proof. Explicit user corrections take priority. Preserve the latest supported state and label superseded states as historical; do not reverse a correction merely because an older report is repeated. If sources conflict without a supported resolution, state the conflict instead of choosing a winner. Preserve exact values, task and machine scope, and source time zones. Do not merge settings for different tasks or machines into one conflicting fact. Do not invent UTC offsets or treat a report's timestamp as its event date. Prefer one concise observation per topic over summaries that combine unrelated operational states.",
     "entities_allow_free_form": true
   }
 }

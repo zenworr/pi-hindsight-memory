@@ -20,6 +20,8 @@ export function defaultConfig(home = homeDirectory()): AppConfig {
     configPath: paths.configPath,
     stateDirectory: paths.stateDirectory,
     stateDatabase: paths.stateDatabase,
+    evidenceDatabase: path.join(paths.stateDirectory, "evidence.sqlite3"),
+    reviewedFactsFile: path.join(paths.configDirectory, "current-facts.json"),
     reportDirectory: paths.reportDirectory,
     spoolDirectory: paths.spoolDirectory,
     approvalFile: path.join(paths.configDirectory, "import-approval.json"),
@@ -120,6 +122,8 @@ export function loadConfig(configPath?: string, home = homeDirectory()): AppConf
   config.opencodeDatabase = absolutePath(config.opencodeDatabase, home);
   config.stateDirectory = absolutePath(config.stateDirectory, home);
   config.stateDatabase = absolutePath(config.stateDatabase, home);
+  config.evidenceDatabase = absolutePath(config.evidenceDatabase, home);
+  config.reviewedFactsFile = absolutePath(config.reviewedFactsFile, home);
   config.reportDirectory = absolutePath(config.reportDirectory, home);
   config.spoolDirectory = absolutePath(config.spoolDirectory, home);
   config.approvalFile = absolutePath(config.approvalFile, home);

@@ -7,5 +7,5 @@ test("session exclusions use normalized exact labels only", () => {
   assert.equal(normalizeSessionLabel("  EXCLUDED－SESSION  "), "excluded-session");
   assert.equal(excludedLabel(" EXCLUDED-SESSION ", config), "excluded-session");
   assert.equal(excludedLabel("excluded-session-worker", config), undefined);
-  assert.deepEqual(configuredExclusion("excluded-session", config), { kind: "configured-exclusion", reason: "configured-exact-session-label:excluded-session", policyVersion: "2", label: "excluded-session" });
+  assert.deepEqual(configuredExclusion("excluded-session", config), { kind: "configured-exclusion", reason: "configured-exact-session-label:excluded-session", policyVersion: "3", label: "excluded-session" });
 });

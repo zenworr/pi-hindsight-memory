@@ -19,11 +19,11 @@ import {
 interface DbRow { [key: string]: unknown; }
 
 function parseObject(value: unknown): Record<string, unknown> {
-  if (typeof value !== "string" || !value) return {};
   try {
-    const parsed: unknown = JSON.parse(value);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-  } catch { return {}; }
+    const parsed: unknown = typeof value === "string" ? JSON.parse(value) : undefined;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as Record<string, unknown>;
+  } catch { /* report no record content */ }
+  throw new Error("OpenCode record is not a valid JSON object");
 }
 
 function numberValue(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }
@@ -76,7 +76,9 @@ function openReadOnly(databasePath: string): DatabaseSync {
 function addFingerprintRows(hash: crypto.Hash, db: DatabaseSync, sql: string, args: string[]): void {
   for (const raw of db.prepare(sql).iterate(...args)) {
     const row = raw as DbRow;
-    hash.update(`${String(row.id)}\0${String(row.time_created)}\0${String(row.time_updated)}\0${String(row.data_length)}\0${String(row.data_head)}\0${String(row.data_tail)}\n`);
+    const data = String(row.data);
+    hash.update(JSON.stringify([row.id, row.time_created, row.time_updated, Buffer.byteLength(data)]));
+    hash.update("\0").update(data).update("\n");
   }
 }
 
@@ -119,9 +121,10 @@ export class OpenCodeAdapter implements SessionAdapter {
       const row = db.prepare(`${sessionSelect(db)} WHERE id = ?`).get(reference.nativeSessionId) as DbRow | undefined;
       if (!row) throw new Error(`OpenCode session not found: ${reference.nativeSessionId}`);
       const hash = crypto.createHash("sha256");
-      hash.update(`${reference.nativeSessionId}\n${String(row.time_created)}\n${String(row.time_updated)}\n${String(row.parent_id)}\n${String(row.title)}\n`);
-      addFingerprintRows(hash, db, "SELECT id,time_created,time_updated,length(data) AS data_length,substr(data,1,256) AS data_head,substr(data,-256,256) AS data_tail FROM message WHERE session_id=? ORDER BY time_created,id", [reference.nativeSessionId]);
-      addFingerprintRows(hash, db, "SELECT id,time_created,time_updated,length(data) AS data_length,substr(data,1,256) AS data_head,substr(data,-256,256) AS data_tail FROM part WHERE session_id=? ORDER BY time_created,id", [reference.nativeSessionId]);
+      hash.update(JSON.stringify(row)).update("\nmessages\n");
+      addFingerprintRows(hash, db, "SELECT id,time_created,time_updated,data FROM message WHERE session_id=? ORDER BY time_created,id", [reference.nativeSessionId]);
+      hash.update("\nparts\n");
+      addFingerprintRows(hash, db, "SELECT id,time_created,time_updated,data FROM part WHERE session_id=? ORDER BY time_created,id", [reference.nativeSessionId]);
       db.exec("COMMIT"); inTransaction = false;
       return { size: 0, mtimeMs: numberValue(row.time_updated) ?? 0, sampleHash: hash.digest("hex"), stableLocator: `${this.databasePath}#${reference.nativeSessionId}` };
     } catch (error) {
@@ -152,6 +155,7 @@ export class OpenCodeAdapter implements SessionAdapter {
       let sequentialPending = false;
 
       for (const rawMessage of messageStatement.iterate(sessionId)) {
+        options.signal?.throwIfAborted();
         const message = rawMessage as DbRow;
         const messageId = stringOrUndefined(message.id) ?? `message:${String(message.time_created)}`;
         const data = parseObject(message.data);
@@ -166,6 +170,7 @@ export class OpenCodeAdapter implements SessionAdapter {
         const actions: Array<{ name: string; input: unknown }> = [];
         let hasMemoryCall = false;
         for (const rawPart of partStatement.iterate(messageId)) {
+          options.signal?.throwIfAborted();
           const part = rawPart as DbRow;
           const partData = parseObject(part.data);
           const partType = stringOrUndefined(partData.type)?.toLowerCase() ?? "";
@@ -180,9 +185,10 @@ export class OpenCodeAdapter implements SessionAdapter {
           }
         }
         const provenance = pending ? "memory-assisted" as const : "original" as const;
-        for (const text of textParts) await addTextTurn(spool, role, text, timestamp, messageId, parentId, role === "assistant" ? provenance : undefined);
+        for (const text of textParts) {
+          if (await addTextTurn(spool, role, text, timestamp, messageId, parentId, role === "assistant" ? provenance : undefined) && role === "user") pending = false;
+        }
         for (const action of actions) await addTextTurn(spool, "action", actionText(action.name, action.input), timestamp, messageId, parentId);
-        if (pending && textParts.length > 0) pending = false;
         if (hasMemoryCall) pending = true;
         pendingByMessage.set(messageId, pending);
         sequentialPending = pending;

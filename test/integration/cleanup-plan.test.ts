@@ -74,11 +74,15 @@ test("definite cleanup deletes only reviewed job IDs and leaves ambiguous docume
     state.upsertSession({ source: "pi", nativeSessionId, documentId, sourceLocator, sourceSize: 1, sourceMtime: 1, sourceFingerprint: { size: 1, mtimeMs: 1, sampleHash: "x", stableLocator: sourceLocator }, canonicalHash, canonicalBytes: 100, canonicalTurns: 2, canonicalSchema: "agent-session-v1", sessionStartedAt: "2026-01-01T00:00:00.000Z", sessionUpdatedAt: "2026-01-01T00:00:00.000Z", status: "imported", lastSeenAt: new Date().toISOString() });
     state.upsertGeneration({ source: "pi", nativeSessionId, canonicalHash, operationId: operationIdFor(config.hindsight.bankId, documentId, canonicalHash), state: "completed", queuedAt: "2026-01-01T00:00:00.000Z", attemptCount: 1 });
   }
+  const prepared = state.getLatestGeneration("pi", "definite-child")!;
+  state.setGenerationState("pi", "definite-child", prepared.canonicalHash, "submitted");
+  state.upsertOperation({ operationId: prepared.operationId, documentId: documentIdFor("pi", "definite-child"), canonicalHash: prepared.canonicalHash, hindsightStatus: "prepared", retryCount: 0 });
   const documents = new Set([documentIdFor("pi", "definite-child"), documentIdFor("pi", "ambiguous-child")]);
   const deleted: string[] = [];
   const fakeClient = {
     listDocumentIds: async () => new Set(documents),
     deleteDocument: async (documentId: string) => { deleted.push(documentId); documents.delete(documentId); },
+    getOperation: async () => assert.fail("a prepared local payload was not submitted remotely"),
   } as unknown as HindsightClient;
   try {
     const plan = await buildCleanupPlan(config, fakeClient);
@@ -110,7 +114,7 @@ test("cleanup preserves a persisted Claude primary artifact when only its sidech
   await fs.rm(root, { recursive: true, force: true });
 });
 
-test("cleanup plan finds configured labels without mutating source or queued primary work", async () => {
+test("cleanup plan finds configured labels without mutating source or replaying active primary work", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-cleanup-plan-"));
   const config = await cleanupConfig(root);
   config.sessionExclusions.exactLabels = ["excluded-session"];
@@ -129,7 +133,7 @@ test("cleanup plan finds configured labels without mutating source or queued pri
   state.upsertSession({ source: "opencode", nativeSessionId: "ses-excluded", documentId: excludedDocument, sourceLocator: config.opencodeDatabase, sourceSize: 0, sourceMtime: 0, sourceFingerprint: { size: 0, mtimeMs: 0, sampleHash: "", stableLocator: `${config.opencodeDatabase}#ses-excluded` }, canonicalHash: "excluded-hash", canonicalBytes: 100, canonicalTurns: 2, canonicalSchema: "agent-session-v1", sessionStartedAt: "2025-01-01T00:00:00.000Z", sessionUpdatedAt: "2025-01-01T00:00:00.000Z", status: "imported", lastSeenAt: new Date().toISOString() });
   state.upsertSession({ source: "opencode", nativeSessionId: "ses-primary", documentId: primaryDocument, sourceLocator: config.opencodeDatabase, sourceSize: 0, sourceMtime: 0, sourceFingerprint: { size: 0, mtimeMs: 0, sampleHash: "", stableLocator: `${config.opencodeDatabase}#ses-primary` }, canonicalHash: "primary-hash", canonicalBytes: 100, canonicalTurns: 2, canonicalSchema: "agent-session-v1", sessionStartedAt: "2025-01-01T00:00:00.000Z", sessionUpdatedAt: "2025-01-01T00:00:00.000Z", status: "discovered", lastSeenAt: new Date().toISOString() });
   state.upsertGeneration({ source: "opencode", nativeSessionId: "ses-excluded", canonicalHash: "excluded-hash", operationId: operationIdFor(config.hindsight.bankId, excludedDocument, "excluded-hash"), state: "completed", queuedAt: "2025-01-01T00:00:00.000Z", attemptCount: 1 });
-  state.upsertGeneration({ source: "opencode", nativeSessionId: "ses-primary", canonicalHash: "primary-hash", operationId: operationIdFor(config.hindsight.bankId, primaryDocument, "primary-hash"), state: "queued", queuedAt: "2025-01-01T00:00:01.000Z", attemptCount: 0 });
+  state.upsertGeneration({ source: "opencode", nativeSessionId: "ses-primary", canonicalHash: "primary-hash", operationId: operationIdFor(config.hindsight.bankId, primaryDocument, "primary-hash"), state: "submitted", queuedAt: "2025-01-01T00:00:01.000Z", attemptCount: 1 });
   state.close();
   const before = await fs.readFile(config.opencodeDatabase);
   const fakeClient = { listDocumentIds: async () => new Set([excludedDocument, primaryDocument]) } as unknown as HindsightClient;

@@ -1,11 +1,11 @@
 import { DatabaseSync } from "node:sqlite";
-import { documentIdFor, replayOperationIdFor, sha256 } from "../common/hashing.js";
+import { documentIdFor, sha256 } from "../common/hashing.js";
 import type { AppConfig, SessionClassification, Source } from "../common/types.js";
 import { HindsightClient } from "../hindsight/client.js";
 import { discoverClassifications } from "./subagent-cleanup.js";
 import { normalizeSessionLabel } from "./exclusions.js";
 
-interface RawSession { source: Source; nativeSessionId: string; documentId: string; sourceLocator: string; }
+interface RawSession { source: Source; nativeSessionId: string; documentId: string; sourceLocator: string; status: string; }
 interface RawGeneration { source: Source; nativeSessionId: string; canonicalHash: string; operationId: string; state: string; }
 interface RawArtifact { classification: SessionClassification; }
 
@@ -37,10 +37,10 @@ function artifactKey(source: Source, nativeSessionId: string, locator: string): 
 function tableExists(db: DatabaseSync, name: string): boolean { return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name)); }
 function readSessions(db: DatabaseSync): Map<string, RawSession> {
   const map = new Map<string, RawSession>();
-  for (const row of db.prepare("SELECT source,native_session_id,document_id,source_locator FROM sessions").all() as Record<string, unknown>[]) {
+  for (const row of db.prepare("SELECT source,native_session_id,document_id,source_locator,status FROM sessions").all() as Record<string, unknown>[]) {
     const source = String(row.source) as Source;
     const nativeSessionId = String(row.native_session_id);
-    map.set(key(source, nativeSessionId), { source, nativeSessionId, documentId: String(row.document_id), sourceLocator: String(row.source_locator) });
+    map.set(key(source, nativeSessionId), { source, nativeSessionId, documentId: String(row.document_id), sourceLocator: String(row.source_locator), status: String(row.status) });
   }
   return map;
 }
@@ -84,7 +84,7 @@ function generationCounts(generations: RawGeneration[]): CleanupPlan["generation
   }
   return counts;
 }
-function classificationForGeneration(config: AppConfig, generation: RawGeneration, session: RawSession | undefined, groups: Map<string, { classification: SessionClassification; artifacts: Map<string, SessionClassification> }>, tombstones: Set<string>, persistedArtifacts: Map<string, RawArtifact>, includeAmbiguous: boolean): { kind: CleanupPlanJob["targetKind"]; reason: string; newOperationId?: string } | undefined {
+function classificationForGeneration(generation: RawGeneration, session: RawSession | undefined, groups: Map<string, { classification: SessionClassification; artifacts: Map<string, SessionClassification> }>, tombstones: Set<string>, persistedArtifacts: Map<string, RawArtifact>, includeAmbiguous: boolean): { kind: CleanupPlanJob["targetKind"]; reason: string; newOperationId?: string } | undefined {
   if (["excluded", "superseded"].includes(generation.state)) return undefined;
   const group = groups.get(key(generation.source, generation.nativeSessionId));
   const documentId = session?.documentId ?? documentIdFor(generation.source, generation.nativeSessionId);
@@ -100,9 +100,9 @@ function classificationForGeneration(config: AppConfig, generation: RawGeneratio
       classification = persisted.classification;
     }
   }
+  if (session?.status === "ambiguous_preserved" && classification?.kind !== "configured-exclusion" && !includeAmbiguous) return undefined;
   if (classification?.kind === "ambiguous" && !includeAmbiguous) return undefined;
   if (classification && classification.kind !== "primary") return { kind: classification.kind, reason: classification.reason };
-  if (generation.state === "submitted" || generation.state === "processing") return { kind: "primary_replay", reason: "replay after clearing an interrupted primary operation", newOperationId: replayOperationIdFor(config.hindsight.bankId, documentId, generation.canonicalHash, 1) };
   return undefined;
 }
 
@@ -119,7 +119,7 @@ export async function buildCleanupPlan(config: AppConfig, client: HindsightClien
     const jobs: CleanupPlanJob[] = [];
     for (const generation of generations) {
       const session = sessions.get(key(generation.source, generation.nativeSessionId));
-      const target = classificationForGeneration(config, generation, session, discovered.groups, tombstones, persistedArtifacts, options.includeAmbiguous === true);
+      const target = classificationForGeneration(generation, session, discovered.groups, tombstones, persistedArtifacts, options.includeAmbiguous === true);
       if (!target) continue;
       const documentId = session?.documentId ?? documentIdFor(generation.source, generation.nativeSessionId);
       const oldOperationId = operations.has(generation.operationId) ? generation.operationId : undefined;

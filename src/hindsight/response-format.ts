@@ -4,6 +4,9 @@ export interface MemorySearchDetails {
   resultCount: number;
   sourceCount: number;
   noMatch: boolean;
+  sourceEvidenceCount?: number;
+  reviewedFactCount?: number;
+  degraded?: boolean;
 }
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
@@ -70,11 +73,12 @@ export function formatRecallResponse(response: RecallResponse, options: { minRel
     const key = result.id ?? `${result.type ?? ""}\n${result.text ?? ""}\n${result.document_id ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key); results.push(result);
+    if (results.length === 6) break;
   }
   if (results.length === 0) return { text: "No matching memory evidence was returned. Do not treat this as proof that the information never existed.", details: { resultCount: 0, sourceCount: 0, noMatch: true } };
 
   const sourceKeys = new Set<string>();
-  const lines: string[] = [`Found ${results.length} relevant memory item${results.length === 1 ? "" : "s"}.`];
+  const lines: string[] = [`Found ${results.length} derived memory match${results.length === 1 ? "" : "es"}. Relevance does not establish that the query is answerable.`];
   results.forEach((result, index) => {
     const sources = sourceEvidence(result, response);
     for (const source of sources) sourceKeys.add(source);
@@ -84,7 +88,10 @@ export function formatRecallResponse(response: RecallResponse, options: { minRel
     lines.push("   Sources:");
     for (const source of sources) lines.push(`   - ${source}`);
     const excerpt = excerptFor(result, response);
-    if (excerpt && excerpt !== result.text) lines.push(`   Evidence excerpt: ${shorten(excerpt, 1_500).replaceAll("\n", " ")}`);
+    if (excerpt && excerpt !== result.text) {
+      const label = result.chunk_id && response.chunks?.[result.chunk_id]?.text ? "Transcript excerpt" : "Derived supporting fact (not an original quotation)";
+      lines.push(`   ${label}: ${shorten(excerpt, 1_500).replaceAll("\n", " ")}`);
+    }
     if (result.source_fact_ids && result.source_fact_ids.length > 0) lines.push(`   Supporting source facts: ${result.source_fact_ids.length}${response.source_facts_truncated ? " (some source facts omitted by budget)" : ""}`);
   });
   lines.push("");

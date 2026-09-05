@@ -51,16 +51,38 @@ function taskChildLayout(root: string, filePath: string): boolean {
 async function sessionInfoName(filePath: string): Promise<string | undefined> {
   const handle = await fs.promises.open(filePath, "r");
   try {
-    const buffer = Buffer.alloc(256 * 1024);
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-    for (const line of buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/)) {
-      if (!line.trim()) continue;
+    let position = (await handle.stat()).size;
+    let pieces: Buffer[] = [];
+    let trailing = true;
+    const readName = (): { found: boolean; name?: string } => {
+      const ordered = [...pieces].reverse();
+      const prefix = Buffer.concat(ordered.map((piece) => piece.subarray(0, 512)), 512).toString("utf8");
+      if (/^\s*\{\s*"type"\s*:\s*"(?!session_info")[^"]+"/.test(prefix)) return { found: false };
       try {
-        const value = JSON.parse(line) as PiEntry;
-        if (value.type?.toLowerCase() === "session_info") return stringOrUndefined(value.name);
-      } catch { /* discovery will report malformed records during loading */ }
+        const entry = JSON.parse(Buffer.concat(ordered).toString("utf8")) as PiEntry;
+        return { found: entry.type === "session_info", name: stringOrUndefined(entry.name) };
+      } catch { return { found: false }; }
+    };
+    while (position > 0) {
+      const length = Math.min(position, 64 * 1024);
+      position -= length;
+      const buffer = Buffer.alloc(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, position);
+      if (bytesRead !== length) throw new Error("Pi session changed while reading its name; retry the scan");
+      let end = length;
+      for (let newline = buffer.lastIndexOf(10, end - 1); newline >= 0; newline = end > 0 ? buffer.lastIndexOf(10, end - 1) : -1) {
+        pieces.push(buffer.subarray(newline + 1, end));
+        if (!trailing) {
+          const result = readName();
+          if (result.found) return result.name;
+        }
+        trailing = false;
+        pieces = [];
+        end = newline;
+      }
+      pieces.push(buffer.subarray(0, end));
     }
-    return undefined;
+    return trailing ? undefined : readName().name;
   } finally { await handle.close(); }
 }
 
@@ -118,8 +140,7 @@ export class PiAdapter implements SessionAdapter {
   async *discover(): AsyncIterable<SessionReference> {
     const files = await walkFiles(this.root);
     for (const sourcePath of files) {
-      let first: unknown;
-      try { first = await firstJsonLine(sourcePath); } catch { first = undefined; }
+      const first = await firstJsonLine(sourcePath);
       const header = headerInfo(sourcePath, first);
       const identityIsFallback = !header.id;
       const nativeId = header.id ?? stableFallbackId(this.source, path.relative(this.root, sourcePath), header.startedAt);
@@ -152,7 +173,7 @@ export class PiAdapter implements SessionAdapter {
     const nativeId = reference.nativeSessionId || header.id || stableFallbackId(this.source, path.relative(this.root, sourcePath), header.startedAt);
     const id = documentIdFor(this.source, nativeId);
     const metadata = { ...reference.metadata, native_session_id: nativeId, source_path: sourcePath };
-    const label = reference.sessionLabel ?? await sessionInfoName(sourcePath);
+    const label = await sessionInfoName(sourcePath);
     if (header.cwd) metadata.cwd = header.cwd;
     if (label) metadata.title = label;
     const sessionClassification = reference.classification ?? classifyPi(this.root, sourcePath, label, header.parentSessionId);
@@ -185,7 +206,9 @@ export class PiAdapter implements SessionAdapter {
         const role = stringOrUndefined(entry.message.role)?.toLowerCase();
         const content = entry.message.content;
         if (role === "user") {
-          for (const text of textParts(content)) await addTextTurn(spool, "user", text, timestamp, entryId, parentId);
+          for (const text of textParts(content)) {
+            if (await addTextTurn(spool, "user", text, timestamp, entryId, parentId)) pending = false;
+          }
         } else if (role === "assistant") {
           const blocks = toolBlocks(content);
           const hasMemoryCall = hasToolCall(content);
@@ -196,14 +219,13 @@ export class PiAdapter implements SessionAdapter {
           for (const block of blocks) {
             await addTextTurn(spool, "action", actionText(block.name, block.input), timestamp, entryId, parentId);
           }
-          if (pending && textParts(content).length > 0) pending = false;
           if (hasMemoryCall || blocks.some((block) => isMemorySearchToolName(block.name))) pending = true;
         } else if (role === "tool" || role === "toolresult" || role === "tool_result") {
           // Tool results are deliberately excluded, but branch state still passes through them.
         }
         branchPending.set(entryId, pending);
         sequentialPending = pending;
-      });
+      }, { signal: options.signal });
       return await completeSession({ source: this.source, nativeSessionId: nativeId, sourceLocator: sourcePath, metadata, startedAt: header.startedAt, updatedAt, spool, options, classification: sessionClassification, sessionLabel: label });
     } catch (error) {
       await spool.cleanup().catch(() => undefined);

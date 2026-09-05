@@ -20,6 +20,7 @@ import { importAll } from "./historical.js";
 import { verifyFullImport } from "./verify.js";
 import { cleanupSubagents } from "./subagent-cleanup.js";
 import { buildCleanupPlan } from "./cleanup-plan.js";
+import { buildRepairPlan, repairHistory, type RepairPlan } from "./repair.js";
 
 function value(args: string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
@@ -50,7 +51,7 @@ async function withLock<T>(config: ReturnType<typeof loadConfig>, fn: (state: St
 }
 
 function usage(): void {
-  process.stdout.write(`pi-hindsight-memory\n\nUsage:\n  inventory [--output FILE] [--source SOURCE] [--limit N]\n  scan [--source SOURCE] [--limit N] [--force]\n  daemon [--once] [--no-scan]\n  drain [--max-ms N] [--no-scan]\n  process-queued [--max-ms N]\n  import-all [--cohort N] [--max-ms N]\n  verify-import\n  verify-ready\n  plan-cleanup [--output FILE] [--include-ambiguous]
+  process.stdout.write(`pi-hindsight-memory\n\nUsage:\n  inventory [--output FILE] [--source SOURCE] [--limit N]\n  scan [--source SOURCE] [--session-id ID] [--limit N] [--force]\n  index-evidence [--source SOURCE] [--force]\n  plan-repair [--output FILE]\n  repair --plan FILE [--max-ms N]\n  daemon [--once] [--no-scan]\n  drain [--max-ms N] [--no-scan]\n  process-queued [--max-ms N]\n  import-all [--cohort N] [--max-ms N]\n  verify-import\n  verify-ready\n  plan-cleanup [--output FILE] [--include-ambiguous]
   cleanup-subagents --apply --plan FILE\n  status\n  pause | resume\n  configure-bank [--file FILE]\n  consolidate\n  enable-auto-consolidation\n  retry-failed\n  cancel-queued\n  dry-run-extract CANONICAL_FILE [--mode concise|verbose]\n  select-pilot INVENTORY_JSON [--count N] [--max-bytes N] [--include-largest]\n  queue-pilot PILOT_JSON\n  run-pilot PILOT_JSON OUTPUT_JSON\n  export-canonical SOURCE SESSION_ID OUTPUT_FILE\n  doctor\n`);
 }
 
@@ -65,7 +66,8 @@ async function doctor(config: ReturnType<typeof loadConfig>): Promise<Record<str
     codexStateDatabase: config.codexStateDatabase,
     opencodeDatabase: config.opencodeDatabase,
     sources: {},
-    activeProvider: activeProvider(config),
+    declaredProvider: activeProvider(config),
+    providerIdentityVerified: false,
     approvalPresent: Boolean(readApproval(config.approvalFile)),
   };
   for (const [source, root] of Object.entries(config.sourceRoots)) {
@@ -194,10 +196,12 @@ async function main(): Promise<void> {
     const report = await runInventory(config, { source: sourceArg(args), limit: limitText ? Number(limitText) : undefined, includeResults: !has(args, "--summary-only") });
     await writeJson(value(args, "--output"), report); return;
   }
-  if (command === "scan") {
+  if (command === "scan" || command === "index-evidence") {
     const limitText = value(args, "--limit");
-    const result = await withLock(config, (state) => scan(config, state, { source: sourceArg(args), limit: limitText ? Number(limitText) : undefined, force: has(args, "--force") }));
-    await writeJson("-", result); return;
+    const result = await withLock(config, (state) => scan(config, state, { source: sourceArg(args), limit: limitText ? Number(limitText) : undefined, force: has(args, "--force"), sessionIds: value(args, "--session-id") ? [value(args, "--session-id")!] : undefined, indexOnly: command === "index-evidence" }));
+    await writeJson("-", result);
+    if (result.errors > 0) process.exitCode = 1;
+    return;
   }
   if (command === "daemon") { await runDaemon(config, { once: has(args, "--once"), scanFirst: !has(args, "--no-scan") }); return; }
   if (command === "drain") { await drainImporter(config, Number(value(args, "--max-ms") ?? config.hindsight.operationPollTimeoutMs), !has(args, "--no-scan")); return; }
@@ -206,8 +210,24 @@ async function main(): Promise<void> {
   if (command === "verify-import" || command === "verify-ready") {
     const result = await verifyFullImport(config);
     await writeJson("-", result);
-    const key = command === "verify-ready" ? "continuousReady" : "idempotencyReady";
+    const key = command === "verify-ready" ? "activationReady" : "idempotencyReady";
     if (result[key] !== true) process.exitCode = 1;
+    return;
+  }
+  if (command === "plan-repair") {
+    await writeJson(value(args, "--output"), await buildRepairPlan(config)); return;
+  }
+  if (command === "repair") {
+    const planFile = value(args, "--plan");
+    if (!planFile) throw new Error("repair requires --plan FILE");
+    const plan = JSON.parse(await fs.readFile(planFile, "utf8")) as RepairPlan;
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once("SIGINT", stop); process.once("SIGTERM", stop);
+    try {
+      const result = await withLock(config, (state) => repairHistory(config, state, new HindsightClient(config.hindsight), plan, { maxMs: Number(value(args, "--max-ms") ?? 86400000), signal: controller.signal }));
+      await writeJson("-", result);
+    } finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); }
     return;
   }
   if (command === "plan-cleanup") {

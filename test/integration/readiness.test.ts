@@ -11,7 +11,7 @@ import { verifyFullImport } from "../../src/importer/verify.js";
 
 function fakeClient(documentId: string, pendingConsolidation: number, autoConsolidation: boolean, validBank = true): HindsightClient {
   return {
-    listDocumentIds: async () => new Set([documentId]),
+    listDocuments: async () => [{ id: documentId, content_hash: "hash" }],
     getBankStats: async () => ({ pending_consolidation: pendingConsolidation, failed_consolidation: 0, pending_operations: 0, failed_operations: 0, operations_by_status: {} }),
     getBankConfig: async () => ({ config: { enable_auto_consolidation: autoConsolidation } }),
     assertExtractionAvailable: async () => undefined,
@@ -36,6 +36,7 @@ test("readiness requires exact documents, idle Hindsight, and continuous consoli
     status: "imported", lastSeenAt: "2026-01-01T00:00:00.000Z", classification: { kind: "primary", reason: "test", policyVersion: "2" },
   });
   state.upsertGeneration({ source: "pi", nativeSessionId: "ready-session", canonicalHash: "hash", operationId: operationIdFor("coding-history", documentId, "hash"), state: "completed", queuedAt: "2026-01-01T00:00:00.000Z", completedAt: "2026-01-01T00:01:00.000Z", attemptCount: 1 });
+  state.heartbeat("idle");
   state.close();
   try {
     const pending = await verifyFullImport(config, fakeClient(documentId, 1, true));
@@ -50,5 +51,11 @@ test("readiness requires exact documents, idle Hindsight, and continuous consoli
     const ready = await verifyFullImport(config, fakeClient(documentId, 0, true));
     assert.equal(ready.idempotencyReady, true);
     assert.equal(ready.continuousReady, true);
+    const stoppedState = new StateDatabase(config.stateDatabase);
+    stoppedState.heartbeat("stopped");
+    stoppedState.close();
+    const stopped = await verifyFullImport(config, fakeClient(documentId, 0, true));
+    assert.equal(stopped.activationReady, true);
+    assert.equal(stopped.continuousReady, false);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });

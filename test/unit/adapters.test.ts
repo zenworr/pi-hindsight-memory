@@ -55,7 +55,7 @@ test("Pi and Codex adapters classify explicit subagent sessions", async () => {
   assert.equal(piById.get("pi-modern")?.classification?.kind, "subagent");
   assert.equal(piById.get("pi-modern")?.classification?.reason, "pi-parent-session-and-generated-agent-name");
   assert.equal(piById.get("pi-modern")?.classification?.parentSessionId, "/history/parent.jsonl");
-  assert.equal(piById.get("pi-modern")?.classification?.policyVersion, "2");
+  assert.equal(piById.get("pi-modern")?.classification?.policyVersion, "3");
   assert.equal(piById.get("pi-fork")?.classification?.kind, "ambiguous");
   assert.equal(piById.get("pi-orphan-name")?.classification?.kind, "ambiguous");
   assert.equal(piById.get("pi-task")?.classification?.kind, "subagent");

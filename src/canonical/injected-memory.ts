@@ -20,6 +20,13 @@ export function stripInjectedMemory(input: string): string {
   return text.replace(/\n{3,}/g, "\n\n").trim();
 }
 
+export function stripHarnessContext(input: string): string {
+  return input
+    .replace(/^# AGENTS\.md instructions(?: for [^\n]+)?\n+\s*<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>\s*/i, "")
+    .replace(/^<environment_context>[\s\S]*?<\/environment_context>\s*/i, "")
+    .trim();
+}
+
 export function isLikelyGeneratedMemory(input: string): boolean {
   const normalized = input.trim().toLowerCase();
   return GENERATED_PREFIXES.some((prefix) => normalized.startsWith(prefix));

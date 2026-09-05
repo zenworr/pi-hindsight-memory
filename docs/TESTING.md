@@ -18,10 +18,13 @@ The suite covers:
 - generated-memory and memory-assisted evidence handling;
 - subagent, ambiguous, and configured-exclusion classification;
 - OpenCode read-only transactions and schema drift;
-- mutable-document generation serialization and retry IDs;
+- mutable-document ordering across shutdown, lost responses, source removal, and content reversion;
+- immutable pending payloads, terminal-failure retry IDs, and repair checkpoints;
+- live Pi SDK startup and repeated reloads without automatic retrieval;
 - approval and budget enforcement;
 - Hindsight request shapes, retries, deadlines, and recall formatting;
 - configurable weak-result filtering;
+- local evidence lookup, dated reviewed records, provenance labels, and retrieval during Hindsight outages;
 - scanner, worker, cleanup, and readiness transitions;
 - generic configuration, provider rollback, and service installation;
 - active-session settling and forced final scans;
@@ -54,4 +57,6 @@ Keep private questions and results out of Git. A non-empty nearest-neighbor resp
 
 ## Full-import checks
 
-Before activation, `verify-import` and `verify-ready` enforce document accounting, queue state, Hindsight operation state, consolidation state, and bank configuration. Also create and restore-test a PostgreSQL and SQLite backup pair.
+Before activation, `verify-ready` checks `activationReady`: document identities and hashes, desired versus acknowledged state, source errors and deferrals, Hindsight operation and consolidation state, and bank configuration. `continuousReady` also requires a live, unpaused importer without a recorded cycle error. Check the configured recovery mechanism separately.
+
+Historical policy changes require a bounded, source-backed quality pilot before [historical repair](HISTORICAL-REPAIR.md). Do not infer quality from a completed consolidation queue.

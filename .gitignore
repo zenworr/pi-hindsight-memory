@@ -13,6 +13,9 @@ deploy/compose/compose.local.yaml
 backups/
 reports/private/
 import-approval.json
+current-facts.json
+*.local.json
+*.local.jsonl
 *.dump
 *.tar.gz
 /canonical/
