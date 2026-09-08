@@ -48,6 +48,32 @@ test("scanner requires an unchanged observation window unless a scan is forced",
   } finally { state.close(); await fs.rm(root, { recursive: true, force: true }); }
 });
 
+test("unchanged empty sessions do not repeat settling, but changed empty sessions do", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-empty-settle-"));
+  const config = await configFor(root);
+  config.sessionSettleSeconds = 60;
+  await fs.mkdir(config.sourceRoots.pi, { recursive: true });
+  const file = path.join(config.sourceRoots.pi, "session.jsonl");
+  await fs.writeFile(file, '{"type":"session","version":3,"id":"empty-session","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/home/test"}\n');
+  const state = new StateDatabase(config.stateDatabase);
+  try {
+    const first = await scan(config, state, { source: "pi", force: true });
+    assert.equal(first.empty, 1);
+    for (let i = 0; i < 3; i++) {
+      const result = await scan(config, state, { source: "pi" });
+      assert.equal(result.active, 0);
+      assert.equal(result.empty, 1);
+      assert.equal(result.unchanged, 1);
+      assert.equal(result.results[0]?.status, "empty_after_normalization");
+      assert.equal(state.db.prepare("SELECT COUNT(*) AS n FROM scan_candidates").get()?.n, 0);
+    }
+    assert.equal(state.listGenerations().length, 0);
+    await fs.appendFile(file, '{"type":"message","id":"u-1","parentId":null,"timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"user","content":"New source evidence"}}\n');
+    assert.equal((await scan(config, state, { source: "pi" })).active, 1);
+    assert.equal((await scan(config, state, { source: "pi", force: true })).queued, 1);
+  } finally { state.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test("scanner stops promptly when shutdown is requested", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-scan-abort-"));
   const config = await configFor(root);

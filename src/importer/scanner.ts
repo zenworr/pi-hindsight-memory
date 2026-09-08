@@ -151,15 +151,17 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
     const previous = state.getSession(adapter.source, reference.nativeSessionId);
     const tracked = previous?.canonicalHash ? state.getGeneration(adapter.source, reference.nativeSessionId, previous.canonicalHash) : undefined;
     const acknowledged = previous?.canonicalHash && previous.acknowledgedHash === previous.canonicalHash && previous.acknowledgedPolicy === RETAIN_POLICY_VERSION;
-    const unchanged = previous && !options.inventoryOnly && !options.force && previous.canonicalHash && indexed.get(previous.documentId) === previous.canonicalHash && (acknowledged || tracked && ["queued", "submitted", "processing", "failed"].includes(tracked.state)) && fingerprintSignature(previous.sourceFingerprint) === fingerprintSignature(fingerprint);
+    const knownEmpty = previous?.status === "empty_after_normalization";
+    const unchanged = previous && !options.inventoryOnly && !options.force && previous.canonicalHash && (knownEmpty || indexed.get(previous.documentId) === previous.canonicalHash && (acknowledged || tracked && ["queued", "submitted", "processing", "failed"].includes(tracked.state))) && fingerprintSignature(previous.sourceFingerprint) === fingerprintSignature(fingerprint);
     if (unchanged) {
       state.clearScanError(adapter.source, reference.locator);
       state.clearScanCandidate(adapter.source, reference.nativeSessionId);
       summary.unchanged += 1;
+      if (knownEmpty) summary.empty += 1;
       const latest = state.getLatestGeneration(adapter.source, reference.nativeSessionId);
       const restoredStatus = previous.status === "source_missing" ? latest?.state === "completed" ? "imported" : "discovered" : previous.status;
       state.markSessionSeen(adapter.source, reference.nativeSessionId, fingerprint, fingerprint.size, fingerprint.mtimeMs, restoredStatus);
-      summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: "eligible", canonicalBytes: previous.canonicalBytes, canonicalTurns: previous.canonicalTurns, startedAt: previous.sessionStartedAt, updatedAt: previous.sessionUpdatedAt });
+      summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: knownEmpty ? "empty_after_normalization" : "eligible", canonicalBytes: previous.canonicalBytes, canonicalTurns: previous.canonicalTurns, startedAt: previous.sessionStartedAt, updatedAt: previous.sessionUpdatedAt });
       continue;
     }
     const settled = options.force || config.sessionSettleSeconds === 0 || state.observeScanCandidate(
