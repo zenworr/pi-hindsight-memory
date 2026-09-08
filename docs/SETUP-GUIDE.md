@@ -68,7 +68,8 @@ The defaults are:
 ```json
 {
   "sessionExclusions": { "exactLabels": [] },
-  "sessionSettleSeconds": 60,
+  "sessionSettleSeconds": 3600,
+  "scanIntervalSeconds": 900,
   "maxInflightDocuments": 4,
   "sourceRoots": {
     "pi": "~/.pi/agent/sessions",
@@ -89,7 +90,7 @@ The defaults are:
 
 For original transcript search, reviewed facts, and degraded operation, see [Memory retrieval](MEMORY-RETRIEVAL.md). For an existing installation affected by a policy upgrade, use [Historical repair](HISTORICAL-REPAIR.md), not the new-bank import sequence.
 
-The generated file contains absolute paths instead of `~`. A normal scan defers a changed session until the same fingerprint has been observed unchanged for `sessionSettleSeconds`; this avoids repeatedly replacing a document while an agent is actively writing it. With the default five-minute scan interval, a changed session normally needs two matching observations before ingestion. `minRelevanceScore` is a starting floor for weak nearest-neighbor results, not a confidence value. Adjust it only after testing known and unanswerable queries against the local corpus.
+The generated file contains absolute paths instead of `~`. A normal scan defers a changed session until the same fingerprint has been observed unchanged for `sessionSettleSeconds`; this avoids repeatedly replacing a document while an agent is actively writing it. By default, scans run every 15 minutes. A changed session must remain unchanged for one hour after its first scanner observation before ingestion. `minRelevanceScore` is a starting floor for weak nearest-neighbor results, not a confidence value. Adjust it only after testing known and unanswerable queries against the local corpus.
 
 OpenCode documents the same `~/.local/share/opencode` storage location on macOS and Linux. Initial configuration honors `PI_CODING_AGENT_DIR`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `XDG_DATA_HOME`. You can also edit any generated path directly. If Codex sessions exist, the configured label database must be readable and have supported name or title columns; errors block discovery instead of silently bypassing label exclusions.
 

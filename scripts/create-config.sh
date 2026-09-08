@@ -9,7 +9,8 @@ STATE_DIR=$(state_dir)
 CONFIG_FILE="$CONFIG_DIR/config.json"
 BANK_ID=${PI_HINDSIGHT_BANK_ID:-coding-history}
 MAX_INFLIGHT=${PI_HINDSIGHT_MAX_INFLIGHT:-4}
-SETTLE_SECONDS=${PI_HINDSIGHT_SETTLE_SECONDS:-60}
+SETTLE_SECONDS=${PI_HINDSIGHT_SETTLE_SECONDS:-3600}
+SCAN_INTERVAL=${PI_HINDSIGHT_SCAN_INTERVAL:-900}
 API_PORT=${PI_HINDSIGHT_API_PORT:-8888}
 PI_AGENT_DIR=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
 CODEX_DIR=${CODEX_HOME:-$HOME/.codex}
@@ -46,6 +47,7 @@ jq -n \
   --arg ui "http://127.0.0.1:${PI_HINDSIGHT_UI_PORT:-9999}" \
   --argjson maxInflight "$MAX_INFLIGHT" \
   --argjson settleSeconds "$SETTLE_SECONDS" \
+  --argjson scanInterval "$SCAN_INTERVAL" \
   '{
     stateDirectory:$state,
     stateDatabase:($state + "/state.sqlite3"),
@@ -54,6 +56,7 @@ jq -n \
     approvalFile:($config + "/import-approval.json"),
     sessionExclusions:{exactLabels:[]},
     sessionSettleSeconds:$settleSeconds,
+    scanIntervalSeconds:$scanInterval,
     maxInflightDocuments:$maxInflight,
     sourceRoots:{pi:$piSessions,codex:$codexSessions,claude:$claudeSessions,opencode:$opencodeDir},
     codexStateDatabase:$codexDb,

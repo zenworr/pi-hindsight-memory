@@ -23,7 +23,8 @@ test("setup configuration uses generic portable defaults and local overrides", a
     const config = JSON.parse(await fs.readFile(pathname, "utf8"));
     assert.equal(config.hindsight.bankId, "team-history");
     assert.equal(config.maxInflightDocuments, 6);
-    assert.equal(config.sessionSettleSeconds, 60);
+    assert.equal(config.sessionSettleSeconds, 3600);
+    assert.equal(config.scanIntervalSeconds, 900);
     assert.deepEqual(config.sessionExclusions.exactLabels, []);
     assert.equal(config.sourceRoots.pi, path.join(home, ".pi", "agent", "sessions"));
     assert.equal(config.opencodeDatabase, path.join(home, ".local", "share", "opencode", "opencode.db"));

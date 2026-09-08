@@ -27,8 +27,8 @@ export function defaultConfig(home = homeDirectory()): AppConfig {
     approvalFile: path.join(paths.configDirectory, "import-approval.json"),
     sessionExclusions: { exactLabels: [] },
     maxCanonicalBytes: 100 * 1024 * 1024,
-    scanIntervalSeconds: 300,
-    sessionSettleSeconds: 60,
+    scanIntervalSeconds: 900,
+    sessionSettleSeconds: 3600,
     maxInflightDocuments: 4,
     requireImportApproval: true,
     sourceRoots: {
