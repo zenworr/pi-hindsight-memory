@@ -21,7 +21,9 @@ export async function runImportCycle(config: AppConfig, state: StateDatabase, cl
   const workerResult = await worker.runOnce(Math.max(1000, config.maxInflightDocuments * 100), signal);
   if (state.pendingWorkCount() === 0 && !signal?.aborted) {
     const verification = await verifyFullImport(config, client, { signal });
-    if (!verification.documentAccountingReady) throw new Error("Remote document accounting or hashes differ from importer state; run verify-import before repair");
+    if (!verification.documentAccountingReady) {
+      throw new Error(`Import verification failed: ${verification.failedGenerations} failed session updates, ${verification.missingDocumentCount} missing documents, ${verification.unexpectedDocumentCount} unexpected documents, ${verification.excludedDocumentsPresentCount} excluded documents present, ${verification.documentHashMismatchCount} hash mismatches; run verify-import for details`);
+    }
   }
   logger.info("Import cycle complete", { discovered: scanResult.discovered, queued: scanResult.queued, unchanged: scanResult.unchanged, active: scanResult.active, completed: workerResult.completed, failed: workerResult.failed, deferred: workerResult.deferred, scanErrors: scanResult.errors });
   return { scan: scanResult, worker: workerResult };

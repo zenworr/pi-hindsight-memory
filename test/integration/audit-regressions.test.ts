@@ -9,6 +9,7 @@ import { PiAdapter } from "../../src/adapters/pi.js";
 import { scan } from "../../src/importer/scanner.js";
 import { ImportWorker } from "../../src/importer/worker.js";
 import { verifyFullImport } from "../../src/importer/verify.js";
+import { runImportCycle } from "../../src/importer/daemon.js";
 import { HindsightHttpError, HindsightOperationError } from "../../src/hindsight/client.js";
 import { buildRepairPlan, repairHistory } from "../../src/importer/repair.js";
 
@@ -87,6 +88,30 @@ test("a reverted document receives a fresh operation and becomes current again",
     await scan(f.config, f.state, { source: "pi", force: true });
     await new ImportWorker(f.config, f.state, client).runOnce(1);
     assert.equal(writes.length, 3, "the current content is idempotent");
+  } finally { await f.close(); }
+});
+
+test("idle verification distinguishes failed updates from document mismatches", async () => {
+  const f = await fixture();
+  try {
+    await scan(f.config, f.state, { source: "pi" });
+    const original = f.state.listGenerations()[0]!;
+    f.state.setGenerationState("pi", "audit-session", original.canonicalHash, "completed");
+    await fs.writeFile(f.file, beta);
+    await scan(f.config, f.state, { source: "pi" });
+    const update = f.state.getLatestGeneration("pi", "audit-session")!;
+    f.state.setGenerationState("pi", "audit-session", update.canonicalHash, "failed", { attemptCount: 3 });
+    const client: any = {
+      ensureBank: async () => undefined,
+      assertBankConfiguration: async () => ({}),
+      assertExtractionAvailable: async () => undefined,
+      listDocuments: async () => [{ id: "agent-session:pi:audit-session", content_hash: original.canonicalHash }],
+      getBankStats: async () => ({ failed_operations: 6 }),
+      getBankConfig: async () => ({ config: { enable_auto_consolidation: true } }),
+    };
+    await assert.rejects(() => runImportCycle(f.config, f.state, client), /1 failed session updates, 0 missing documents, 0 unexpected documents, 0 excluded documents present, 0 hash mismatches/);
+    client.listDocuments = async () => [{ id: "agent-session:pi:audit-session", content_hash: "different" }];
+    await assert.rejects(() => runImportCycle(f.config, f.state, client), /1 hash mismatches/);
   } finally { await f.close(); }
 });
 
