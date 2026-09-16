@@ -318,6 +318,13 @@ export class StateDatabase {
     this.db.prepare("DELETE FROM scan_errors WHERE source=? AND locator=?").run(source, locator);
   }
 
+  clearMissingScanErrors(source: Source, discoveredLocators: ReadonlySet<string>): void {
+    const rows = this.db.prepare("SELECT locator FROM scan_errors WHERE source=?").all(source) as { locator: string }[];
+    for (const { locator } of rows) {
+      if (!discoveredLocators.has(locator)) this.clearScanError(source, locator);
+    }
+  }
+
   heartbeat(phase: string, error?: string): void {
     this.db.prepare("INSERT INTO daemon_status(id,pid,heartbeat_at,phase,last_error) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,phase=excluded.phase,last_error=excluded.last_error").run(process.pid, new Date().toISOString(), phase, error?.slice(0, 1000) ?? null);
   }

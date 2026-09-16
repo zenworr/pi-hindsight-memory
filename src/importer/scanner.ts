@@ -236,6 +236,7 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
   if (!options.inventoryOnly && options.limit === undefined && options.offset === undefined && !options.sessionIds) {
     for (const adapter of adapters) {
       if (!healthy.get(adapter.source) || !(await exists(sourceRoot(adapter, config)))) continue;
+      state.clearMissingScanErrors(adapter.source, new Set(discovered.filter((item) => item.adapter.source === adapter.source).map((item) => item.reference.locator)));
       for (const old of state.listSessions(adapter.source)) {
         if (!seen.get(adapter.source)?.has(old.nativeSessionId) && !["source_missing", "excluded_subagent", "excluded_ambiguous", "excluded_configured", "ambiguous_preserved", "cleanup_pending"].includes(old.status)) { state.markSourceMissing(old.source, old.nativeSessionId, new Date().toISOString()); summary.sourceMissing += 1; }
       }

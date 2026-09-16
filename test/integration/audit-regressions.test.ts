@@ -33,6 +33,58 @@ async function fixture() {
   return { root, config, file, state, async close() { state.close(); await fs.rm(root, { recursive: true, force: true }); } };
 }
 
+test("a complete scan clears errors for deleted files without removing stored evidence", async () => {
+  const f = await fixture();
+  try {
+    await scan(f.config, f.state, { source: "pi" });
+    const generation = f.state.listGenerations()[0]!;
+    f.state.setGenerationState("pi", "audit-session", generation.canonicalHash, "completed");
+    f.state.recordScanError("pi", f.file, "ENOENT: file deleted during scan");
+    f.state.recordScanError("codex", "other-source", "Unavailable");
+    await fs.rm(f.file);
+    const errors = () => f.state.db.prepare("SELECT COUNT(*) AS n FROM scan_errors WHERE source='pi'").get()!.n;
+    for (const options of [{ limit: 0 }, { offset: 0 }, { sessionIds: [] }, { inventoryOnly: true }]) {
+      await scan(f.config, f.state, { source: "pi", ...options });
+      assert.equal(errors(), 1, "partial or inventory scans must keep the error");
+    }
+    const result = await scan(f.config, f.state, { source: "pi" });
+    assert.equal(result.errors, 0);
+    assert.equal(errors(), 0);
+    assert.equal(f.state.getSession("pi", "audit-session")?.status, "source_missing");
+    assert.equal(f.state.getSession("pi", "audit-session")?.acknowledgedHash, generation.canonicalHash);
+    assert.equal(f.state.getGeneration("pi", "audit-session", generation.canonicalHash)?.state, "completed");
+    assert.equal(f.state.db.prepare("SELECT COUNT(*) AS n FROM scan_errors WHERE source='codex'").get()!.n, 1);
+  } finally { await f.close(); }
+});
+
+test("a complete scan keeps errors for files that are still settling", async () => {
+  const f = await fixture();
+  try {
+    f.config.sessionSettleSeconds = 3600;
+    f.state.recordScanError("pi", f.file, "Previous parse error");
+    f.state.recordScanError("pi", path.join(f.config.sourceRoots.pi, "deleted.jsonl"), "ENOENT");
+    const result = await scan(f.config, f.state, { source: "pi" });
+    assert.equal(result.active, 1);
+    const errors = f.state.db.prepare("SELECT locator FROM scan_errors").all();
+    assert.deepEqual(errors.map((row) => row.locator), [f.file]);
+  } finally { await f.close(); }
+});
+
+test("missing roots and failed discovery do not clear deleted-file errors", async () => {
+  const f = await fixture();
+  try {
+    await scan(f.config, f.state, { source: "pi" });
+    f.state.recordScanError("pi", f.file, "ENOENT: file deleted during scan");
+    await fs.rm(f.config.sourceRoots.pi, { recursive: true });
+    assert.equal((await scan(f.config, f.state, { source: "pi" })).errors, 1);
+    assert.ok(f.state.db.prepare("SELECT 1 FROM scan_errors WHERE locator=?").get(f.file));
+    await fs.mkdir(f.config.sourceRoots.pi);
+    await fs.writeFile(path.join(f.config.sourceRoots.pi, "broken.jsonl"), "not JSON\n");
+    assert.equal((await scan(f.config, f.state, { source: "pi" })).errors, 1);
+    assert.ok(f.state.db.prepare("SELECT 1 FROM scan_errors WHERE locator=?").get(f.file));
+  } finally { await f.close(); }
+});
+
 for (const change of ["append", "remove"] as const) test(`recovery polls a submitted operation before source ${change}`, async () => {
   const f = await fixture();
   try {
