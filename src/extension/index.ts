@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { loadConfig } from "../common/config.js";
+import { ERROR_MESSAGE_MAX_CHARS } from "../common/limits.js";
 import { errorMessage } from "../common/logging.js";
 import { stripInjectedMemory } from "../canonical/injected-memory.js";
 import { redactText } from "../canonical/redact.js";
@@ -36,7 +37,8 @@ export function createMemorySearchTool(client: HindsightClient, minRelevanceScor
           : formatRecallResponse(await client.recall(query, signal), { minRelevanceScore });
         return { content: [{ type: "text", text: formatted.text }], details: formatted.details };
       } catch (error) {
-        const message = redactText(stripInjectedMemory(errorMessage(error))).text.slice(0, 1_000);
+        const message = redactText(stripInjectedMemory(errorMessage(error))).text.slice(0, ERROR_MESSAGE_MAX_CHARS);
+        // eslint-disable-next-line preserve-caught-error -- Do not expose unredacted errors through the tool result.
         throw new Error(`memory_search failed: ${message}`);
       }
     },

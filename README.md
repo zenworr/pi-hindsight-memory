@@ -64,8 +64,10 @@ It controls:
 - all four session locations;
 - the Codex and OpenCode databases;
 - exact session-label exclusions;
-- scan interval, active-session settle delay, import concurrency, and weak-result relevance floor;
+- scan interval, active-session settle delay, import concurrency, retry limits, and weak-result relevance floor;
 - state, source-index, reviewed-fact, spool, report, and approval locations.
+
+Validate changes offline with `node dist/src/importer/cli.js config --check`. Use `config --defaults` to list supported settings. See the [configuration reference](docs/CONFIGURATION.md) for defaults, units, paths, and environment overrides. Unknown settings are errors.
 
 For a single-host deployment, application/provider settings and PostgreSQL credentials use separate private files:
 
@@ -120,11 +122,15 @@ A stopped or interrupted import is resumable. Caller-owned operation IDs and the
 
 ## Development
 
+Install ShellCheck with your system package manager (`brew install shellcheck` on macOS), then run:
+
 ```bash
 npm ci
-npm run check
-npm test
+npm run validate
+npm run deps:audit
 ```
+
+`validate` runs strict TypeScript and typed ESLint checks, ShellCheck, dependency and unused-code checks, documentation checks, tests, and package-content checks. `release:check` also runs the network-based security audit. See [testing](docs/TESTING.md) for individual commands.
 
 See also:
 

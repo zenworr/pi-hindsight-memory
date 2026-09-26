@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { PRIVATE_FILE_MODE } from "../common/limits.js";
 import type { AppConfig } from "../common/types.js";
 import { StateDatabase } from "./state-db.js";
 
-export async function withStateLock<T>(config: AppConfig, fn: (state: StateDatabase) => Promise<T>): Promise<T> {
+export async function withStateLock<T>(config: AppConfig, fn: (state: StateDatabase) => T | Promise<T>): Promise<T> {
   const lock = new DaemonLock(path.join(config.stateDirectory, "daemon.lock"));
   lock.acquire();
   try {
@@ -13,14 +14,14 @@ export async function withStateLock<T>(config: AppConfig, fn: (state: StateDatab
   } finally { lock.release(); }
 }
 
-export class DaemonLock {
+class DaemonLock {
   private descriptor: number | undefined;
   constructor(private readonly lockPath: string) {}
 
   acquire(): void {
     fs.mkdirSync(path.dirname(this.lockPath), { recursive: true, mode: 0o700 });
     try {
-      this.descriptor = fs.openSync(this.lockPath, "wx", 0o600);
+      this.descriptor = fs.openSync(this.lockPath, "wx", PRIVATE_FILE_MODE);
       fs.writeSync(this.descriptor, `${process.pid}\n`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -38,7 +39,7 @@ export class DaemonLock {
         this.acquire();
         return;
       }
-      throw new Error(`Importer daemon is already running (${this.lockPath})`);
+      throw new Error(`Importer daemon is already running (${this.lockPath})`, { cause: error });
     }
   }
 

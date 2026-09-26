@@ -6,6 +6,7 @@ import { HindsightClient } from "../hindsight/client.js";
 import { scan } from "./scanner.js";
 import { withStateLock } from "./lock.js";
 import { sleep } from "../common/async.js";
+import { MS_PER_SECOND } from "../common/limits.js";
 import { generationCounts, StateDatabase } from "./state-db.js";
 import { ImportWorker } from "./worker.js";
 import { verifyFullImport } from "./verify.js";
@@ -14,14 +15,15 @@ import { removePendingPayload } from "./pending-payload.js";
 
 export interface DaemonOptions { once?: boolean; scanFirst?: boolean; }
 
-const ERROR_RETRY_MS = 30_000;
+const HEARTBEAT_INTERVAL_MS = 15_000;
+const DAEMON_TICK_MS = 1_000;
 
 export async function runImportCycle(config: AppConfig, state: StateDatabase, client: HindsightClient, logger = new Logger("importer"), signal?: AbortSignal, scanFirst = true): Promise<{ scan?: Awaited<ReturnType<typeof scan>>; worker: Awaited<ReturnType<ImportWorker["runOnce"]>> }> {
   const worker = new ImportWorker(config, state, client, logger);
   await worker.preflight(signal);
   const scanResult = scanFirst ? await scan(config, state, { signal }) : undefined;
-  const workerResult = await worker.runOnce(Math.max(1000, config.maxInflightDocuments * 100), signal);
-  if (state.pendingWorkCount() === 0 && !signal?.aborted) {
+  const workerResult = await worker.runOnce(config.importer.workBatchSize, signal);
+  if (state.pendingWorkCount(config.importer.maxAttempts) === 0 && !signal?.aborted) {
     const verification = await verifyFullImport(config, client, { signal });
     if (!verification.documentAccountingReady) {
       throw new Error(`Import verification failed: ${verification.failedGenerations} failed session updates, ${verification.missingDocumentCount} missing documents, ${verification.unexpectedDocumentCount} unexpected documents, ${verification.excludedDocumentsPresentCount} excluded documents present, ${verification.documentHashMismatchCount} hash mismatches; run verify-import for details`);
@@ -40,17 +42,17 @@ async function runLockedDaemon(config: AppConfig, state: StateDatabase, options:
   try {
     for (const name of await fs.readdir(path.join(config.spoolDirectory, "pending"))) {
       if (!/^[a-f0-9-]+\.json$/.test(name)) continue;
-      const id = name.slice(0, -5);
+      const id = name.slice(0, -".json".length);
       if (state.getOperation(id)?.hindsightStatus === "completed") await removePendingPayload(config.spoolDirectory, id);
     }
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") logger.warn("Completed payload cleanup requires attention"); }
   const client = new HindsightClient(config.hindsight);
   const abort = new AbortController();
-  const stop = () => abort.abort();
+  const stop = () => { abort.abort(); };
   let phase = "starting";
   let lastError: string | undefined;
   state.heartbeat(phase);
-  const heartbeat = setInterval(() => state.heartbeat(phase, lastError), 15_000);
+  const heartbeat = setInterval(() => { state.heartbeat(phase, lastError); }, HEARTBEAT_INTERVAL_MS);
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
@@ -63,13 +65,13 @@ async function runLockedDaemon(config: AppConfig, state: StateDatabase, options:
     while (!abort.signal.aborted) {
       const paused = await isPaused(config);
       phase = paused ? "paused" : lastError ? "error" : "idle";
-      const scanDue = Date.now() >= nextFullScan;
-      if (!paused && Date.now() >= retryAt && (scanDue || lastError || state.pendingWorkCount() > 0)) {
+      const scanDue = options.scanFirst !== false && Date.now() >= nextFullScan;
+      if (!paused && Date.now() >= retryAt && (scanDue || lastError || state.pendingWorkCount(config.importer.maxAttempts) > 0)) {
         phase = "working";
         state.heartbeat(phase, lastError);
         try {
           await runImportCycle(config, state, client, logger, abort.signal, scanDue);
-          if (scanDue) nextFullScan = Date.now() + config.scanIntervalSeconds * 1000;
+          if (scanDue) nextFullScan = Date.now() + config.scanIntervalSeconds * MS_PER_SECOND;
           lastError = undefined;
           phase = "idle";
           retryAt = 0;
@@ -77,13 +79,13 @@ async function runLockedDaemon(config: AppConfig, state: StateDatabase, options:
           if (!abort.signal.aborted) {
             lastError = redactText(errorMessage(error)).text;
             phase = "error";
-            retryAt = Date.now() + ERROR_RETRY_MS;
+            retryAt = Date.now() + config.importer.retryDelayMs;
             logger.error("Import cycle failed", { error: lastError });
           }
         }
         state.heartbeat(phase, lastError);
       }
-      try { await sleep(1000, abort.signal); } catch { break; }
+      try { await sleep(DAEMON_TICK_MS, abort.signal); } catch { break; }
     }
   } finally {
     clearInterval(heartbeat);
@@ -106,7 +108,7 @@ export async function drainImporter(config: AppConfig, maxMs?: number, scanFirst
 
 export function status(config: AppConfig): Record<string, unknown> {
   const state = new StateDatabase(config.stateDatabase, { readOnly: true });
-  try { return { database: config.stateDatabase, bank: config.hindsight.bankId, counts: state.counts(), budget: state.budget(), pendingWork: state.pendingWorkCount(), generations: generationCounts(state.db) }; }
+  try { return { database: config.stateDatabase, bank: config.hindsight.bankId, counts: state.counts(), budget: state.budget(), pendingWork: state.pendingWorkCount(config.importer.maxAttempts), generations: generationCounts(state.db) }; }
   finally { state.close(); }
 }
 

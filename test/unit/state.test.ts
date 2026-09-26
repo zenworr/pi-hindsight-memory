@@ -59,7 +59,7 @@ test("read-only state inspection cannot create databases or change stored state"
     const reader = new StateDatabase(file, { readOnly: true });
     try {
       assert.equal(reader.listSessions().length, 1);
-      assert.throws(() => reader.setSessionStatus("pi", "existing", "changed"), /readonly/i);
+      assert.throws(() => { reader.setSessionStatus("pi", "existing", "changed"); }, /readonly/i);
       assert.equal(reader.getSession("pi", "existing")?.status, "discovered");
     } finally { reader.close(); }
   } finally { await fs.rm(root, { recursive: true, force: true }); }
@@ -70,9 +70,13 @@ test("work selection is bounded, prioritizes active operations, and excludes exh
   try {
     state.upsertSession(sessionRow("work"));
     const states = ["completed", "failed", "queued", "submitted", "processing", "failed", "excluded", "superseded", "cleanup_pending"] as const;
-    states.forEach((value, i) => state.upsertGeneration({ source: "pi", nativeSessionId: "work", canonicalHash: `h${i}`, operationId: `op${i}`, state: value, attemptCount: i === 5 ? 3 : 1, queuedAt: `2026-01-01T00:00:0${i}.000Z` }));
-    assert.deepEqual(state.listWorkCandidates(3).map((g) => g.operationId), ["op3", "op4", "op2"]);
-    assert.deepEqual(state.listWorkCandidates().map((g) => g.operationId), ["op3", "op4", "op2", "op1"]);
+    states.forEach((value, i) => { state.upsertGeneration({ source: "pi", nativeSessionId: "work", canonicalHash: `h${i}`, operationId: `op${i}`, state: value, attemptCount: i === 5 ? 3 : 1, queuedAt: `2026-01-01T00:00:0${i}.000Z` }); });
+    assert.deepEqual(state.listWorkCandidates(3, 3).map((g) => g.operationId), ["op3", "op4", "op2"]);
+    assert.deepEqual(state.listWorkCandidates(100, 3).map((g) => g.operationId), ["op3", "op4", "op2", "op1"]);
+    assert.deepEqual(state.listWorkCandidates(100, 1).map((g) => g.operationId), ["op3", "op4", "op2"]);
+    assert.deepEqual(state.listWorkCandidates(100, 4).map((g) => g.operationId), ["op3", "op4", "op2", "op1", "op5"]);
+    assert.equal(state.pendingWorkCount(1), 3);
+    assert.equal(state.pendingWorkCount(4), 5);
     assert.equal(state.hasActiveOperations(), true);
     assert.equal(generationCounts(state.db).failed, 2);
     state.db.exec("UPDATE generations SET state='superseded' WHERE state IN ('processing','submitted')");

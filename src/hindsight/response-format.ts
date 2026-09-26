@@ -9,12 +9,16 @@ export interface MemorySearchDetails {
   degraded?: boolean;
 }
 
-const MAX_OUTPUT_BYTES = 50 * 1024;
+const MAX_OUTPUT_BYTES = 51_200;
+const MAX_RESULTS = 6;
+const MAX_MEMORY_BYTES = 4_000;
+const MAX_EXCERPT_BYTES = 1_500;
+const SCORE_DECIMAL_PLACES = 4;
 const MAX_OUTPUT_LINES = 2_000;
 // Hindsight returns nearest neighbors even when no evidence matches.
-export const DEFAULT_MIN_RELEVANCE_SCORE = 0.01;
+const DEFAULT_MIN_RELEVANCE_SCORE = 0.01;
 
-function safe(value: unknown): string { return typeof value === "string" ? value : value == null ? "" : String(value); }
+function safe(value: unknown): string { return typeof value === "string" ? value : ""; }
 function shorten(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
   let result = value.slice(0, Math.max(1, maxBytes - 1));
@@ -22,7 +26,7 @@ function shorten(value: string, maxBytes: number): string {
   return `${result}…`;
 }
 function dateOf(result: RecallResult): string { return result.occurred_start ?? result.mentioned_at ?? "date unavailable"; }
-function scoreOf(result: RecallResult): string { const score = result.scores?.final; return typeof score === "number" ? `; relative score ${score.toFixed(4)}` : ""; }
+function scoreOf(result: RecallResult): string { const score = result.scores?.final; return typeof score === "number" ? `; relative score ${score.toFixed(SCORE_DECIMAL_PLACES)}` : ""; }
 
 function sourceKey(result: RecallResult): string {
   const metadata = result.metadata ?? {};
@@ -73,7 +77,7 @@ export function formatRecallResponse(response: RecallResponse, options: { minRel
     const key = result.id ?? `${result.type ?? ""}\n${result.text ?? ""}\n${result.document_id ?? ""}`;
     if (seen.has(key)) continue;
     seen.add(key); results.push(result);
-    if (results.length === 6) break;
+    if (results.length === MAX_RESULTS) break;
   }
   if (results.length === 0) return { text: "No matching memory evidence was returned. Do not treat this as proof that the information never existed.", details: { resultCount: 0, sourceCount: 0, noMatch: true } };
 
@@ -84,13 +88,13 @@ export function formatRecallResponse(response: RecallResponse, options: { minRel
     for (const source of sources) sourceKeys.add(source);
     lines.push("");
     lines.push(`${index + 1}. ${result.type ?? "memory"} — ${dateOf(result)}${scoreOf(result)}`);
-    lines.push(`   ${shorten(safe(result.text) || "(empty memory text)", 4_000).replaceAll("\n", "\n   ")}`);
+    lines.push(`   ${shorten(safe(result.text) || "(empty memory text)", MAX_MEMORY_BYTES).replaceAll("\n", "\n   ")}`);
     lines.push("   Sources:");
     for (const source of sources) lines.push(`   - ${source}`);
     const excerpt = excerptFor(result, response);
     if (excerpt && excerpt !== result.text) {
       const label = result.chunk_id && response.chunks?.[result.chunk_id]?.text ? "Transcript excerpt" : "Derived supporting fact (not an original quotation)";
-      lines.push(`   ${label}: ${shorten(excerpt, 1_500).replaceAll("\n", " ")}`);
+      lines.push(`   ${label}: ${shorten(excerpt, MAX_EXCERPT_BYTES).replaceAll("\n", " ")}`);
     }
     if (result.source_fact_ids && result.source_fact_ids.length > 0) lines.push(`   Supporting source facts: ${result.source_fact_ids.length}${response.source_facts_truncated ? " (some source facts omitted by budget)" : ""}`);
   });

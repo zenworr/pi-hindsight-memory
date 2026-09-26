@@ -68,7 +68,7 @@ test("worker shutdown leaves submitted work recoverable instead of failed", asyn
     waitForOperation: async (_id: string, signal: AbortSignal) => {
       signal.throwIfAborted();
       return new Promise((_, reject) => {
-        signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        signal.addEventListener("abort", () => { reject(new Error("aborted")); }, { once: true });
       });
     },
   };

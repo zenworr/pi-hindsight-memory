@@ -5,6 +5,8 @@ import { createAdapters } from "../adapters/index.js";
 import { errorMessage } from "../common/logging.js";
 import { configuredExclusion } from "./exclusions.js";
 
+const MAX_LARGEST_SESSIONS = 20;
+
 function emptySourceStats() {
   return { discovered: 0, eligible: 0, empty: 0, subagents: 0, configured: 0, ambiguous: 0, malformed: 0, tooLarge: 0, errors: 0, sourceBytes: 0, canonicalBytes: 0, canonicalTurns: 0, redactions: 0 };
 }
@@ -72,7 +74,7 @@ export async function runInventory(config: AppConfig, options: { source?: Source
       results.push({ source: adapter.source, nativeSessionId: "<discovery>", locator: adapter.source === "opencode" ? config.opencodeDatabase : config.sourceRoots[adapter.source], status: "error", error: errorMessage(error) });
     }
   }
-  const largestCanonical = results.filter((result) => result.canonicalBytes !== undefined).sort((a, b) => (b.canonicalBytes ?? 0) - (a.canonicalBytes ?? 0)).slice(0, 20).map((result) => ({ source: result.source, nativeSessionId: result.nativeSessionId, canonicalBytes: result.canonicalBytes ?? 0, sourceBytes: result.sourceBytes ?? 0 }));
+  const largestCanonical = results.filter((result) => result.canonicalBytes !== undefined).sort((a, b) => (b.canonicalBytes ?? 0) - (a.canonicalBytes ?? 0)).slice(0, MAX_LARGEST_SESSIONS).map((result) => ({ source: result.source, nativeSessionId: result.nativeSessionId, canonicalBytes: result.canonicalBytes ?? 0, sourceBytes: result.sourceBytes ?? 0 }));
   const totals = SOURCES.reduce((acc, source) => {
     const stats = bySource[source];
     acc.discovered += stats.discovered; acc.eligible += stats.eligible; acc.empty += stats.empty; acc.subagents += stats.subagents; acc.configured += stats.configured; acc.ambiguous += stats.ambiguous; acc.malformed += stats.malformed; acc.tooLarge += stats.tooLarge; acc.errors += stats.errors; acc.sourceBytes += stats.sourceBytes; acc.canonicalBytes += stats.canonicalBytes; acc.canonicalTurns += stats.canonicalTurns; acc.redactions += stats.redactions;

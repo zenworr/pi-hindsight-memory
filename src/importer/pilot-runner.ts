@@ -1,17 +1,21 @@
 import fs from "node:fs/promises";
+import { JSON_INDENT } from "../common/limits.js";
+
 import path from "node:path";
 import type { AppConfig, Source } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
 import { HindsightClient } from "../hindsight/client.js";
 import type { PilotEntry } from "./pilot.js";
 
+const DEFAULT_PILOT_CONCURRENCY = 2;
+
 export interface PilotRunResult { source: Source; nativeSessionId: string; canonicalBytes: number; modes: Record<string, Record<string, unknown>>; error?: string; }
 
-export async function runPilot(config: AppConfig, entries: PilotEntry[], modes = ["concise", "verbose"], maxConcurrent = 2): Promise<PilotRunResult[]> {
+export async function runPilot(config: AppConfig, entries: PilotEntry[], modes = ["concise", "verbose"], maxConcurrent = DEFAULT_PILOT_CONCURRENCY): Promise<PilotRunResult[]> {
   const client = new HindsightClient(config.hindsight);
   await client.ensureBank();
   const adapters = new Map(createAdapters(config).map((adapter) => [adapter.source, adapter]));
-  const results: Array<PilotRunResult | undefined> = new Array(entries.length);
+  const results: Array<PilotRunResult | undefined> = new Array<PilotRunResult | undefined>(entries.length);
   let next = 0;
   async function worker(): Promise<void> {
     for (;;) {
@@ -43,5 +47,5 @@ async function runOne(config: AppConfig, client: HindsightClient, adapters: Map<
 
 export async function writePilotResults(pathname: string, results: PilotRunResult[]): Promise<void> {
   await fs.mkdir(path.dirname(path.resolve(pathname)), { recursive: true, mode: 0o700 });
-  await fs.writeFile(pathname, `${JSON.stringify(results, null, 2)}\n`, { mode: 0o600 });
+  await fs.writeFile(pathname, `${JSON.stringify(results, null, JSON_INDENT)}\n`, { mode: 0o600 });
 }

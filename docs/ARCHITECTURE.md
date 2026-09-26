@@ -1,5 +1,20 @@
 # Architecture
 
+## Source layout
+
+```text
+src/
+  common/      configuration, validation, shared types, and limits
+  canonical/   normalization, redaction, and streaming output
+  adapters/    read-only harness-specific source readers
+  hindsight/   HTTP client, protocol constants, and result formatting
+  importer/    CLI arguments, scanning, queue, state, and recovery
+  extension/   Pi tool, hybrid retrieval, and status provider
+scripts/checks/ package and documentation checks
+```
+
+The CLI parser validates options before loading configuration or starting work. Configuration defaults and validation are shared by the CLI, daemon, and extension. ESLint prevents shared code, canonical processing, and source adapters from importing orchestration or service clients. Knip checks unused code, dependency declarations, unresolved imports, and cycles. Keep internal helpers private unless another module or a documented public API needs them.
+
 ## Components
 
 ### Pi extension

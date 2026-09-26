@@ -3,6 +3,7 @@ import path from "node:path";
 import type { AdapterLoadOptions, SessionClassification, SessionReference, SourceFingerprint } from "../common/types.js";
 import type { CanonicalSession } from "../common/types.js";
 import { documentIdFor } from "../common/hashing.js";
+import { READ_BUFFER_BYTES } from "../common/limits.js";
 import { CLASSIFICATION_POLICY_VERSION } from "../common/types.js";
 import { actionText } from "../canonical/actions.js";
 import { isMemorySearchToolName } from "../canonical/injected-memory.js";
@@ -24,6 +25,11 @@ import {
   type SessionAdapter,
 } from "./adapter.js";
 
+const LEGACY_CHILD_MIN_DEPTH = 3;
+const PARENT_DIRECTORY_OFFSET = 2;
+const ENTRY_PREFIX_BYTES = 512;
+const LINE_FEED_BYTE = 0x0a;
+
 interface PiEntry {
   type?: string;
   id?: string;
@@ -41,7 +47,7 @@ function filenameTimestamp(filePath: string): string {
 
 function childSessionLayout(root: string, filePath: string): boolean {
   const parts = path.relative(root, filePath).split(path.sep);
-  return path.basename(filePath) === "session.jsonl" && parts.length >= 3 && /^run-\d+$/.test(parts[parts.length - 2] ?? "");
+  return path.basename(filePath) === "session.jsonl" && parts.length >= LEGACY_CHILD_MIN_DEPTH && /^run-\d+$/.test(parts[parts.length - PARENT_DIRECTORY_OFFSET] ?? "");
 }
 
 function taskChildLayout(root: string, filePath: string): boolean {
@@ -56,7 +62,7 @@ async function sessionInfoName(filePath: string): Promise<string | undefined> {
     let trailing = true;
     const readName = (): { found: boolean; name?: string } => {
       const ordered = [...pieces].reverse();
-      const prefix = Buffer.concat(ordered.map((piece) => piece.subarray(0, 512)), 512).toString("utf8");
+      const prefix = Buffer.concat(ordered.map((piece) => piece.subarray(0, ENTRY_PREFIX_BYTES)), ENTRY_PREFIX_BYTES).toString("utf8");
       if (/^\s*\{\s*"type"\s*:\s*"(?!session_info")[^"]+"/.test(prefix)) return { found: false };
       try {
         const entry = JSON.parse(Buffer.concat(ordered).toString("utf8")) as PiEntry;
@@ -64,13 +70,13 @@ async function sessionInfoName(filePath: string): Promise<string | undefined> {
       } catch { return { found: false }; }
     };
     while (position > 0) {
-      const length = Math.min(position, 64 * 1024);
+      const length = Math.min(position, READ_BUFFER_BYTES);
       position -= length;
       const buffer = Buffer.alloc(length);
       const { bytesRead } = await handle.read(buffer, 0, length, position);
       if (bytesRead !== length) throw new Error("Pi session changed while reading its name; retry the scan");
       let end = length;
-      for (let newline = buffer.lastIndexOf(10, end - 1); newline >= 0; newline = end > 0 ? buffer.lastIndexOf(10, end - 1) : -1) {
+      for (let newline = buffer.lastIndexOf(LINE_FEED_BYTE, end - 1); newline >= 0; newline = end > 0 ? buffer.lastIndexOf(LINE_FEED_BYTE, end - 1) : -1) {
         pieces.push(buffer.subarray(newline + 1, end));
         if (!trailing) {
           const result = readName();

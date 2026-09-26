@@ -7,9 +7,9 @@ export const REDACTION_POLICY_VERSION = "3" as const;
 export const CLASSIFICATION_POLICY_VERSION = "3" as const;
 export const RETAIN_POLICY_VERSION = "2" as const;
 
-export type CanonicalRole = "system" | "user" | "assistant" | "action";
-export type Provenance = "original" | "memory-assisted";
-export type SessionClassificationKind = "primary" | "subagent" | "ambiguous" | "configured-exclusion";
+type CanonicalRole = "system" | "user" | "assistant" | "action";
+type Provenance = "original" | "memory-assisted";
+type SessionClassificationKind = "primary" | "subagent" | "ambiguous" | "configured-exclusion";
 
 export interface SessionClassification {
   kind: SessionClassificationKind;
@@ -92,10 +92,6 @@ export interface AdapterLoadOptions {
   persistedFallbackTimestamp?: string;
 }
 
-export interface ScanCursor {
-  watermark?: string;
-}
-
 export interface InventorySessionResult {
   source: Source;
   nativeSessionId: string;
@@ -175,6 +171,11 @@ export interface AppConfig {
   scanIntervalSeconds: number;
   sessionSettleSeconds: number;
   maxInflightDocuments: number;
+  importer: {
+    retryDelayMs: number;
+    maxAttempts: number;
+    workBatchSize: number;
+  };
   requireImportApproval: boolean;
   sourceRoots: {
     pi: string;
@@ -194,7 +195,11 @@ export interface HindsightConfig {
   bankId: string;
   apiTokenFile: string;
   requestTimeoutMs: number;
-  dryRunTimeoutMs?: number;
+  statusTimeoutMs: number;
+  httpMaxAttempts: number;
+  httpRetryDelayMs: number;
+  httpMaxRetryDelayMs: number;
+  dryRunTimeoutMs: number;
   retainWallTimeoutMs: number;
   recallMaxTokens: number;
   recallChunksMaxTokens: number;
@@ -265,7 +270,7 @@ export interface HindsightVersionResponse {
   features?: Record<string, unknown>;
 }
 
-export type ImportPrivacyMode = "remote-redacted" | "local";
+type ImportPrivacyMode = "remote-redacted" | "local";
 
 export interface ImportApproval {
   approvedAt: string;

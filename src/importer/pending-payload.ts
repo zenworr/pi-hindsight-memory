@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
+import { PRIVATE_FILE_MODE } from "../common/limits.js";
 import type { CanonicalSession } from "../common/types.js";
 
 type PayloadMetadata = Omit<CanonicalSession, "readContent" | "cleanup" | "contentPath">;
@@ -15,10 +16,10 @@ function paths(directory: string, operationId: string) {
 export async function savePendingPayload(directory: string, operationId: string, session: CanonicalSession): Promise<void> {
   const files = paths(directory, operationId);
   await fs.mkdir(files.root, { recursive: true, mode: 0o700 });
-  const { readContent: _read, cleanup: _cleanup, contentPath: _path, ...metadata } = session;
+  const metadata = { ...session, readContent: undefined, cleanup: undefined, contentPath: undefined };
   const temporaryText = `${files.text}.tmp`;
   await fs.copyFile(session.contentPath, temporaryText);
-  await fs.chmod(temporaryText, 0o600);
+  await fs.chmod(temporaryText, PRIVATE_FILE_MODE);
   const text = await fs.open(temporaryText, "r");
   try { await text.sync(); } finally { await text.close(); }
   await fs.rename(temporaryText, files.text);
@@ -39,7 +40,7 @@ export async function loadPendingPayload(directory: string, operationId: string,
   try { metadata = JSON.parse(await fs.readFile(files.metadata, "utf8")) as PayloadMetadata; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
   const hash = createHash("sha256");
-  for await (const chunk of createReadStream(files.text)) hash.update(chunk);
+  for await (const chunk of createReadStream(files.text)) hash.update(chunk as Buffer);
   if (metadata.canonicalHash !== expectedHash || hash.digest("hex") !== expectedHash) throw new Error("Pending payload hash does not match the submitted generation");
   return {
     ...metadata,
@@ -48,7 +49,7 @@ export async function loadPendingPayload(directory: string, operationId: string,
       if ((await fs.stat(files.text)).size > maxBytes) throw new Error("Pending payload exceeds the request limit");
       return fs.readFile(files.text, "utf8");
     },
-    async cleanup() {},
+    cleanup() { return Promise.resolve(); },
   };
 }
 

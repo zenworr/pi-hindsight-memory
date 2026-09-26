@@ -1,0 +1,10 @@
+export const MS_PER_SECOND = 1_000;
+export const HOUR_MS = 3_600_000;
+export const DAY_MS = 86_400_000;
+export const MAX_TIMER_MS = 2_147_483_647;
+export const READ_BUFFER_BYTES = 65_536;
+export const DEFAULT_MAX_CANONICAL_BYTES = 104_857_600;
+export const PRIVATE_FILE_MODE = 0o600;
+export const JSON_INDENT = 2;
+export const ERROR_MESSAGE_MAX_CHARS = 1_000;
+export const CHARS_PER_ESTIMATED_TOKEN = 4;

@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import { DAY_MS, MS_PER_SECOND } from "../common/limits.js";
+
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AppConfig, Source } from "../common/types.js";
@@ -9,12 +11,14 @@ import { documentIdFor, sha256 } from "../common/hashing.js";
 import { HindsightClient } from "../hindsight/client.js";
 import { Logger } from "../common/logging.js";
 import { normalizeSessionLabel } from "./exclusions.js";
-import { StateDatabase } from "./state-db.js";
+import type { StateDatabase } from "./state-db.js";
 import { ImportWorker } from "./worker.js";
 import { scan } from "./scanner.js";
 import { sleep } from "../common/async.js";
 
-export interface RepairTarget {
+const REPAIR_QUEUE_MULTIPLIER = 2;
+
+interface RepairTarget {
   source: Source;
   nativeSessionId: string;
   documentId: string;
@@ -54,7 +58,7 @@ export async function repairHistory(config: AppConfig, state: StateDatabase, cli
   if (plan.planHash !== sha256(JSON.stringify(unsigned)) || plan.configurationHash !== await configurationHash(config)) throw new Error("Repair plan or configuration changed; build and review a new plan");
   if (new Set(plan.targets.map((target) => target.documentId)).size !== plan.targets.length) throw new Error("Repair plan contains duplicate documents");
   await fs.access(path.join(config.stateDirectory, "paused"));
-  const deadline = AbortSignal.timeout(options.maxMs ?? 24 * 60 * 60 * 1000);
+  const deadline = AbortSignal.timeout(options.maxMs ?? DAY_MS);
   const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
   const logger = new Logger("historical-repair");
   const worker = new ImportWorker(config, state, client, logger, true, true);
@@ -70,11 +74,11 @@ export async function repairHistory(config: AppConfig, state: StateDatabase, cli
     const owned = active?.repair && active.retainPolicyVersion === RETAIN_POLICY_VERSION && state.getOperation(active.operationId);
     if (remote.get(target.documentId) !== target.previousHash && !(owned && (remote.get(target.documentId) === undefined || remote.get(target.documentId) === active.canonicalHash))) throw new Error("A remote document changed outside the reviewed repair plan");
   }
-  const limit = Math.max(2, config.maxInflightDocuments * 2);
+  const limit = Math.max(REPAIR_QUEUE_MULTIPLIER, config.maxInflightDocuments * REPAIR_QUEUE_MULTIPLIER);
   await fs.mkdir(config.reportDirectory, { recursive: true, mode: 0o700 });
   const progressPath = path.join(config.reportDirectory, "repair-progress.json");
   const progress = async (phase: string) => {
-    const value = { planHash: plan.planHash, phase, total: plan.targets.length, repaired: plan.targets.length - unfinished().length, pending: state.pendingWorkCount(), updatedAt: new Date().toISOString() };
+    const value = { planHash: plan.planHash, phase, total: plan.targets.length, repaired: plan.targets.length - unfinished().length, pending: state.pendingWorkCount(config.importer.maxAttempts), updatedAt: new Date().toISOString() };
     await fs.writeFile(`${progressPath}.tmp`, JSON.stringify(value), { mode: 0o600 });
     await fs.rename(`${progressPath}.tmp`, progressPath);
     logger.info("Repair progress", value);
@@ -102,11 +106,11 @@ export async function repairHistory(config: AppConfig, state: StateDatabase, cli
     const stats = await client.getBankStats(signal);
     if (stats.failed_operations || stats.failed_consolidation) throw new Error("Hindsight has failed work; inspect it before consolidation can continue");
     const active = (stats.pending_operations ?? 0) + (stats.operations_by_status?.processing ?? 0);
-    if (active) { await sleep(5000, signal); continue; }
+    if (active) { await sleep(config.hindsight.operationPollMs, signal); continue; }
     if (!stats.pending_consolidation) break;
     const operation = await client.consolidate(undefined, signal);
     if (operation.operation_id) await client.waitForOperation(operation.operation_id, signal, config.hindsight.retainWallTimeoutMs);
-    else await sleep(1000, signal);
+    else await sleep(MS_PER_SECOND, signal);
     await progress("consolidating");
   }
   const documents = new Map((await client.listDocuments(signal)).map((document) => [document.id, document.content_hash]));

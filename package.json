@@ -1,6 +1,6 @@
 {
   "name": "pi-hindsight-memory",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Global, provenance-preserving memory for Pi backed by Hindsight.",
   "type": "module",
   "engines": {
@@ -18,11 +18,21 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "lint:fix": "npm run lint -- --fix",
+    "lint:shell": "shellcheck --external-sources scripts/*.sh scripts/lib/*.sh",
+    "deps:check": "npm ls --all > /dev/null && knip --treat-config-hints-as-errors && knip --include cycles",
+    "deps:audit": "npm audit --audit-level=low",
+    "check:docs": "node scripts/checks/docs.mjs",
+    "check:package": "node scripts/checks/package.mjs",
+    "validate": "npm run check && npm run lint && npm run lint:shell && npm run deps:check && npm run check:docs && npm test && npm run check:package",
+    "release:check": "npm run validate && npm run deps:audit",
     "test": "npm run build && node --test dist/test/unit/*.test.js dist/test/integration/*.test.js",
     "test:unit": "npm run build && node --test dist/test/unit/*.test.js",
     "inventory": "node dist/src/importer/cli.js inventory",
     "doctor": "node dist/src/importer/cli.js doctor",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run release:check"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.84.3"
@@ -32,8 +42,12 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.85.1",
+    "@eslint/js": "10.0.1",
     "@types/node": "22.19.19",
-    "typescript": "5.9.3"
+    "eslint": "10.11.0",
+    "knip": "6.38.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.70.1"
   },
   "repository": {
     "type": "git",

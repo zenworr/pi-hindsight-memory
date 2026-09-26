@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { defaultConfig } from "../../src/common/config.js";
 import { HindsightClient } from "../../src/hindsight/client.js";
 import { formatRecallResponse, boundOutput } from "../../src/hindsight/response-format.js";
 import { expectedRetainMission } from "../../src/common/retention-policy.js";
 import type { HindsightConfig } from "../../src/common/types.js";
 
 function config(timeout = 2_000): HindsightConfig {
-  return { apiUrl: "http://127.0.0.1:8888", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: timeout, retainWallTimeoutMs: 60_000, recallMaxTokens: 2_500, recallChunksMaxTokens: 2_500, recallSourceFactsMaxTokens: 1_500, operationPollMs: 10, operationPollTimeoutMs: 1000, operationRetentionDays: 14 };
+  return { ...defaultConfig().hindsight, apiUrl: "http://127.0.0.1:8888", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: timeout, retainWallTimeoutMs: 60_000, recallMaxTokens: 2_500, recallChunksMaxTokens: 2_500, recallSourceFactsMaxTokens: 1_500, operationPollMs: 10, operationPollTimeoutMs: 1000, operationRetentionDays: 14 };
 }
 
 function jsonResponse(value: unknown, status = 200, headers?: HeadersInit): Response { return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json", ...headers } }); }
@@ -14,7 +15,8 @@ function jsonResponse(value: unknown, status = 200, headers?: HeadersInit): Resp
 test("recall sends the unified internal request and preserves source evidence", async () => {
   let received: any;
   const client = new HindsightClient(config(), async (_url, request) => {
-    received = JSON.parse(String(request?.body));
+    assert.equal(typeof request?.body, "string");
+    received = JSON.parse(request!.body as string);
     return jsonResponse({ results: [{ id: "f1", text: "PostgreSQL is used", type: "observation", document_id: "agent-session:pi:s1", source_fact_ids: ["raw1"], metadata: { source: "pi", native_session_id: "s1", source_path: "/history/s1" }, scores: { final: 0.8 } }], source_facts: { raw1: { id: "raw1", text: "User selected PostgreSQL", type: "world", document_id: "agent-session:pi:s1", metadata: { source: "pi", native_session_id: "s1", source_path: "/history/s1" } } } });
   }, "token");
   const response = await client.recall("which database was selected?");
@@ -59,7 +61,7 @@ test("operation listing filters by status and follows pagination", async () => {
 test("configuration and retain use the v0.9.2 request envelopes", async () => {
   const requests: Array<{ url: string; method: string; body?: any }> = [];
   const client = new HindsightClient(config(), async (url, request) => {
-    const body = request?.body === undefined ? undefined : JSON.parse(String(request.body));
+    const body = request?.body === undefined ? undefined : JSON.parse(request.body as string);
     requests.push({ url: String(url), method: request?.method ?? "GET", body });
     if (String(url).endsWith("/config")) return jsonResponse({ config: {}, overrides: {} });
     if (String(url).endsWith("/import")) return jsonResponse({ ok: true });
@@ -112,7 +114,7 @@ test("retain sends the canonical document with a caller-owned stable operation I
   const fs = await import("node:fs/promises");
   await fs.writeFile(contentPath, '{"role":"system","content":"REF-ID: agent-session:pi:s1","timestamp":"2026-01-01T00:00:00.000Z"}\n', "utf8");
   const session: any = { source: "pi", documentId: "agent-session:pi:s1", nativeSessionId: "s1", contentPath, canonicalHash: "hash", canonicalBytes: 100, canonicalTurns: 1, sessionStartedAt: "2026-01-01T00:00:00.000Z", sessionUpdatedAt: "2026-01-01T00:00:00.000Z", metadata: { source: "pi", native_session_id: "s1", source_path: "/history/s1", canonical_schema: "agent-session-v1", adapter_version: "0.1.0", redaction_policy_version: "1" }, readContent: () => fs.readFile(contentPath, "utf8") };
-  const client = new HindsightClient(config(), async (_url, request) => { body = JSON.parse(String(request?.body)); return jsonResponse({ operation_id: "stable-op" }, 202); }, "token");
+  const client = new HindsightClient(config(), async (_url, request) => { body = JSON.parse(request?.body as string); return jsonResponse({ operation_id: "stable-op" }, 202); }, "token");
   const response = await client.retainWithOperationId(session, "stable-op");
   assert.equal(response.operation_id, "stable-op");
   assert.equal(body.operation_id, "stable-op");
@@ -196,7 +198,7 @@ test("missing operation response does not poll forever", async () => {
 test("one recall deadline covers a hanging endpoint", async () => {
   const started = Date.now();
   const client = new HindsightClient(config(120), async (_url, request) => await new Promise<Response>((_resolve, reject) => {
-    const keepAlive = setTimeout(() => reject(new Error("test timeout")), 2_000);
+    const keepAlive = setTimeout(() => { reject(new Error("test timeout")); }, 2_000);
     request?.signal?.addEventListener("abort", () => { clearTimeout(keepAlive); reject(new Error("aborted")); }, { once: true });
   }), "token");
   await assert.rejects(() => client.recall("hang"));

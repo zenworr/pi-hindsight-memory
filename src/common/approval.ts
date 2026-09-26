@@ -1,9 +1,14 @@
 import fs from "node:fs";
+import { CHARS_PER_ESTIMATED_TOKEN } from "./limits.js";
+
 import type { AppConfig, ImportApproval } from "./types.js";
+
+const TOKENS_PER_PRICING_UNIT = 1_000_000;
+const DEFAULT_OUTPUT_TOKEN_MULTIPLIER = 0.25;
 
 export interface ActiveProvider { provider: string; model: string; }
 
-export function readEnvironmentFile(pathname: string): Record<string, string> {
+function readEnvironmentFile(pathname: string): Record<string, string> {
   const output: Record<string, string> = {};
   if (!fs.existsSync(pathname)) return output;
   for (const raw of fs.readFileSync(pathname, "utf8").split(/\r?\n/)) {
@@ -55,9 +60,9 @@ export function assertImportApproval(config: AppConfig): ImportApproval {
   return approval;
 }
 
-export function estimateInputTokens(canonicalBytes: number): number { return Math.max(1, Math.ceil(canonicalBytes / 4)); }
+export function estimateInputTokens(canonicalBytes: number): number { return Math.max(1, Math.ceil(canonicalBytes / CHARS_PER_ESTIMATED_TOKEN)); }
 export function estimateCostUsd(tokens: number, approval: ImportApproval): number {
-  const input = (approval.inputUsdPerMillionTokens ?? 0) * tokens / 1_000_000;
-  const output = (approval.outputUsdPerMillionTokens ?? 0) * tokens * (approval.outputTokenMultiplier ?? 0.25) / 1_000_000;
+  const input = (approval.inputUsdPerMillionTokens ?? 0) * tokens / TOKENS_PER_PRICING_UNIT;
+  const output = (approval.outputUsdPerMillionTokens ?? 0) * tokens * (approval.outputTokenMultiplier ?? DEFAULT_OUTPUT_TOKEN_MULTIPLIER) / TOKENS_PER_PRICING_UNIT;
   return input + output;
 }

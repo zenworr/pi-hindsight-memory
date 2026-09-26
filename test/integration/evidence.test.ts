@@ -11,7 +11,7 @@ import { searchEvidence } from "../../src/importer/evidence.js";
 import { retrieveMemory } from "../../src/extension/retrieve.js";
 import { PiAdapter } from "../../src/adapters/pi.js";
 import { stripHarnessContext } from "../../src/canonical/injected-memory.js";
-import { HindsightClient } from "../../src/hindsight/client.js";
+import type { HindsightClient } from "../../src/hindsight/client.js";
 
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-evidence-"));
@@ -55,7 +55,7 @@ test("transcript evidence is private, idempotent, source-linked, and labels deri
     const hits = searchEvidence(f.config, "current Hindsight rollback logical backups").hits;
     assert.equal(hits[0]?.entryId, "user-b");
     assert.equal(hits[0]?.documentId, "agent-session:pi:source-session");
-    assert.match(hits[0]!.text, /stack was removed/);
+    assert.match(hits[0].text, /stack was removed/);
     assert.equal(searchEvidence(f.config, "INJECTED-CANARY").hits.length, 0);
     assert.equal(searchEvidence(f.config, "DERIVED-CANARY").hits[0]?.provenance, "memory-assisted");
     const count = () => {

@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { documentIdFor, sha256 } from "../common/hashing.js";
 import type { AppConfig, SessionClassification, Source } from "../common/types.js";
-import { HindsightClient } from "../hindsight/client.js";
+import type { HindsightClient } from "../hindsight/client.js";
 import { discoverClassifications } from "./subagent-cleanup.js";
 import { normalizeSessionLabel } from "./exclusions.js";
 
@@ -9,7 +9,7 @@ interface RawSession { source: Source; nativeSessionId: string; documentId: stri
 interface RawGeneration { source: Source; nativeSessionId: string; canonicalHash: string; operationId: string; state: string; }
 interface RawArtifact { classification: SessionClassification; }
 
-export interface CleanupPlanJob {
+interface CleanupPlanJob {
   jobId: string;
   targetKind: "subagent" | "ambiguous" | "configured-exclusion" | "primary_replay";
   source: Source;
@@ -51,7 +51,8 @@ function readArtifacts(db: DatabaseSync): Map<string, RawArtifact> {
     const source = String(row.source) as Source;
     const nativeSessionId = String(row.native_session_id);
     const locator = String(row.locator);
-    const parentSessionId = row.parent_session_id == null ? undefined : String(row.parent_session_id);
+    const parentSessionId = row.parent_session_id == null ? undefined : row.parent_session_id;
+    if (parentSessionId !== undefined && typeof parentSessionId !== "string") throw new Error("Invalid stored parent session ID");
     artifacts.set(artifactKey(source, nativeSessionId, locator), {
       classification: {
         kind: String(row.classification) as SessionClassification["kind"],

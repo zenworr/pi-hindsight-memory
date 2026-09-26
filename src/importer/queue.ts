@@ -1,8 +1,8 @@
-import type { CanonicalSession, Source } from "../common/types.js";
+import type { CanonicalSession } from "../common/types.js";
 import { RETAIN_POLICY_VERSION } from "../common/types.js";
 import { operationIdFor, replayOperationIdFor } from "../common/hashing.js";
 import type { GenerationRecord } from "./state-db.js";
-import { StateDatabase } from "./state-db.js";
+import type { StateDatabase } from "./state-db.js";
 
 export function nextOperationId(state: StateDatabase, bankId: string, documentId: string, hash: string, previousId?: string): string {
   let id = operationIdFor(bankId, documentId, hash);
@@ -32,5 +32,3 @@ export function queueGeneration(state: StateDatabase, session: CanonicalSession,
   state.upsertGeneration(record);
   return record;
 }
-
-export function sourceGenerationKey(source: Source, nativeSessionId: string): string { return `${source}:${nativeSessionId}`; }

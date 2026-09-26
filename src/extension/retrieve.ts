@@ -1,15 +1,20 @@
 import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { AppConfig } from "../common/types.js";
-import { HindsightClient } from "../hindsight/client.js";
+import type { HindsightClient } from "../hindsight/client.js";
 import { boundOutput, formatRecallResponse, type MemorySearchDetails } from "../hindsight/response-format.js";
 import { reviewedFacts, searchEvidence, type EvidenceHit, type ReviewedFact } from "../importer/evidence.js";
+
+const MAX_QUERY_CHARS = 2_000;
+const MAX_REVIEWED_TEXT_CHARS = 1_600;
+const MAX_REVIEWED_SOURCE_CHARS = 600;
+const MAX_SUPERSEDED_TEXT_CHARS = 800;
 
 export async function retrieveMemory(config: AppConfig, client: HindsightClient, query: string, signal?: AbortSignal): Promise<{ text: string; details: MemorySearchDetails }> {
   const callerSignal = signal;
   signal = signal ? AbortSignal.any([signal, AbortSignal.timeout(config.hindsight.requestTimeoutMs)]) : AbortSignal.timeout(config.hindsight.requestTimeoutMs);
   signal.throwIfAborted();
-  if ([...query].length > 2000) throw new Error("memory_search query is longer than Hindsight's 500-token limit");
+  if ([...query].length > MAX_QUERY_CHARS) throw new Error("memory_search query is longer than Hindsight's 500-token limit");
   if (fs.existsSync(config.stateDatabase)) {
     const db = new DatabaseSync(config.stateDatabase, { readOnly: true, timeout: 500 });
     try {
@@ -38,8 +43,8 @@ export async function retrieveMemory(config: AppConfig, client: HindsightClient,
   if (facts.length) {
     lines.push("", "Reviewed facts (verified at the stated time, not a live system check):");
     for (const fact of facts) {
-      lines.push(`- ${fact.text.slice(0, 1600)}`, `  Verified: ${fact.verifiedAt}; source: ${fact.source.slice(0, 600)}`);
-      if (fact.supersedes) lines.push(`  Superseded: ${fact.supersedes.slice(0, 800)}`);
+      lines.push(`- ${fact.text.slice(0, MAX_REVIEWED_TEXT_CHARS)}`, `  Verified: ${fact.verifiedAt}; source: ${fact.source.slice(0, MAX_REVIEWED_SOURCE_CHARS)}`);
+      if (fact.supersedes) lines.push(`  Superseded: ${fact.supersedes.slice(0, MAX_SUPERSEDED_TEXT_CHARS)}`);
     }
   }
   if (hits.length) {

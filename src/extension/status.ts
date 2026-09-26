@@ -3,6 +3,7 @@ import { generationCounts } from "../importer/state-db.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AppConfig, HindsightBankStats, HindsightOperation } from "../common/types.js";
 import { errorMessage } from "../common/logging.js";
+import { ERROR_MESSAGE_MAX_CHARS } from "../common/limits.js";
 import { HindsightClient } from "../hindsight/client.js";
 import { importerHealth, type ImporterHealth } from "../importer/health.js";
 import { redactText } from "../canonical/redact.js";
@@ -40,8 +41,6 @@ export interface HindsightStatusRequestV1 {
   protocolVersion: 1;
   respond(status: Promise<HindsightStatusSnapshotV1>): void;
 }
-
-const STATUS_TIMEOUT_MS = 4_000;
 
 function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
@@ -96,7 +95,7 @@ export async function collectHindsightStatus(
     consolidationActive: false,
   };
 
-  const signal = AbortSignal.timeout(STATUS_TIMEOUT_MS);
+  const signal = AbortSignal.timeout(config.hindsight.statusTimeoutMs);
   const [importerResult, serviceResult] = await Promise.allSettled([
     Promise.resolve().then(() => importerStatus(config)),
     Promise.all([client.health(signal), client.getBankStats(signal), client.listOperations("processing", signal)]),
@@ -106,16 +105,16 @@ export async function collectHindsightStatus(
     if (importer.paused) issues.push("Importer is paused");
     else if (!importer.running) issues.push("Importer is not running or its heartbeat is stale");
     else if (importer.staleSources > 0) issues.push(`${importer.staleSources} sources have no recent successful scan`);
-    if (importer.lastError) issues.push(`Importer cycle failed: ${redactText(importer.lastError).text.slice(0, 1000)}`);
+    if (importer.lastError) issues.push(`Importer cycle failed: ${redactText(importer.lastError).text.slice(0, ERROR_MESSAGE_MAX_CHARS)}`);
     if (importer.scanErrors > 0) issues.push(`${importer.scanErrors} source scan errors require attention`);
     if (importer.uncertain > 0) issues.push(`${importer.uncertain} remote operations await recovery`);
-  } else issues.push(`Importer state unavailable: ${redactText(errorMessage(importerResult.reason)).text.slice(0, 1000)}`);
+  } else issues.push(`Importer state unavailable: ${redactText(errorMessage(importerResult.reason)).text.slice(0, ERROR_MESSAGE_MAX_CHARS)}`);
   if (serviceResult.status === "fulfilled") {
     service = serviceStatus(serviceResult.value[0], serviceResult.value[1], serviceResult.value[2]);
     if (!service.healthy) issues.push("Hindsight API reports an unhealthy state");
     if (!service.databaseConnected) issues.push("Hindsight database is disconnected");
   } else {
-    issues.push(`Hindsight unavailable: ${redactText(errorMessage(serviceResult.reason)).text.slice(0, 1000)}`);
+    issues.push(`Hindsight unavailable: ${redactText(errorMessage(serviceResult.reason)).text.slice(0, ERROR_MESSAGE_MAX_CHARS)}`);
   }
 
   return {

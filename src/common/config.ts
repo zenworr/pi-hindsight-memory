@@ -3,6 +3,8 @@ import path from "node:path";
 import { absolutePath, defaultRuntimePaths, homeDirectory } from "./paths.js";
 import type { AppConfig } from "./types.js";
 import { SOURCES } from "./types.js";
+import { DEFAULT_MAX_CANONICAL_BYTES, DAY_MS, HOUR_MS } from "./limits.js";
+import { validateConfig, validateOverrides } from "./config-validation.js";
 
 const DEFAULT_BANK = "coding-history";
 const DEFAULT_API_URL = "http://127.0.0.1:8888";
@@ -26,10 +28,11 @@ export function defaultConfig(home = homeDirectory()): AppConfig {
     spoolDirectory: paths.spoolDirectory,
     approvalFile: path.join(paths.configDirectory, "import-approval.json"),
     sessionExclusions: { exactLabels: [] },
-    maxCanonicalBytes: 100 * 1024 * 1024,
+    maxCanonicalBytes: DEFAULT_MAX_CANONICAL_BYTES,
     scanIntervalSeconds: 900,
     sessionSettleSeconds: 3600,
     maxInflightDocuments: 4,
+    importer: { retryDelayMs: 30_000, maxAttempts: 3, workBatchSize: 1_000 },
     requireImportApproval: true,
     sourceRoots: {
       pi: path.join(piAgentDirectory, "sessions"),
@@ -46,55 +49,25 @@ export function defaultConfig(home = homeDirectory()): AppConfig {
       bankId: DEFAULT_BANK,
       apiTokenFile: paths.tokenPath,
       requestTimeoutMs: 15_000,
-      dryRunTimeoutMs: 5 * 60 * 1000,
-      retainWallTimeoutMs: 24 * 60 * 60 * 1000,
+      statusTimeoutMs: 4_000,
+      httpMaxAttempts: 3,
+      httpRetryDelayMs: 100,
+      httpMaxRetryDelayMs: 10_000,
+      dryRunTimeoutMs: 300_000,
+      retainWallTimeoutMs: DAY_MS,
       recallMaxTokens: 2_500,
       recallChunksMaxTokens: 2_500,
       recallSourceFactsMaxTokens: 1_500,
       minRelevanceScore: 0.01,
       operationPollMs: 5_000,
-      operationPollTimeoutMs: 60 * 60 * 1000,
+      operationPollTimeoutMs: HOUR_MS,
       operationRetentionDays: 14,
     },
   };
 }
 
 function merge<T extends object>(base: T, override: Partial<T>): T {
-  return { ...base, ...override } as T;
-}
-
-function assertPositiveNumber(value: unknown, name: string, allowZero = false): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || (allowZero ? value < 0 : value <= 0)) {
-    throw new Error(`${name} must be ${allowZero ? "a non-negative" : "a positive"} number`);
-  }
-  return value;
-}
-
-function validateConfig(config: AppConfig): AppConfig {
-  if (!config.hindsight.apiUrl.startsWith("http://") && !config.hindsight.apiUrl.startsWith("https://")) {
-    throw new Error("hindsight.apiUrl must use http:// or https://");
-  }
-  if (config.hindsight.uiUrl && !config.hindsight.uiUrl.startsWith("http://") && !config.hindsight.uiUrl.startsWith("https://")) {
-    throw new Error("hindsight.uiUrl must use http:// or https://");
-  }
-  if (!config.hindsight.bankId || /[\s/]/.test(config.hindsight.bankId)) {
-    throw new Error("hindsight.bankId must be a non-empty URL-safe identifier");
-  }
-  if (!Array.isArray(config.sessionExclusions.exactLabels) || config.sessionExclusions.exactLabels.some((label) => typeof label !== "string" || !label.trim())) throw new Error("sessionExclusions.exactLabels must contain non-empty strings");
-  assertPositiveNumber(config.maxCanonicalBytes, "maxCanonicalBytes");
-  assertPositiveNumber(config.scanIntervalSeconds, "scanIntervalSeconds");
-  assertPositiveNumber(config.sessionSettleSeconds, "sessionSettleSeconds", true);
-  assertPositiveNumber(config.maxInflightDocuments, "maxInflightDocuments");
-  assertPositiveNumber(config.hindsight.requestTimeoutMs, "hindsight.requestTimeoutMs");
-  assertPositiveNumber(config.hindsight.retainWallTimeoutMs, "hindsight.retainWallTimeoutMs");
-  assertPositiveNumber(config.hindsight.recallMaxTokens, "hindsight.recallMaxTokens", true);
-  assertPositiveNumber(config.hindsight.recallChunksMaxTokens, "hindsight.recallChunksMaxTokens", true);
-  assertPositiveNumber(config.hindsight.recallSourceFactsMaxTokens, "hindsight.recallSourceFactsMaxTokens", true);
-  if (config.hindsight.minRelevanceScore !== undefined) assertPositiveNumber(config.hindsight.minRelevanceScore, "hindsight.minRelevanceScore", true);
-  assertPositiveNumber(config.hindsight.operationPollMs, "hindsight.operationPollMs");
-  assertPositiveNumber(config.hindsight.operationPollTimeoutMs, "hindsight.operationPollTimeoutMs");
-  assertPositiveNumber(config.hindsight.operationRetentionDays, "hindsight.operationRetentionDays", true);
-  return config;
+  return { ...base, ...override };
 }
 
 export function loadConfig(configPath?: string, home = homeDirectory()): AppConfig {
@@ -104,14 +77,19 @@ export function loadConfig(configPath?: string, home = homeDirectory()): AppConf
     : defaults.configPath;
   let fileConfig: Partial<AppConfig> = {};
   if (fs.existsSync(selectedPath)) {
-    const parsed: unknown = JSON.parse(fs.readFileSync(selectedPath, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error(`Invalid config object: ${selectedPath}`);
-    fileConfig = parsed as Partial<AppConfig>;
+    let parsed: unknown;
+    try { parsed = JSON.parse(fs.readFileSync(selectedPath, "utf8")); }
+    catch { throw new Error(`Cannot read config JSON: ${selectedPath}`); }
+    validateOverrides(parsed, defaults);
+    fileConfig = parsed;
+  } else if (configPath || process.env.PI_HINDSIGHT_CONFIG) {
+    throw new Error(`Config file not found: ${selectedPath}`);
   }
   const config: AppConfig = {
     ...defaults,
     ...fileConfig,
     configPath: selectedPath,
+    importer: merge(defaults.importer, fileConfig.importer ?? {}),
     sourceRoots: merge(defaults.sourceRoots, fileConfig.sourceRoots ?? {}),
     sessionExclusions: { ...defaults.sessionExclusions, ...(fileConfig.sessionExclusions ?? {}) },
     hindsight: merge(defaults.hindsight, fileConfig.hindsight ?? {}),
@@ -137,7 +115,10 @@ export function loadConfig(configPath?: string, home = homeDirectory()): AppConf
   if (process.env.PI_HINDSIGHT_MAX_INFLIGHT) config.maxInflightDocuments = Number(process.env.PI_HINDSIGHT_MAX_INFLIGHT);
   if (process.env.PI_HINDSIGHT_SCAN_INTERVAL) config.scanIntervalSeconds = Number(process.env.PI_HINDSIGHT_SCAN_INTERVAL);
   if (process.env.PI_HINDSIGHT_SETTLE_SECONDS) config.sessionSettleSeconds = Number(process.env.PI_HINDSIGHT_SETTLE_SECONDS);
-  if (process.env.PI_HINDSIGHT_REQUIRE_APPROVAL !== undefined) config.requireImportApproval = process.env.PI_HINDSIGHT_REQUIRE_APPROVAL !== "0";
+  if (process.env.PI_HINDSIGHT_REQUIRE_APPROVAL !== undefined) {
+    if (!["0", "1"].includes(process.env.PI_HINDSIGHT_REQUIRE_APPROVAL)) throw new Error("PI_HINDSIGHT_REQUIRE_APPROVAL must be 0 or 1");
+    config.requireImportApproval = process.env.PI_HINDSIGHT_REQUIRE_APPROVAL === "1";
+  }
 
   return validateConfig(config);
 }

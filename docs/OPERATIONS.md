@@ -20,7 +20,7 @@ Logs contain source IDs, counts, hashes, and bounded errors. They must not conta
 
 `verify-import` reports `failedHindsightOperations` for diagnostics. This count includes retained terminal history and does not block readiness by itself. Current failed generations, document mismatches, active operations, and failed or pending consolidation still block readiness. Retained failure records are not deleted during recovery.
 
-The daemon retries a failed cycle after 30 seconds rather than waiting for the full scan interval. A successful queue recovery clears its cycle error immediately. Failed generations retain the three-attempt limit; exhausted failures need review and an explicit retry.
+The daemon retries a failed cycle after `importer.retryDelayMs` (30 seconds by default), rather than waiting for the full scan interval. A successful queue recovery clears its cycle error immediately. `importer.maxAttempts` defaults to three; exhausted failures need review before an explicit retry or a higher limit. See [configuration](CONFIGURATION.md).
 
 ## Pause and resume
 
@@ -43,6 +43,8 @@ node dist/src/importer/cli.js retry-failed
 node dist/src/importer/cli.js process-queued --max-ms 86400000
 scripts/importer-service.sh start
 ```
+
+`daemon --no-scan` processes only existing queued work and does not discover source sessions, including in continuous mode. Use the normal daemon for scheduled source scanning.
 
 `process-queued` supports continuous-mode auto-consolidation. Unknown remote outcomes stay submitted and are polled before any source reread. Known terminal failures receive a fresh retry identity. Do not edit state rows by hand.
 

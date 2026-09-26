@@ -31,9 +31,9 @@ export function defaultRuntimePaths(home = homeDirectory()) {
   };
 }
 
-export function expandHome(value: string, home = homeDirectory()): string {
+function expandHome(value: string, home = homeDirectory()): string {
   if (value === "~") return home;
-  if (value.startsWith("~/")) return path.join(home, value.slice(2));
+  if (value.startsWith("~/")) return path.join(home, value.slice("~/".length));
   return value;
 }
 

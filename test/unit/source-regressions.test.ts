@@ -31,7 +31,7 @@ test("Codex label lookup fails closed and refreshes mutable titles", async () =>
   try {
     await fs.writeFile(path.join(root, "session.jsonl"), JSON.stringify({ type: "session_meta", payload: { id: "example", timestamp: "2026-01-01T00:00:00.000Z", source: "cli" } }) + "\n");
     const missing = new CodexAdapter(root, database);
-    await assert.rejects(async () => { for await (const _ref of missing.discover()) { /* drain discovery */ } }, /label database/);
+    await assert.rejects(async () => { for await (const ref of missing.discover()) { assert.fail(`Unexpected session: ${ref.nativeSessionId}`); } }, /label database/);
     const writer = new DatabaseSync(database);
     writer.exec("CREATE TABLE threads(id TEXT PRIMARY KEY,title TEXT); INSERT INTO threads VALUES ('example','ordinary')");
     writer.close();
@@ -40,7 +40,7 @@ test("Codex label lookup fails closed and refreshes mutable titles", async () =>
     assert.equal(refs[0]?.sessionLabel, "ordinary");
     const update = new DatabaseSync(database);
     update.exec("UPDATE threads SET title='private-session'"); update.close();
-    assert.equal((await adapter.classify(refs[0]!)).label, "private-session");
+    assert.equal((await adapter.classify(refs[0])).label, "private-session");
     const drift = new DatabaseSync(database);
     drift.exec("ALTER TABLE threads RENAME COLUMN title TO unsupported"); drift.close();
     await assert.rejects(() => adapter.classify(refs[0]!), /label database/);
@@ -51,6 +51,7 @@ test("OpenCode fingerprints cover middle edits and WAL writers can commit during
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-opencode-hash-"));
   const database = path.join(root, "source.sqlite3");
   const writer = new DatabaseSync(database);
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- The original method is restored below and invoked with .call(this).
   const originalAdd = CanonicalSpool.prototype.add;
   try {
     writer.exec("PRAGMA journal_mode=WAL; CREATE TABLE session(id TEXT PRIMARY KEY,parent_id TEXT,title TEXT,time_created INTEGER,time_updated INTEGER); CREATE TABLE message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT); CREATE TABLE part(id TEXT PRIMARY KEY,message_id TEXT,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT)");

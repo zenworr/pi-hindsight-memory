@@ -6,6 +6,12 @@ import { redactText } from "../canonical/redact.js";
 import { RETAIN_POLICY_VERSION } from "../common/types.js";
 import { expectedRetainMission } from "../common/retention-policy.js";
 import { sleep } from "../common/async.js";
+import { MS_PER_SECOND, CHARS_PER_ESTIMATED_TOKEN } from "../common/limits.js";
+import { HTTP_STATUS, isRetryableStatus } from "./http.js";
+
+const RETRY_BACKOFF_FACTOR = 2;
+const RATE_LIMIT_FALLBACK_DELAY_MS = 1_000;
+const MAX_RECALL_QUERY_TOKENS = 500;
 
 export interface FetchLike {
   (input: string | URL, init?: RequestInit): Promise<Response>;
@@ -17,8 +23,6 @@ export class HindsightHttpError extends Error {
     this.name = "HindsightHttpError";
   }
 }
-
-export class HindsightRateLimitError extends HindsightHttpError {}
 
 export class HindsightOperationError extends Error {
   constructor(readonly status: string, readonly operationId: string) {
@@ -35,7 +39,7 @@ export interface HindsightDocument {
   retain_params?: { metadata?: Record<string, string> };
 }
 
-export interface RetainItem {
+interface RetainItem {
   content: string;
   context: string;
   document_id: string;
@@ -59,16 +63,12 @@ export interface RetainResponse {
 function parseRetryAfter(value: string | null): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
-  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * 1000));
+  if (Number.isFinite(seconds)) return Math.max(0, Math.round(seconds * MS_PER_SECOND));
   const date = Date.parse(value);
   return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
 }
 
-function isRetryableStatus(status: number): boolean {
-  return status === 408 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
-}
-
-function estimateTokens(text: string): number { return Math.ceil([...text].length / 4); }
+function estimateTokens(text: string): number { return Math.ceil([...text].length / CHARS_PER_ESTIMATED_TOKEN); }
 
 export class HindsightClient {
   private bankEnsured = false;
@@ -106,7 +106,7 @@ export class HindsightClient {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     let token = await this.token();
     let authRetry = false;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
+    for (let attempt = 0; attempt < this.config.httpMaxAttempts; attempt += 1) {
       signal?.throwIfAborted();
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error(`${method} ${url}: request exceeded ${timeoutMs} ms`);
@@ -119,20 +119,21 @@ export class HindsightClient {
       try {
         response = await this.fetcher(url, request);
       } catch (error) {
-        if (attempt < 2 && !signal?.aborted && Date.now() < deadline) {
-          await sleep(Math.min(100 * 2 ** attempt, Math.max(0, deadline - Date.now())), signal);
+        if (attempt + 1 < this.config.httpMaxAttempts && !signal?.aborted && Date.now() < deadline) {
+          await sleep(Math.min(this.config.httpRetryDelayMs * RETRY_BACKOFF_FACTOR ** attempt, this.config.httpMaxRetryDelayMs, Math.max(0, deadline - Date.now())), signal);
           continue;
         }
+        // eslint-disable-next-line preserve-caught-error -- Transport causes can include credentials.
         throw new Error(`${method} ${url}: ${errorMessage(error)}`);
       }
-      if (response.status === 401 && !authRetry && await this.tokenChanged(token) && Date.now() < deadline) {
+      if (response.status === HTTP_STATUS.UNAUTHORIZED && !authRetry && await this.tokenChanged(token) && Date.now() < deadline) {
         await response.body?.cancel();
         token = await this.token();
         authRetry = true;
         continue;
       }
       if (response.ok) {
-        if (response.status === 204) return undefined as T;
+        if (response.status === HTTP_STATUS.NO_CONTENT) return undefined as T;
         const text = await response.text();
         if (!text) return undefined as T;
         try { return JSON.parse(text) as T; }
@@ -140,13 +141,12 @@ export class HindsightClient {
       }
       const responseBody = await response.text();
       const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
-      if (isRetryableStatus(response.status) && attempt < 2 && !signal?.aborted && Date.now() < deadline) {
-        const requestedWait = response.status === 429 ? Math.min(retryAfterMs ?? 1000, 10_000) : 100 * 2 ** attempt;
+      if (isRetryableStatus(response.status) && attempt + 1 < this.config.httpMaxAttempts && !signal?.aborted && Date.now() < deadline) {
+        const requestedWait = Math.min(this.config.httpMaxRetryDelayMs, response.status === HTTP_STATUS.TOO_MANY_REQUESTS ? retryAfterMs ?? RATE_LIMIT_FALLBACK_DELAY_MS : this.config.httpRetryDelayMs * RETRY_BACKOFF_FACTOR ** attempt);
         const wait = Math.min(requestedWait, Math.max(0, deadline - Date.now()));
         await sleep(wait, signal);
         continue;
       }
-      if (response.status === 429) throw new HindsightRateLimitError(response.status, method, url, responseBody, retryAfterMs);
       throw new HindsightHttpError(response.status, method, url, responseBody, retryAfterMs);
     }
     throw new Error(`${method} ${url}: request retry limit exceeded`);
@@ -157,7 +157,7 @@ export class HindsightClient {
     const url = this.bankUrl("/profile");
     try { await this.requestJson("GET", url, undefined, signal); this.bankEnsured = true; return; }
     catch (error) {
-      if (!(error instanceof HindsightHttpError) || error.status !== 404) throw error;
+      if (!(error instanceof HindsightHttpError) || error.status !== HTTP_STATUS.NOT_FOUND) throw error;
     }
     await this.requestJson("PUT", this.bankUrl(), { name: this.config.bankId }, signal);
     this.bankEnsured = true;
@@ -264,7 +264,7 @@ export class HindsightClient {
       const operation = await this.getOperation(operationId, signal);
       const status = String(operation.status ?? "").toLowerCase();
       if (["not_found", "not found", "404"].includes(status)) {
-        throw new HindsightHttpError(404, "GET", this.bankUrl(`/operations/${encodeURIComponent(operationId)}`), "");
+        throw new HindsightHttpError(HTTP_STATUS.NOT_FOUND, "GET", this.bankUrl(`/operations/${encodeURIComponent(operationId)}`), "");
       }
       if (["completed", "failed", "cancelled", "error"].includes(status)) {
         if (status !== "completed") throw new HindsightOperationError(status, operationId);
@@ -278,13 +278,13 @@ export class HindsightClient {
 
   async dryRunExtract(content: string, overrides: Record<string, unknown> = {}, signal?: AbortSignal): Promise<Record<string, unknown>> {
     if (!content.trim()) throw new Error("dry-run extraction content must not be empty");
-    return this.requestJson<Record<string, unknown>>("POST", this.bankUrl("/memories/dry-run-extract"), { content, context: "Global coding-agent session", ...overrides }, signal, this.config.dryRunTimeoutMs ?? 5 * 60 * 1000);
+    return this.requestJson<Record<string, unknown>>("POST", this.bankUrl("/memories/dry-run-extract"), { content, context: "Global coding-agent session", ...overrides }, signal, this.config.dryRunTimeoutMs);
   }
 
   async recall(query: string, signal?: AbortSignal): Promise<RecallResponse> {
     const trimmed = query.trim();
     if (!trimmed) throw new Error("memory_search query must not be empty");
-    if (estimateTokens(trimmed) > 500) throw new Error("memory_search query is longer than Hindsight's 500-token limit");
+    if (estimateTokens(trimmed) > MAX_RECALL_QUERY_TOKENS) throw new Error("memory_search query is longer than Hindsight's 500-token limit");
     const body = {
       query: trimmed,
       types: ["world", "experience", "observation"],
@@ -324,7 +324,7 @@ export class HindsightClient {
 
   async getDocument(documentId: string, signal?: AbortSignal): Promise<HindsightDocument | undefined> {
     try { return await this.requestJson<HindsightDocument>("GET", this.bankUrl(`/documents/${encodeURIComponent(documentId)}`), undefined, signal); }
-    catch (error) { if (error instanceof HindsightHttpError && error.status === 404) return undefined; throw error; }
+    catch (error) { if (error instanceof HindsightHttpError && error.status === HTTP_STATUS.NOT_FOUND) return undefined; throw error; }
   }
 
   async cancelOperation(operationId: string, signal?: AbortSignal): Promise<boolean> {
@@ -332,7 +332,7 @@ export class HindsightClient {
       await this.requestJson("DELETE", this.bankUrl(`/operations/${encodeURIComponent(operationId)}`), undefined, signal);
       return true;
     } catch (error) {
-      if (error instanceof HindsightHttpError && error.status === 409) return false;
+      if (error instanceof HindsightHttpError && error.status === HTTP_STATUS.CONFLICT) return false;
       throw error;
     }
   }

@@ -1,8 +1,11 @@
+import { DAY_MS } from "../common/limits.js";
+import { HTTP_STATUS } from "../hindsight/http.js";
 import { documentIdFor, sha256 } from "../common/hashing.js";
 import type { AppConfig, SessionClassification, Source } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
 import { configuredExclusion } from "./exclusions.js";
-import { HindsightClient, HindsightHttpError, HindsightOperationError } from "../hindsight/client.js";
+import type { HindsightClient} from "../hindsight/client.js";
+import { HindsightHttpError, HindsightOperationError } from "../hindsight/client.js";
 import type { CleanupJobRecord, GenerationRecord, SessionArtifactRecord, StateDatabase } from "./state-db.js";
 
 export interface ClassifiedGroup {
@@ -139,7 +142,7 @@ async function settleOperation(client: HindsightClient, operationId: string): Pr
     status = String(operation.status ?? "").toLowerCase();
   }
   if (status === "processing" || status === "pending") {
-    try { operation = await client.waitForOperation(operationId, undefined, 24 * 60 * 60 * 1000); }
+    try { operation = await client.waitForOperation(operationId, undefined, DAY_MS); }
     catch (error) {
       if (error instanceof HindsightOperationError) return error.status;
       throw error;
@@ -153,7 +156,7 @@ async function settleOperation(client: HindsightClient, operationId: string): Pr
 async function deleteDocumentIdempotently(client: HindsightClient, documentId: string): Promise<void> {
   try { await client.deleteDocument(documentId); }
   catch (error) {
-    if (!(error instanceof HindsightHttpError && error.status === 404)) throw error;
+    if (!(error instanceof HindsightHttpError && error.status === HTTP_STATUS.NOT_FOUND)) throw error;
   }
 }
 

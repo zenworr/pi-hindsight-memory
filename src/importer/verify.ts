@@ -3,11 +3,13 @@ import { HindsightClient } from "../hindsight/client.js";
 import { StateDatabase } from "./state-db.js";
 import { importerHealth } from "./health.js";
 
+const MAX_DIAGNOSTIC_DOCUMENTS = 100;
+
 function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
 }
 
-export async function verifyFullImport(config: AppConfig, client = new HindsightClient(config.hindsight), options: { signal?: AbortSignal } = {}): Promise<Record<string, unknown>> {
+export async function verifyFullImport(config: AppConfig, client = new HindsightClient(config.hindsight), options: { signal?: AbortSignal } = {}) {
   const state = new StateDatabase(config.stateDatabase, { readOnly: true });
   try {
     const sessions = state.listSessions();
@@ -26,7 +28,7 @@ export async function verifyFullImport(config: AppConfig, client = new Hindsight
     const unexpected = [...actual].filter((id) => !expected.has(id));
     const imported = sessions.filter((session) => session.status === "imported").length;
     const preservedAmbiguous = sessions.filter((session) => session.status === "ambiguous_preserved").length;
-    const pending = state.pendingWorkCount();
+    const pending = state.pendingWorkCount(config.importer.maxAttempts);
     const failed = generations.filter((generation) => generation.state === "failed");
     const activeOperations = Math.max(count(stats.pending_operations), count(stats.operations_by_status?.pending) + count(stats.operations_by_status?.processing));
     const failedOperations = Math.max(count(stats.failed_operations), count(stats.operations_by_status?.failed));
@@ -53,11 +55,11 @@ export async function verifyFullImport(config: AppConfig, client = new Hindsight
       preservedAmbiguousSessions: preservedAmbiguous,
       pendingWork: pending,
       failedGenerations: failed.length,
-      missingDocuments: missing.slice(0, 100),
+      missingDocuments: missing.slice(0, MAX_DIAGNOSTIC_DOCUMENTS),
       missingDocumentCount: missing.length,
-      excludedDocumentsPresent: excludedPresent.slice(0, 100),
+      excludedDocumentsPresent: excludedPresent.slice(0, MAX_DIAGNOSTIC_DOCUMENTS),
       excludedDocumentsPresentCount: excludedPresent.length,
-      unexpectedDocuments: unexpected.slice(0, 100),
+      unexpectedDocuments: unexpected.slice(0, MAX_DIAGNOSTIC_DOCUMENTS),
       unexpectedDocumentCount: unexpected.length,
       activeHindsightOperations: activeOperations,
       failedHindsightOperations: failedOperations,
@@ -66,7 +68,7 @@ export async function verifyFullImport(config: AppConfig, client = new Hindsight
       autoConsolidationEnabled,
       bankConfigurationReady,
       ...(bankConfigurationError ? { bankConfigurationError } : {}),
-      documentHashMismatches: hashMismatches.slice(0, 100),
+      documentHashMismatches: hashMismatches.slice(0, MAX_DIAGNOSTIC_DOCUMENTS),
       documentHashMismatchCount: hashMismatches.length,
       importer,
       sourceCoverageReady,

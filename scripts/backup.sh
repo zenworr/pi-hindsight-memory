@@ -46,6 +46,8 @@ sqlite3 "$STATE_DIR/state.sqlite3" ".backup '$state_file'"
 )
 trap - ERR INT TERM
 
+# Only the fixed filename pattern expands; the backup directory stays quoted.
+# shellcheck disable=SC2086
 for pattern in 'hindsight-*.dump' 'state-*.sqlite3' 'SHA256SUMS-*'; do
   count=0
   while IFS= read -r file; do

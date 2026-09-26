@@ -1,15 +1,19 @@
+import { DAY_MS } from "../common/limits.js";
+
 import type { AppConfig } from "../common/types.js";
 import { Logger } from "../common/logging.js";
-import { HindsightClient } from "../hindsight/client.js";
+import type { HindsightClient } from "../hindsight/client.js";
 import { scan } from "./scanner.js";
 import { ImportWorker } from "./worker.js";
-import { StateDatabase } from "./state-db.js";
+import type { StateDatabase } from "./state-db.js";
+
+const DEFAULT_COHORT_SIZE = 250;
 
 export interface HistoricalImportSummary { scanned: number; queued: number; imported: number; cohorts: number; }
 
 export async function importAll(config: AppConfig, state: StateDatabase, client: HindsightClient, options: { cohortSize?: number; maxMs?: number; logger?: Logger } = {}): Promise<HistoricalImportSummary> {
-  const cohortSize = options.cohortSize ?? 250;
-  const maxMs = options.maxMs ?? 24 * 60 * 60 * 1000;
+  const cohortSize = options.cohortSize ?? DEFAULT_COHORT_SIZE;
+  const maxMs = options.maxMs ?? DAY_MS;
   if (!Number.isInteger(cohortSize) || cohortSize <= 0) throw new Error("cohortSize must be a positive integer");
   const logger = options.logger ?? new Logger("historical-import");
   const started = Date.now();
@@ -30,7 +34,7 @@ export async function importAll(config: AppConfig, state: StateDatabase, client:
       summary.cohorts += 1;
       const consolidation = await client.consolidate();
       if (consolidation.operation_id) await client.waitForOperation(consolidation.operation_id, undefined, Math.max(1, maxMs - (Date.now() - started)));
-      logger.info("Historical cohort complete", { cohort: summary.cohorts, imported: summary.imported, remaining: state.pendingWorkCount() });
+      logger.info("Historical cohort complete", { cohort: summary.cohorts, imported: summary.imported, remaining: state.pendingWorkCount(config.importer.maxAttempts) });
     }
     offset += scanResult.discovered;
     if (scanResult.discovered < cohortSize) break;

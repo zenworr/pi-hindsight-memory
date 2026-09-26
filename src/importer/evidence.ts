@@ -1,9 +1,17 @@
 import fs from "node:fs";
+import { PRIVATE_FILE_MODE } from "../common/limits.js";
+
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AppConfig, CanonicalSession, CanonicalTurn } from "../common/types.js";
 import { forEachJsonLine } from "../adapters/adapter.js";
 import { redactText } from "../canonical/redact.js";
+
+const LIMITS = {
+  queryTerms: 16, labelChars: 180, passageStepChars: 1600, passageChars: 2000,
+  matchedTerms: 2, priorityHits: 2, perEntry: 2, perDocument: 3, hits: 6,
+  reviewedFileBytes: 65_536, reviewedHits: 4,
+};
 
 export interface EvidenceHit {
   documentId: string;
@@ -21,8 +29,8 @@ export interface EvidenceHit {
 
 const STOP_WORDS = new Set("a an and are as at be been but by can could did do does for from had has have how i in is it its me my of on or our please should that the their these they this those to was we were what when where which who why will with would you your current currently latest now still about tell know information method use used uses using".split(" "));
 
-export function queryTerms(query: string): string[] {
-  return [...new Set((query.normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []).filter((term) => term.length > 1 && !STOP_WORDS.has(term)))].slice(0, 16);
+function queryTerms(query: string): string[] {
+  return [...new Set((query.normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? []).filter((term) => term.length > 1 && !STOP_WORDS.has(term)))].slice(0, LIMITS.queryTerms);
 }
 
 function matchedTerms(text: string, terms: string[]): number {
@@ -36,8 +44,8 @@ function* passageTexts(content: string): Iterable<string> {
   let label = "";
   for (const paragraph of content.split(/\n\s*\n/).map((part) => part.trim()).filter(Boolean)) {
     if (/^#{1,6} [^\n]+$/.test(paragraph)) { heading = paragraph; label = ""; continue; }
-    if (paragraph.length < 180 && !paragraph.includes("\n") && paragraph.endsWith(":")) { label = paragraph; continue; }
-    for (let offset = 0; offset < paragraph.length; offset += 1600) yield [heading, label, paragraph.slice(offset, offset + 2000)].filter(Boolean).join("\n\n");
+    if (paragraph.length < LIMITS.labelChars && !paragraph.includes("\n") && paragraph.endsWith(":")) { label = paragraph; continue; }
+    for (let offset = 0; offset < paragraph.length; offset += LIMITS.passageStepChars) yield [heading, label, paragraph.slice(offset, offset + LIMITS.passageChars)].filter(Boolean).join("\n\n");
     label = "";
   }
 }
@@ -50,7 +58,7 @@ function writableIndex(file: string): DatabaseSync {
     CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY,source TEXT NOT NULL,session_id TEXT NOT NULL,source_path TEXT NOT NULL,canonical_hash TEXT NOT NULL,indexed_at TEXT NOT NULL);
     CREATE VIRTUAL TABLE IF NOT EXISTS passages USING fts5(text,document_id UNINDEXED,entry_id UNINDEXED,parent_entry_id UNINDEXED,role UNINDEXED,provenance UNINDEXED,timestamp UNINDEXED,tokenize='unicode61');
   `);
-  for (const name of [file, `${file}-wal`, `${file}-shm`]) { if (fs.existsSync(name)) fs.chmodSync(name, 0o600); }
+  for (const name of [file, `${file}-wal`, `${file}-shm`]) { if (fs.existsSync(name)) fs.chmodSync(name, PRIVATE_FILE_MODE); }
   return db;
 }
 
@@ -114,11 +122,11 @@ export function searchEvidence(config: AppConfig, query: string): { available: b
     const anchor = quoted(anchors[0]?.term ?? terms[0]!);
     const recent = /\b(current|latest|now|still|recent|today|final|correction|removed|retired)\b/i.test(query) && !/\b(before|previous|originally|historical)\b/i.test(query);
     const read = (order: string) => (db.prepare(`SELECT p.document_id AS documentId,d.source,d.session_id AS sessionId,d.source_path AS sourcePath,p.entry_id AS entryId,p.parent_entry_id AS parentEntryId,p.role,p.provenance,p.timestamp,p.text,d.indexed_at AS indexedAt FROM passages p JOIN documents d ON d.id=p.document_id WHERE passages MATCH ? AND p.document_id IN (SELECT document_id FROM passages WHERE passages MATCH ?) ORDER BY ${order} LIMIT 100`).all(expression, anchor) as unknown as EvidenceHit[])
-      .filter((row) => matchedTerms(row.text, terms) >= Math.min(2, terms.length));
+      .filter((row) => matchedTerms(row.text, terms) >= Math.min(LIMITS.matchedTerms, terms.length));
     const lexical = read("rank");
     const latest = recent ? read("p.timestamp DESC,rank") : [];
     const corrections = latest.filter((row) => /\b(correction|superseded|no longer|removed|retired)\b/i.test(row.text));
-    const rows = recent ? [...corrections.slice(0, 2), ...lexical.slice(0, 2), ...latest, ...lexical] : lexical;
+    const rows = recent ? [...corrections.slice(0, LIMITS.priorityHits), ...lexical.slice(0, LIMITS.priorityHits), ...latest, ...lexical] : lexical;
     const hits: EvidenceHit[] = [];
     const excerpts = new Set<string>();
     const perEntry = new Map<string, number>();
@@ -126,12 +134,12 @@ export function searchEvidence(config: AppConfig, query: string): { available: b
     for (const row of rows) {
       const key = `${row.documentId}:${row.entryId}`;
       const excerpt = `${key}:${row.text}`;
-      if (excerpts.has(excerpt) || (perEntry.get(key) ?? 0) >= 2 || (perDocument.get(row.documentId) ?? 0) >= 3) continue;
+      if (excerpts.has(excerpt) || (perEntry.get(key) ?? 0) >= LIMITS.perEntry || (perDocument.get(row.documentId) ?? 0) >= LIMITS.perDocument) continue;
       excerpts.add(excerpt);
       perEntry.set(key, (perEntry.get(key) ?? 0) + 1);
       perDocument.set(row.documentId, (perDocument.get(row.documentId) ?? 0) + 1);
       hits.push(row);
-      if (hits.length === 6) break;
+      if (hits.length === LIMITS.hits) break;
     }
     return { available: true, hits };
   } finally { db.close(); }
@@ -147,13 +155,13 @@ export interface ReviewedFact {
 
 export function reviewedFacts(config: AppConfig, query: string): ReviewedFact[] {
   if (!fs.existsSync(config.reviewedFactsFile)) return [];
-  if (fs.statSync(config.reviewedFactsFile).size > 64 * 1024) throw new Error("Reviewed facts exceed 64 KiB");
+  if (fs.statSync(config.reviewedFactsFile).size > LIMITS.reviewedFileBytes) throw new Error("Reviewed facts exceed 64 KiB");
   const facts: unknown = JSON.parse(fs.readFileSync(config.reviewedFactsFile, "utf8"));
   if (!Array.isArray(facts)) throw new Error("Reviewed facts must be an array");
   const terms = queryTerms(query);
-  return facts.filter((fact): fact is ReviewedFact => {
-    if (!fact || typeof fact.key !== "string" || typeof fact.text !== "string" || typeof fact.source !== "string" || typeof fact.verifiedAt !== "string" || !Number.isFinite(Date.parse(fact.verifiedAt))) throw new Error("Invalid reviewed fact; require key, text, source, and verifiedAt");
+  return facts.filter((fact: unknown): fact is ReviewedFact => {
+    if (!fact || typeof fact !== "object" || !("key" in fact) || !("text" in fact) || !("source" in fact) || !("verifiedAt" in fact) || typeof fact.key !== "string" || typeof fact.text !== "string" || typeof fact.source !== "string" || typeof fact.verifiedAt !== "string" || !Number.isFinite(Date.parse(fact.verifiedAt))) throw new Error("Invalid reviewed fact; require key, text, source, and verifiedAt");
     const text = `${fact.key} ${fact.text}`.toLowerCase();
-    return matchedTerms(text, terms) >= Math.min(2, terms.length) && terms.length > 0;
-  }).slice(0, 4).map((fact) => ({ key: fact.key, text: redactText(fact.text).text, source: redactText(fact.source).text, verifiedAt: fact.verifiedAt, ...(typeof fact.supersedes === "string" ? { supersedes: redactText(fact.supersedes).text } : {}) }));
+    return matchedTerms(text, terms) >= Math.min(LIMITS.matchedTerms, terms.length) && terms.length > 0;
+  }).slice(0, LIMITS.reviewedHits).map((fact) => ({ key: fact.key, text: redactText(fact.text).text, source: redactText(fact.source).text, verifiedAt: fact.verifiedAt, ...(typeof fact.supersedes === "string" ? { supersedes: redactText(fact.supersedes).text } : {}) }));
 }

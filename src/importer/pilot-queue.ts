@@ -1,6 +1,6 @@
 import type { AppConfig, Source } from "../common/types.js";
 import { scan } from "./scanner.js";
-import { StateDatabase } from "./state-db.js";
+import type { StateDatabase } from "./state-db.js";
 import type { PilotEntry } from "./pilot.js";
 
 export interface QueuePilotSummary { selected: number; queued: number; alreadyKnown: number; errors: Array<{ source: Source; nativeSessionId: string; error: string }>; }

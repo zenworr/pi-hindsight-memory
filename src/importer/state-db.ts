@@ -1,8 +1,12 @@
 import { DatabaseSync } from "node:sqlite";
+import { PRIVATE_FILE_MODE, ERROR_MESSAGE_MAX_CHARS } from "../common/limits.js";
+
 import fs from "node:fs";
 import path from "node:path";
 import { CLASSIFICATION_POLICY_VERSION, RETAIN_POLICY_VERSION } from "../common/types.js";
 import type { GenerationState, SessionClassification, Source, SourceFingerprint } from "../common/types.js";
+
+const SOURCE_ERROR_MAX_CHARS = 2_000;
 
 export interface SessionStateRecord {
   source: Source;
@@ -91,7 +95,9 @@ export interface OperationRecord {
 }
 
 function nullableString(value: unknown): string | undefined {
-  return typeof value === "string" && value ? value : undefined;
+  if (value === null || value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error("Invalid stored text field");
+  return value || undefined;
 }
 
 export function generationCounts(db: DatabaseSync): Partial<Record<GenerationState, number>> {
@@ -109,7 +115,7 @@ export class StateDatabase {
     if (databasePath !== ":memory:") fs.mkdirSync(path.dirname(databasePath), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(databasePath);
     if (databasePath !== ":memory:") {
-      try { fs.chmodSync(databasePath, 0o600); } catch { /* database may be created by a restricted filesystem */ }
+      try { fs.chmodSync(databasePath, PRIVATE_FILE_MODE); } catch { /* database may be created by a restricted filesystem */ }
     }
     try {
       this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 1000;");
@@ -122,7 +128,7 @@ export class StateDatabase {
   private restrictFileModes(): void {
     if (this.databasePath === ":memory:") return;
     for (const file of [this.databasePath, `${this.databasePath}-wal`, `${this.databasePath}-shm`]) {
-      try { fs.chmodSync(file, 0o600); } catch { /* file may not exist yet */ }
+      try { fs.chmodSync(file, PRIVATE_FILE_MODE); } catch { /* file may not exist yet */ }
     }
   }
 
@@ -318,10 +324,10 @@ export class StateDatabase {
 
   markScanStarted(source: Source, at: string): void { this.db.prepare("UPDATE sources SET last_scan_started_at=? WHERE source=?").run(at, source); }
   markScanCompleted(source: Source, at: string, watermark?: string): void { this.db.prepare("UPDATE sources SET last_scan_completed_at=?, watermark=?, last_error=NULL WHERE source=?").run(at, watermark ?? null, source); }
-  markScanError(source: Source, error: string): void { this.db.prepare("UPDATE sources SET last_error=? WHERE source=?").run(error.slice(0, 2000), source); }
+  markScanError(source: Source, error: string): void { this.db.prepare("UPDATE sources SET last_error=? WHERE source=?").run(error.slice(0, SOURCE_ERROR_MAX_CHARS), source); }
 
   recordScanError(source: Source, locator: string, error: string): void {
-    this.db.prepare("INSERT INTO scan_errors(source,locator,error,observed_at) VALUES (?,?,?,?) ON CONFLICT(source,locator) DO UPDATE SET error=excluded.error,observed_at=excluded.observed_at").run(source, locator, error.slice(0, 1000), new Date().toISOString());
+    this.db.prepare("INSERT INTO scan_errors(source,locator,error,observed_at) VALUES (?,?,?,?) ON CONFLICT(source,locator) DO UPDATE SET error=excluded.error,observed_at=excluded.observed_at").run(source, locator, error.slice(0, ERROR_MESSAGE_MAX_CHARS), new Date().toISOString());
     this.markScanError(source, error);
   }
 
@@ -337,7 +343,7 @@ export class StateDatabase {
   }
 
   heartbeat(phase: string, error?: string): void {
-    this.db.prepare("INSERT INTO daemon_status(id,pid,heartbeat_at,phase,last_error) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,phase=excluded.phase,last_error=excluded.last_error").run(process.pid, new Date().toISOString(), phase, error?.slice(0, 1000) ?? null);
+    this.db.prepare("INSERT INTO daemon_status(id,pid,heartbeat_at,phase,last_error) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,phase=excluded.phase,last_error=excluded.last_error").run(process.pid, new Date().toISOString(), phase, error?.slice(0, ERROR_MESSAGE_MAX_CHARS) ?? null);
   }
 
   acknowledgeGeneration(generation: GenerationRecord): void {
@@ -467,8 +473,8 @@ export class StateDatabase {
     }));
   }
 
-  pendingWorkCount(): number {
-    const row = this.db.prepare("SELECT COUNT(*) AS count FROM generations WHERE state IN ('queued','submitted','processing') OR state='failed' AND attempt_count < 3").get() as Record<string, unknown>;
+  pendingWorkCount(maxAttempts: number): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM generations WHERE state IN ('queued','submitted','processing') OR state='failed' AND attempt_count < ?").get(maxAttempts) as Record<string, unknown>;
     return Number(row.count ?? 0);
   }
 
@@ -519,9 +525,9 @@ export class StateDatabase {
       lastSeenAt: String(row.last_seen_at),
       lastError: nullableString(row.last_error),
       classification: {
-        kind: String(row.classification ?? "primary") as SessionClassification["kind"],
-        reason: String(row.classification_reason ?? "legacy-unclassified"),
-        policyVersion: String(row.classification_policy_version ?? CLASSIFICATION_POLICY_VERSION),
+        kind: (nullableString(row.classification) ?? "primary") as SessionClassification["kind"],
+        reason: nullableString(row.classification_reason) ?? "legacy-unclassified",
+        policyVersion: nullableString(row.classification_policy_version) ?? CLASSIFICATION_POLICY_VERSION,
       },
     };
   }
@@ -635,7 +641,7 @@ export class StateDatabase {
       const currentState = String(current.state) as GenerationState;
       if (!["queued", "failed", "submitted", "processing"].includes(currentState)) return false;
       const session = this.db.prepare("SELECT classification,status FROM sessions WHERE source=? AND native_session_id=?").get(generation.source, generation.nativeSessionId) as Record<string, unknown> | undefined;
-      if (!session || String(session.classification ?? "primary") !== "primary" || ["excluded_subagent", "excluded_ambiguous", "excluded_configured", "ambiguous_preserved", "cleanup_pending"].includes(String(session.status))) return false;
+      if (!session || (session.classification ?? "primary") !== "primary" || ["excluded_subagent", "excluded_ambiguous", "excluded_configured", "ambiguous_preserved", "cleanup_pending"].includes(String(session.status))) return false;
       const other = this.db.prepare("SELECT operation_id FROM generations WHERE source=? AND native_session_id=? AND state IN ('submitted','processing') AND operation_id<>? LIMIT 1").get(generation.source, generation.nativeSessionId, generation.operationId) as Record<string, unknown> | undefined;
       if (other) return false;
       if (currentState === "queued" || currentState === "failed") {
@@ -660,11 +666,11 @@ export class StateDatabase {
     return row ? this.toGeneration(row) : undefined;
   }
 
-  listWorkCandidates(limit = 100): GenerationRecord[] {
+  listWorkCandidates(limit: number, maxAttempts: number): GenerationRecord[] {
     const rows = this.db.prepare(`SELECT * FROM generations
-      WHERE state IN ('queued','submitted','processing') OR state='failed' AND attempt_count<3
+      WHERE state IN ('queued','submitted','processing') OR state='failed' AND attempt_count<?
       ORDER BY CASE state WHEN 'processing' THEN 0 WHEN 'submitted' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, queued_at
-      LIMIT ?`).all(limit) as Record<string, unknown>[];
+      LIMIT ?`).all(maxAttempts, limit) as Record<string, unknown>[];
     return rows.map((row) => this.toGeneration(row));
   }
 
@@ -719,7 +725,7 @@ export class StateDatabase {
       completedAt: nullableString(row.completed_at),
       attemptCount: Number(row.attempt_count),
       error: nullableString(row.error),
-      retainPolicyVersion: String(row.retain_policy_version ?? "1"),
+      retainPolicyVersion: nullableString(row.retain_policy_version) ?? "1",
       repair: Number(row.repair) === 1,
     };
   }

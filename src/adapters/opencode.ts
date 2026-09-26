@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/require-await -- SQLite methods implement the shared asynchronous adapter contract. */
 import crypto from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import type { AdapterLoadOptions, CanonicalSession, SessionClassification, SessionReference, SourceFingerprint } from "../common/types.js";
@@ -92,7 +93,7 @@ export class OpenCodeAdapter implements SessionAdapter {
     try {
       // Materialize only the small session-reference list, then close the snapshot before the
       // scanner normalizes each potentially large conversation.
-      rows = db.prepare(`${sessionSelect(db)} ORDER BY time_created ASC, id ASC`).all() as DbRow[];
+      rows = db.prepare(`${sessionSelect(db)} ORDER BY time_created ASC, id ASC`).all();
     } finally { db.close(); }
     for (const row of rows) {
       const id = stringOrUndefined(row.id);

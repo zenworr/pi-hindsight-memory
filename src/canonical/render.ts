@@ -7,13 +7,13 @@ import type { CanonicalSession, CanonicalSessionMetadata, CanonicalTurn, Session
 import { documentIdFor } from "../common/hashing.js";
 import { redactTurn } from "./redact.js";
 
-const DEFAULT_MAX_CANONICAL_BYTES = 100 * 1024 * 1024;
+import { DEFAULT_MAX_CANONICAL_BYTES } from "../common/limits.js";
 
 export function normalizeText(text: string): string {
   return text.replaceAll("\r\n", "\n").replaceAll("\r", "\n").trim();
 }
 
-export function serializeTurn(turn: CanonicalTurn): string {
+function serializeTurn(turn: CanonicalTurn): string {
   const normalized: Record<string, unknown> = {
     role: turn.role,
     content: normalizeText(turn.content),
@@ -65,8 +65,10 @@ export class CanonicalSpool {
     this.bytes += buffer.byteLength;
     this.turns += 1;
     if (!this.stream.write(buffer)) await once(this.stream, "drain");
-    if (this.writeError) throw this.writeError;
+    this.checkWriteError();
   }
+
+  private checkWriteError(): void { if (this.writeError) throw this.writeError; }
 
   async finalize(): Promise<void> {
     if (this.finalized) return;

@@ -1,10 +1,16 @@
 import fs from "node:fs";
+import { READ_BUFFER_BYTES, MS_PER_SECOND } from "../common/limits.js";
+
 import path from "node:path";
-import { sampleFileHash, sha256, documentIdFor } from "../common/hashing.js";
+import { sampleFileHash, sha256 } from "../common/hashing.js";
 import type { AdapterLoadOptions, CanonicalSession, CanonicalSessionMetadata, CanonicalTurn, SessionClassification, SessionReference, Source, SourceFingerprint } from "../common/types.js";
 import { ADAPTER_VERSION, CANONICAL_SCHEMA, REDACTION_POLICY_VERSION } from "../common/types.js";
 import { CanonicalSpool, finishCanonicalSession, normalizeText } from "../canonical/render.js";
 import { stripHarnessContext, stripInjectedMemory } from "../canonical/injected-memory.js";
+
+const MAX_JSON_LINE_BYTES = 268_435_456;
+const MILLISECOND_TIMESTAMP_THRESHOLD = 10_000_000_000;
+const FALLBACK_HASH_CHARS = 32;
 
 export interface SessionAdapter {
   readonly source: Source;
@@ -33,9 +39,9 @@ export async function forEachJsonLine(
   callback: (value: unknown, lineNumber: number) => Promise<void> | void,
   options: JsonLineOptions = {},
 ): Promise<void> {
-  const maxLineBytes = options.maxLineBytes ?? 256 * 1024 * 1024;
+  const maxLineBytes = options.maxLineBytes ?? MAX_JSON_LINE_BYTES;
   options.signal?.throwIfAborted();
-  const input = fs.createReadStream(filePath, { encoding: "utf8", highWaterMark: 64 * 1024, signal: options.signal });
+  const input = fs.createReadStream(filePath, { encoding: "utf8", highWaterMark: READ_BUFFER_BYTES, signal: options.signal });
   let buffer = "";
   let lineNumber = 0;
   try {
@@ -70,15 +76,15 @@ export async function forEachJsonLine(
   } finally { input.destroy(); }
 }
 
-export async function firstJsonLine(filePath: string): Promise<unknown | undefined> {
-  const input = fs.createReadStream(filePath, { encoding: "utf8", highWaterMark: 64 * 1024 });
+export async function firstJsonLine(filePath: string): Promise<unknown> {
+  const input = fs.createReadStream(filePath, { encoding: "utf8", highWaterMark: READ_BUFFER_BYTES });
   let buffer = "";
   try {
     for await (const chunk of input) {
       buffer += String(chunk);
       const newline = buffer.indexOf("\n");
       if (newline === -1) {
-        if (Buffer.byteLength(buffer, "utf8") > 256 * 1024 * 1024) throw new MalformedJsonLineError(filePath, 1, "first JSON line is too large");
+        if (Buffer.byteLength(buffer, "utf8") > MAX_JSON_LINE_BYTES) throw new MalformedJsonLineError(filePath, 1, "first JSON line is too large");
         continue;
       }
       const line = buffer.slice(0, newline).replace(/\r$/, "");
@@ -116,7 +122,7 @@ export async function pathFingerprint(filePath: string, stableLocator: string): 
 
 export function isoFromMilliseconds(value: unknown, fallback: string): string {
   if (typeof value === "number" && Number.isFinite(value)) {
-    const date = new Date(value < 10_000_000_000 ? value * 1000 : value);
+    const date = new Date(value < MILLISECOND_TIMESTAMP_THRESHOLD ? value * MS_PER_SECOND : value);
     if (!Number.isNaN(date.getTime())) return date.toISOString();
   }
   if (typeof value === "string") {
@@ -131,7 +137,7 @@ export function maxIso(current: string, candidate: string): string {
 }
 
 export function stableFallbackId(source: Source, identityKey: string, startedAt: string): string {
-  return `fallback-${sha256(`${source}\n${identityKey}\n${startedAt}`).slice(0, 32)}`;
+  return `fallback-${sha256(`${source}\n${identityKey}\n${startedAt}`).slice(0, FALLBACK_HASH_CHARS)}`;
 }
 
 export function metadataBase(source: Source, nativeSessionId: string, sourcePath: string): CanonicalSessionMetadata {
@@ -242,5 +248,3 @@ export function toolBlocks(content: unknown): Array<{ name: string; input: unkno
 export function stringOrUndefined(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
-
-export function documentId(source: Source, id: string): string { return documentIdFor(source, id); }

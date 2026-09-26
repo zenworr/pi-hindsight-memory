@@ -24,6 +24,7 @@ test("daemon retries failures before the full scan interval and clears recovered
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-daemon-"));
   const config = defaultConfig(root);
   config.scanIntervalSeconds = 3600;
+  config.importer.retryDelayMs = 45_000;
   config.opencodeDatabase = path.join(root, "opencode.db");
   const opencode = new DatabaseSync(config.opencodeDatabase);
   opencode.exec("CREATE TABLE session(id TEXT, parent_id TEXT, title TEXT, time_created INTEGER, time_updated INTEGER)");
@@ -52,8 +53,8 @@ test("daemon retries failures before the full scan interval and clears recovered
     await until(() => importerHealth(config).lastError === "temporary network failure");
     // Allow the loop to install its timer after publishing the heartbeat.
     await setImmediate();
-    t.mock.timers.tick(29_000);
-    await setImmediate();
+    t.mock.timers.tick(config.importer.retryDelayMs - 1000);
+    await delay(1100);
     assert.equal(preflights, 1);
     t.mock.timers.tick(1000);
     await until(() => batches === 1 && importerHealth(config).phase === "idle");
@@ -68,7 +69,7 @@ test("daemon retries failures before the full scan interval and clears recovered
     await until(() => importerHealth(config).lastError === "temporary queue failure");
     queueFails = false;
     await setImmediate();
-    t.mock.timers.tick(30_000);
+    t.mock.timers.tick(config.importer.retryDelayMs);
     await until(() => batches === 3 && importerHealth(config).phase === "idle");
     assert.equal(importerHealth(config).lastError, undefined);
     assert.deepEqual(state.db.prepare("SELECT last_scan_completed_at FROM sources LIMIT 1").get(), scanAt, "queue recovery must not rescan unchanged sources");

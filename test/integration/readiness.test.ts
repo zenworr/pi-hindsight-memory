@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { defaultConfig } from "../../src/common/config.js";
 import { documentIdFor, operationIdFor } from "../../src/common/hashing.js";
-import { HindsightClient } from "../../src/hindsight/client.js";
+import type { HindsightClient } from "../../src/hindsight/client.js";
 import { StateDatabase } from "../../src/importer/state-db.js";
 import { verifyFullImport } from "../../src/importer/verify.js";
 

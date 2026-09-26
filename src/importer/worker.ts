@@ -1,22 +1,27 @@
 import { statfs } from "node:fs/promises";
+import { HTTP_STATUS, isRetryableStatus } from "../hindsight/http.js";
 import type { AppConfig, CanonicalSession, CanonicalSessionMetadata, HindsightOperation, ImportApproval, SessionReference, Source } from "../common/types.js";
 import { CANONICAL_SCHEMA, ADAPTER_VERSION, REDACTION_POLICY_VERSION } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
 import type { SessionAdapter } from "../adapters/adapter.js";
-import { HindsightClient, HindsightHttpError, HindsightOperationError, HindsightPollTimeoutError } from "../hindsight/client.js";
+import type { HindsightClient} from "../hindsight/client.js";
+import { HindsightHttpError, HindsightOperationError, HindsightPollTimeoutError } from "../hindsight/client.js";
 import { errorMessage, Logger } from "../common/logging.js";
 import { assertImportApproval, estimateCostUsd, estimateInputTokens, readApproval } from "../common/approval.js";
 import { redactText } from "../canonical/redact.js";
 import { Semaphore } from "./scheduler.js";
 import { sleep } from "../common/async.js";
+import { ERROR_MESSAGE_MAX_CHARS } from "../common/limits.js";
 import type { GenerationRecord, SessionStateRecord } from "./state-db.js";
-import { StateDatabase } from "./state-db.js";
+import type { StateDatabase } from "./state-db.js";
 import { configuredExclusion } from "./exclusions.js";
 import { nextOperationId } from "./queue.js";
 import { removeEvidence } from "./evidence.js";
 import { loadPendingPayload, removePendingPayload, savePendingPayload } from "./pending-payload.js";
 
 export interface WorkerSummary { selected: number; completed: number; failed: number; deferred: number; }
+const OPERATION_POLL_SLICE_MS = 30_000;
+const BLOCKED_QUEUE_RETRY_MS = 250;
 const TERMINAL_FAILURES = ["failed", "cancelled", "error", "rejected"];
 
 export class ImportWorker {
@@ -37,8 +42,8 @@ export class ImportWorker {
     return approval;
   }
 
-  async runOnce(limit = 100, signal?: AbortSignal): Promise<WorkerSummary> {
-    const candidates = this.state.listWorkCandidates(limit);
+  async runOnce(limit = this.config.importer.workBatchSize, signal?: AbortSignal): Promise<WorkerSummary> {
+    const candidates = this.state.listWorkCandidates(limit, this.config.importer.maxAttempts);
     const summary: WorkerSummary = { selected: candidates.length, completed: 0, failed: 0, deferred: 0 };
     await Promise.all(candidates.map((generation) => this.limiter.run(async () => {
       if (signal?.aborted) { summary.deferred += 1; return; }
@@ -50,17 +55,17 @@ export class ImportWorker {
     return summary;
   }
 
-  async drain(maxMs = 60 * 60 * 1000, signal?: AbortSignal): Promise<WorkerSummary> {
+  async drain(maxMs = this.config.hindsight.operationPollTimeoutMs, signal?: AbortSignal): Promise<WorkerSummary> {
     const started = Date.now();
     const total: WorkerSummary = { selected: 0, completed: 0, failed: 0, deferred: 0 };
-    while (this.state.pendingWorkCount() > 0 && !signal?.aborted) {
+    while (this.state.pendingWorkCount(this.config.importer.maxAttempts) > 0 && !signal?.aborted) {
       if (Date.now() - started >= maxMs) throw new Error(`Importer still has pending work after ${maxMs} ms`);
-      const batch = await this.runOnce(Math.max(1000, this.config.maxInflightDocuments * 100), signal);
+      const batch = await this.runOnce(this.config.importer.workBatchSize, signal);
       total.selected += batch.selected; total.completed += batch.completed; total.failed += batch.failed; total.deferred += batch.deferred;
       if (batch.selected === 0) break;
-      if (batch.completed === 0 && batch.failed === 0 && this.state.pendingWorkCount() > 0) {
+      if (batch.completed === 0 && batch.failed === 0 && this.state.pendingWorkCount(this.config.importer.maxAttempts) > 0) {
         if (!this.state.hasActiveOperations()) throw new Error("Queued work is blocked; inspect session classification and cleanup state");
-        await sleep(250, signal);
+        await sleep(BLOCKED_QUEUE_RETRY_MS, signal);
       }
     }
     return total;
@@ -82,7 +87,7 @@ export class ImportWorker {
   }
 
   private async process(generation: GenerationRecord, shutdownSignal?: AbortSignal): Promise<"completed" | "failed" | "deferred"> {
-    if (generation.state === "failed" && generation.attemptCount >= 3) return "deferred";
+    if (generation.state === "failed" && generation.attemptCount >= this.config.importer.maxAttempts) return "deferred";
     if (!this.state.claimGeneration(generation)) return "deferred";
     generation = this.state.getGeneration(generation.source, generation.nativeSessionId, generation.canonicalHash)!;
     const sessionState = this.state.getSession(generation.source, generation.nativeSessionId)!;
@@ -106,12 +111,12 @@ export class ImportWorker {
       // A submitted payload belongs to the operation, not to the source file's current contents.
       if (persisted && !["prepared", "ready"].includes(persisted.hindsightStatus ?? "")) {
         try {
-          const operation = await this.client.waitForOperation(generation.operationId, operationSignal, Math.min(30_000, this.config.hindsight.retainWallTimeoutMs));
+          const operation = await this.client.waitForOperation(generation.operationId, operationSignal, Math.min(OPERATION_POLL_SLICE_MS, this.config.hindsight.retainWallTimeoutMs));
           this.complete(generation, operation);
           await this.cleanupPayload(generation.operationId);
           return "completed";
         } catch (error) {
-          if (!(error instanceof HindsightHttpError) || error.status !== 404) throw error;
+          if (!(error instanceof HindsightHttpError) || error.status !== HTTP_STATUS.NOT_FOUND) throw error;
         }
       }
       if (persisted) session = await loadPendingPayload(this.config.spoolDirectory, generation.operationId, generation.canonicalHash);
@@ -180,10 +185,10 @@ export class ImportWorker {
           if (remote && ![sessionState.acknowledgedHash, generation.canonicalHash].includes(remote.content_hash)) throw new Error("Remote document changed outside the reviewed repair generation");
           if (remote) {
             try { await this.client.deleteDocument(session.documentId, operationSignal); }
-            catch (error) { if (!(error instanceof HindsightHttpError) || error.status !== 404) throw error; }
+            catch (error) { if (!(error instanceof HindsightHttpError) || error.status !== HTTP_STATUS.NOT_FOUND) throw error; }
           }
         }
-        this.state.durableTransaction(() => this.state.upsertOperation({ ...persisted!, hindsightStatus: "ready" }));
+        this.state.durableTransaction(() => { this.state.upsertOperation({ ...persisted!, hindsightStatus: "ready" }); });
       }
       this.state.durableTransaction(() => {
         this.state.upsertOperation({ ...persisted!, hindsightStatus: "submitting", submittedAt: new Date().toISOString() });
@@ -192,7 +197,7 @@ export class ImportWorker {
       const response = await this.client.retainWithOperationId(session, generation.operationId, operationSignal);
       if (response.operation_id && response.operation_id !== generation.operationId) throw new Error("Hindsight did not honor the requested operation identifier");
       this.state.upsertOperation({ ...persisted, hindsightStatus: "pending", submittedAt: new Date().toISOString() });
-      const operation = await this.client.waitForOperation(generation.operationId, operationSignal, Math.min(30_000, this.config.hindsight.retainWallTimeoutMs));
+      const operation = await this.client.waitForOperation(generation.operationId, operationSignal, Math.min(OPERATION_POLL_SLICE_MS, this.config.hindsight.retainWallTimeoutMs));
       this.complete(generation, operation);
       await this.cleanupPayload(generation.operationId);
       return "completed";
@@ -202,8 +207,8 @@ export class ImportWorker {
         return "deferred";
       }
       const operation = this.state.getOperation(generation.operationId);
-      const message = redactText(errorMessage(error)).text.slice(0, 1000);
-      const rejected = error instanceof HindsightHttpError && error.method === "POST" && error.status >= 400 && error.status < 500 && ![408,409,425,429].includes(error.status);
+      const message = redactText(errorMessage(error)).text.slice(0, ERROR_MESSAGE_MAX_CHARS);
+      const rejected = error instanceof HindsightHttpError && error.method === "POST" && error.status >= HTTP_STATUS.BAD_REQUEST && error.status < HTTP_STATUS.INTERNAL_SERVER_ERROR && error.status !== HTTP_STATUS.CONFLICT && !isRetryableStatus(error.status);
       const terminal = error instanceof HindsightOperationError || rejected;
       if (operation && !terminal) {
         this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { error: error instanceof HindsightPollTimeoutError ? undefined : message });

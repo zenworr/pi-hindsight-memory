@@ -1,15 +1,19 @@
 import fs from "node:fs/promises";
+import { MS_PER_SECOND } from "../common/limits.js";
+
 import type { AppConfig, Source, SourceFingerprint, SessionReference, InventorySessionResult } from "../common/types.js";
 import { ADAPTER_VERSION, CANONICAL_SCHEMA, CLASSIFICATION_POLICY_VERSION, REDACTION_POLICY_VERSION, RETAIN_POLICY_VERSION } from "../common/types.js";
 import { documentIdFor } from "../common/hashing.js";
 import { createAdapters } from "../adapters/index.js";
 import type { SessionAdapter } from "../adapters/adapter.js";
 import { queueGeneration } from "./queue.js";
-import { StateDatabase } from "./state-db.js";
+import type { StateDatabase } from "./state-db.js";
 import { errorMessage } from "../common/logging.js";
 import { redactText } from "../canonical/redact.js";
 import { configuredExclusion, normalizeSessionLabel } from "./exclusions.js";
 import { indexedDocumentHashes, indexEvidence, removeEvidence } from "./evidence.js";
+
+const SOURCE_READ_ATTEMPTS = 2;
 
 export interface ScanOptions {
   inventoryOnly?: boolean;
@@ -36,7 +40,7 @@ export interface ScanSummary {
   results: InventorySessionResult[];
 }
 
-export function processingSignature(config: AppConfig): string {
+function processingSignature(config: AppConfig): string {
   const exclusions = [...config.sessionExclusions.exactLabels].map(normalizeSessionLabel).sort();
   return `${CANONICAL_SCHEMA}|${ADAPTER_VERSION}|${REDACTION_POLICY_VERSION}|classification:${CLASSIFICATION_POLICY_VERSION}|retain:${RETAIN_POLICY_VERSION}|exclusions:${JSON.stringify(exclusions)}`;
 }
@@ -48,7 +52,7 @@ function sourceRoot(adapter: SessionAdapter, config: AppConfig): string { return
 function withProcessingSignature(fingerprint: SourceFingerprint, signature: string): SourceFingerprint { return { ...fingerprint, processing_signature: signature }; }
 function timestampOf(reference: SessionReference): number { const value = reference.sessionStartedAt ? Date.parse(reference.sessionStartedAt) : Number.NaN; return Number.isNaN(value) ? Number.POSITIVE_INFINITY : value; }
 
-export function effectiveReference(state: StateDatabase, reference: SessionReference): SessionReference {
+function effectiveReference(state: StateDatabase, reference: SessionReference): SessionReference {
   const alias = state.findSessionByAlias(reference.source, reference.locator);
   if (!alias || alias === reference.nativeSessionId) return reference;
   return { ...reference, nativeSessionId: alias, metadata: { ...reference.metadata, native_session_id: alias }, identityIsFallback: false };
@@ -169,7 +173,7 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
       reference.nativeSessionId,
       fingerprintSignature(fingerprint),
       new Date().toISOString(),
-      config.sessionSettleSeconds * 1_000,
+      config.sessionSettleSeconds * MS_PER_SECOND,
     );
     if (!settled) {
       summary.active += 1;
@@ -181,7 +185,7 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
     let session;
     let loaded = false;
     try {
-      for (let attempt = 0; attempt < 2 && !loaded; attempt += 1) {
+      for (let attempt = 0; attempt < SOURCE_READ_ATTEMPTS && !loaded; attempt += 1) {
         session = await adapter.load(reference, { spoolDirectory: config.spoolDirectory, maxCanonicalBytes: config.maxCanonicalBytes, signal: options.signal });
         if (options.signal?.aborted) {
           await session.cleanup();

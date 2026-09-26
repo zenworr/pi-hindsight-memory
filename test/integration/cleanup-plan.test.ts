@@ -6,7 +6,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { defaultConfig } from "../../src/common/config.js";
 import { documentIdFor, operationIdFor } from "../../src/common/hashing.js";
-import { HindsightClient } from "../../src/hindsight/client.js";
+import type { HindsightClient } from "../../src/hindsight/client.js";
 import { StateDatabase } from "../../src/importer/state-db.js";
 import { buildCleanupPlan } from "../../src/importer/cleanup-plan.js";
 import { cleanupSubagents } from "../../src/importer/subagent-cleanup.js";

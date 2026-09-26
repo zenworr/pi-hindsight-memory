@@ -10,7 +10,7 @@ import piHindsightMemory, { createMemorySearchTool } from "../../src/extension/i
 import { collectHindsightStatus, HINDSIGHT_STATUS_REQUEST_EVENT, registerHindsightStatusProvider, type HindsightStatusSnapshotV1 } from "../../src/extension/status.js";
 
 function client(response: unknown): HindsightClient {
-  return new HindsightClient({ apiUrl: "http://example.test", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: 1000, retainWallTimeoutMs: 1000, recallMaxTokens: 2500, recallChunksMaxTokens: 2500, recallSourceFactsMaxTokens: 1500, operationPollMs: 1, operationPollTimeoutMs: 1000, operationRetentionDays: 14 }, async () => new Response(JSON.stringify(response), { status: 200 }), "token");
+  return new HindsightClient({ ...defaultConfig().hindsight, apiUrl: "http://example.test", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: 1000, retainWallTimeoutMs: 1000, recallMaxTokens: 2500, recallChunksMaxTokens: 2500, recallSourceFactsMaxTokens: 1500, operationPollMs: 1, operationPollTimeoutMs: 1000, operationRetentionDays: 14 }, async () => new Response(JSON.stringify(response), { status: 200 }), "token");
 }
 
 test("the extension exposes exactly one small memory search tool shape", async () => {
@@ -156,7 +156,7 @@ test("status provider exposes queue and service health without secrets", async (
 
 test("empty memory search queries fail before contacting Hindsight", async () => {
   let calls = 0;
-  const hindsight = new HindsightClient({ apiUrl: "http://example.test", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: 1000, retainWallTimeoutMs: 1000, recallMaxTokens: 2500, recallChunksMaxTokens: 2500, recallSourceFactsMaxTokens: 1500, operationPollMs: 1, operationPollTimeoutMs: 1000, operationRetentionDays: 14 }, async () => { calls += 1; return new Response("{}", { status: 200 }); }, "token");
+  const hindsight = new HindsightClient({ ...defaultConfig().hindsight, apiUrl: "http://example.test", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: 1000, retainWallTimeoutMs: 1000, recallMaxTokens: 2500, recallChunksMaxTokens: 2500, recallSourceFactsMaxTokens: 1500, operationPollMs: 1, operationPollTimeoutMs: 1000, operationRetentionDays: 14 }, async () => { calls += 1; return new Response("{}", { status: 200 }); }, "token");
   const tool = createMemorySearchTool(hindsight);
   await assert.rejects(() => tool.execute("call", { query: "   " }, undefined, undefined, {} as any), /must not be empty/);
   assert.equal(calls, 0);

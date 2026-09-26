@@ -1,9 +1,13 @@
 import fs from "node:fs/promises";
 import type { InventoryReport, InventorySessionResult, Source } from "../common/types.js";
 
+const DEFAULT_PILOT_SIZE = 200;
+const EXTREME_SAMPLES_PER_SOURCE = 2;
+const DECILE_COUNT = 10;
+
 export interface PilotEntry { source: Source; nativeSessionId: string; locator: string; canonicalBytes: number; canonicalTurns: number; }
 
-export function selectPilot(report: InventoryReport, count = 200, options: { maxCanonicalBytes?: number; includeLargest?: boolean } = {}): PilotEntry[] {
+export function selectPilot(report: InventoryReport, count = DEFAULT_PILOT_SIZE, options: { maxCanonicalBytes?: number; includeLargest?: boolean } = {}): PilotEntry[] {
   const allCandidates = (report.results ?? []).filter((result) => result.status === "eligible" && result.canonicalBytes !== undefined) as Array<InventorySessionResult & { canonicalBytes: number; canonicalTurns: number }>;
   const candidates = options.maxCanonicalBytes === undefined ? allCandidates : allCandidates.filter((result) => result.canonicalBytes <= options.maxCanonicalBytes!);
   const selected: PilotEntry[] = [];
@@ -18,11 +22,11 @@ export function selectPilot(report: InventoryReport, count = 200, options: { max
   for (const source of sourceOrder) groups.set(source, candidates.filter((result) => result.source === source).sort((a, b) => a.canonicalBytes - b.canonicalBytes || a.nativeSessionId.localeCompare(b.nativeSessionId)));
   const available = sourceOrder.filter((source) => (groups.get(source)?.length ?? 0) > 0);
   for (const source of available) add(groups.get(source)?.[0]);
-  if (options.includeLargest && count >= available.length * 2) for (const source of available) { const group = groups.get(source)!; add(group[group.length - 1]); }
-  for (let decile = 0; selected.length < count && decile < 10; decile += 1) {
+  if (options.includeLargest && count >= available.length * EXTREME_SAMPLES_PER_SOURCE) for (const source of available) { const group = groups.get(source)!; add(group[group.length - 1]); }
+  for (let decile = 0; selected.length < count && decile < DECILE_COUNT; decile += 1) {
     for (const source of available) {
       const group = groups.get(source)!;
-      const denominator = options.includeLargest ? 9 : 10;
+      const denominator = options.includeLargest ? DECILE_COUNT - 1 : DECILE_COUNT;
       add(group[Math.floor((group.length - 1) * decile / denominator)]);
       if (selected.length >= count) break;
     }
