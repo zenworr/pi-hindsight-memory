@@ -18,6 +18,10 @@ journalctl --user -u pi-hindsight-importer.service -n 100
 
 Logs contain source IDs, counts, hashes, and bounded errors. They must not contain transcript text or original secret values. Source parsing errors are stored separately and remain visible until a successful scan clears them. Status also distinguishes a paused or stopped importer from an idle queue. Normal scans defer a changed fingerprint until scanner observations show it stable for `sessionSettleSeconds`; `active` in a scan summary is a deferred count, not an error. Use `scan --force` only for a controlled final catch-up after writers are closed.
 
+`verify-import` reports `failedHindsightOperations` for diagnostics. This count includes retained terminal history and does not block readiness by itself. Current failed generations, document mismatches, active operations, and failed or pending consolidation still block readiness. Retained failure records are not deleted during recovery.
+
+The daemon retries a failed cycle after 30 seconds rather than waiting for the full scan interval. A successful queue recovery clears its cycle error immediately. Failed generations retain the three-attempt limit; exhausted failures need review and an explicit retry.
+
 ## Pause and resume
 
 ```bash

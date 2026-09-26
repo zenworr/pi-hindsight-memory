@@ -7,7 +7,8 @@ import { HindsightClient, HindsightHttpError, HindsightOperationError, Hindsight
 import { errorMessage, Logger } from "../common/logging.js";
 import { assertImportApproval, estimateCostUsd, estimateInputTokens, readApproval } from "../common/approval.js";
 import { redactText } from "../canonical/redact.js";
-import { Semaphore, sleep } from "./scheduler.js";
+import { Semaphore } from "./scheduler.js";
+import { sleep } from "../common/async.js";
 import type { GenerationRecord, SessionStateRecord } from "./state-db.js";
 import { StateDatabase } from "./state-db.js";
 import { configuredExclusion } from "./exclusions.js";
@@ -29,8 +30,7 @@ export class ImportWorker {
   }
 
   async preflight(signal?: AbortSignal): Promise<ImportApproval | undefined> {
-    if (!this.config.requireImportApproval) return undefined;
-    const approval = assertImportApproval(this.config);
+    const approval = this.config.requireImportApproval ? assertImportApproval(this.config) : undefined;
     await this.client.ensureBank(signal);
     await this.client.assertBankConfiguration({ requireExtraction: true, bulk: this.bulkMode, signal });
     await this.client.assertExtractionAvailable(signal);
@@ -38,11 +38,7 @@ export class ImportWorker {
   }
 
   async runOnce(limit = 100, signal?: AbortSignal): Promise<WorkerSummary> {
-    const priority: Record<string, number> = { processing: 0, submitted: 0, queued: 1, failed: 2 };
-    const candidates = this.state.listGenerations()
-      .filter((generation) => ["queued", "submitted", "processing"].includes(generation.state) || generation.state === "failed" && generation.attemptCount < 3)
-      .sort((a, b) => (priority[a.state] ?? 9) - (priority[b.state] ?? 9) || a.queuedAt.localeCompare(b.queuedAt))
-      .slice(0, limit);
+    const candidates = this.state.listWorkCandidates(limit);
     const summary: WorkerSummary = { selected: candidates.length, completed: 0, failed: 0, deferred: 0 };
     await Promise.all(candidates.map((generation) => this.limiter.run(async () => {
       if (signal?.aborted) { summary.deferred += 1; return; }
@@ -63,7 +59,7 @@ export class ImportWorker {
       total.selected += batch.selected; total.completed += batch.completed; total.failed += batch.failed; total.deferred += batch.deferred;
       if (batch.selected === 0) break;
       if (batch.completed === 0 && batch.failed === 0 && this.state.pendingWorkCount() > 0) {
-        if (!this.state.listGenerations().some((generation) => ["submitted", "processing"].includes(generation.state))) throw new Error("Queued work is blocked; inspect session classification and cleanup state");
+        if (!this.state.hasActiveOperations()) throw new Error("Queued work is blocked; inspect session classification and cleanup state");
         await sleep(250, signal);
       }
     }
@@ -164,9 +160,6 @@ export class ImportWorker {
         const inputTokens = estimateInputTokens(session.canonicalBytes);
         if (!this.state.reserveBudget(generation.operationId, inputTokens, estimateCostUsd(inputTokens, approval), approval.maxEstimatedInputTokens, approval.maxEstimatedCostUsd)) throw new Error("Approved import budget exceeded; review the approval before retrying");
       }
-      await this.client.ensureBank(operationSignal);
-      await this.client.assertBankConfiguration({ requireExtraction: true, bulk: this.bulkMode, signal: operationSignal });
-      await this.client.assertExtractionAvailable(operationSignal);
       if (generation.repair && !this.repairMode) throw new Error("Historical evidence-policy repair requires a reviewed plan-repair/repair command");
       if (!persisted) {
         await savePendingPayload(this.config.spoolDirectory, generation.operationId, session);

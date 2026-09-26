@@ -14,13 +14,3 @@ export class Semaphore {
     }
   }
 }
-
-export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (ms <= 0) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    let timer: NodeJS.Timeout | undefined;
-    const onAbort = () => { if (timer) clearTimeout(timer); reject(new Error("Operation aborted")); };
-    timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}

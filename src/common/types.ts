@@ -271,8 +271,6 @@ export interface ImportApproval {
   approvedAt: string;
   provider: string;
   model: string;
-  retainModel?: string;
-  consolidationModel?: string;
   privacy: ImportPrivacyMode;
   maxEstimatedInputTokens: number;
   maxEstimatedCostUsd: number;

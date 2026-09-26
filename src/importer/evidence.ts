@@ -89,6 +89,7 @@ export function removeEvidence(config: AppConfig, documentId: string): void {
   if (!fs.existsSync(config.evidenceDatabase)) return;
   const db = writableIndex(config.evidenceDatabase);
   try {
+    if (!db.prepare("SELECT 1 FROM documents WHERE id=?").get(documentId)) return;
     db.exec("BEGIN IMMEDIATE");
     db.prepare("DELETE FROM passages WHERE document_id=?").run(documentId);
     db.prepare("DELETE FROM documents WHERE id=?").run(documentId);

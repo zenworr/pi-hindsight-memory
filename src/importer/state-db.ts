@@ -94,18 +94,29 @@ function nullableString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
+export function generationCounts(db: DatabaseSync): Partial<Record<GenerationState, number>> {
+  const rows = db.prepare("SELECT state, COUNT(*) AS count FROM generations GROUP BY state").all() as { state: GenerationState; count: number }[];
+  return Object.fromEntries(rows.map((row) => [row.state, row.count]));
+}
+
 export class StateDatabase {
   readonly db: DatabaseSync;
-  constructor(readonly databasePath: string) {
+  constructor(readonly databasePath: string, options: { readOnly?: boolean } = {}) {
+    if (options.readOnly) {
+      this.db = new DatabaseSync(databasePath, { readOnly: true, timeout: 1000 });
+      return;
+    }
     if (databasePath !== ":memory:") fs.mkdirSync(path.dirname(databasePath), { recursive: true, mode: 0o700 });
     this.db = new DatabaseSync(databasePath);
     if (databasePath !== ":memory:") {
       try { fs.chmodSync(databasePath, 0o600); } catch { /* database may be created by a restricted filesystem */ }
     }
-    this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 1000;");
-    if (databasePath !== ":memory:") this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
-    this.migrate();
-    this.restrictFileModes();
+    try {
+      this.db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 1000;");
+      if (databasePath !== ":memory:") this.db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
+      this.migrate();
+      this.restrictFileModes();
+    } catch (error) { this.db.close(); throw error; }
   }
 
   private restrictFileModes(): void {
@@ -389,10 +400,6 @@ export class StateDatabase {
     );
   }
 
-  updateSessionCanonical(source: Source, nativeSessionId: string, canonicalHash: string, bytes: number, turns: number, schema: string, startedAt: string, updatedAt: string, status: string, error?: string): void {
-    this.db.prepare(`UPDATE sessions SET canonical_hash=?, canonical_bytes=?, canonical_turns=?, canonical_schema=?, session_started_at=?, session_updated_at=?, status=?, last_seen_at=?, last_error=? WHERE source=? AND native_session_id=?`).run(canonicalHash, bytes, turns, schema, startedAt, updatedAt, status, new Date().toISOString(), error ?? null, source, nativeSessionId);
-  }
-
   markSourceMissing(source: Source, nativeSessionId: string, at: string): void {
     this.db.prepare("UPDATE sessions SET status='source_missing', last_seen_at=?, last_error=? WHERE source=? AND native_session_id=? AND status NOT IN ('excluded_subagent','excluded_ambiguous','excluded_configured','ambiguous_preserved','cleanup_pending')").run(at, "Native source was not found during a scan; Hindsight document was retained", source, nativeSessionId);
   }
@@ -437,10 +444,6 @@ export class StateDatabase {
   getExclusionTombstone(source: Source, nativeSessionId: string, documentId: string): ExclusionTombstoneRecord | undefined {
     const row = this.db.prepare("SELECT * FROM exclusion_tombstones WHERE source=? AND native_session_id=? AND document_id=?").get(source, nativeSessionId, documentId) as Record<string, unknown> | undefined;
     return row ? { source: String(row.source) as Source, nativeSessionId: String(row.native_session_id), documentId: String(row.document_id), locator: String(row.locator), label: String(row.label), normalizedLabel: String(row.normalized_label), createdAt: String(row.created_at), updatedAt: String(row.updated_at) } : undefined;
-  }
-
-  listExclusionTombstones(): ExclusionTombstoneRecord[] {
-    return (this.db.prepare("SELECT * FROM exclusion_tombstones ORDER BY source,native_session_id").all() as Record<string, unknown>[]).map((row) => ({ source: String(row.source) as Source, nativeSessionId: String(row.native_session_id), documentId: String(row.document_id), locator: String(row.locator), label: String(row.label), normalizedLabel: String(row.normalized_label), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }));
   }
 
   listArtifacts(classification?: SessionClassification["kind"]): SessionArtifactRecord[] {
@@ -624,11 +627,6 @@ export class StateDatabase {
     return row ? this.toGeneration(row) : undefined;
   }
 
-  getActiveGenerationForDocument(source: Source, nativeSessionId: string): GenerationRecord | undefined {
-    const row = this.db.prepare(`SELECT * FROM generations WHERE source=? AND native_session_id=? AND state IN ('queued','submitted','processing') ORDER BY queued_at DESC LIMIT 1`).get(source, nativeSessionId) as Record<string, unknown> | undefined;
-    return row ? this.toGeneration(row) : undefined;
-  }
-
   /** Atomically claims one generation and prevents two versions of one document from running together. */
   claimGeneration(generation: GenerationRecord): boolean {
     return this.transaction(() => {
@@ -662,9 +660,16 @@ export class StateDatabase {
     return row ? this.toGeneration(row) : undefined;
   }
 
-  listQueued(limit = 100): GenerationRecord[] {
-    const rows = this.db.prepare(`SELECT * FROM generations WHERE state IN ('queued','failed') ORDER BY queued_at ASC LIMIT ?`).all(limit) as Record<string, unknown>[];
+  listWorkCandidates(limit = 100): GenerationRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM generations
+      WHERE state IN ('queued','submitted','processing') OR state='failed' AND attempt_count<3
+      ORDER BY CASE state WHEN 'processing' THEN 0 WHEN 'submitted' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, queued_at
+      LIMIT ?`).all(limit) as Record<string, unknown>[];
     return rows.map((row) => this.toGeneration(row));
+  }
+
+  hasActiveOperations(): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM generations WHERE state IN ('submitted','processing') LIMIT 1").get());
   }
 
   listGenerations(): GenerationRecord[] {
@@ -681,10 +686,6 @@ export class StateDatabase {
 
   supersedeOlder(source: Source, nativeSessionId: string, keepHash: string): void {
     this.db.prepare("UPDATE generations SET state='superseded' WHERE source=? AND native_session_id=? AND canonical_hash<>? AND state IN ('discovered','queued','failed')").run(source, nativeSessionId, keepHash);
-  }
-
-  markGenerationCleanupPending(source: Source, nativeSessionId: string, hash: string, reason: string): void {
-    this.db.prepare("UPDATE generations SET state='cleanup_pending', error=? WHERE source=? AND native_session_id=? AND canonical_hash=? AND state IN ('queued','submitted','processing','completed','failed')").run(reason, source, nativeSessionId, hash);
   }
 
   markSessionGenerationsCleanupPending(source: Source, nativeSessionId: string, reason: string): number {

@@ -7,10 +7,9 @@ import { activeProvider, assertImportApproval, estimateCostUsd, estimateInputTok
 import { errorMessage, Logger } from "../common/logging.js";
 import { HindsightClient } from "../hindsight/client.js";
 import { runInventory } from "./inventory.js";
-import { DaemonLock } from "./lock.js";
+import { withStateLock as withLock } from "./lock.js";
 import { drainImporter, runDaemon, setPaused, status } from "./daemon.js";
 import { scan } from "./scanner.js";
-import { StateDatabase } from "./state-db.js";
 import { createAdapters } from "../adapters/index.js";
 import type { Source } from "../common/types.js";
 import { readInventory, selectPilot } from "./pilot.js";
@@ -41,13 +40,6 @@ async function writeJson(outputPath: string | undefined, valueToWrite: unknown):
   if (!outputPath || outputPath === "-") { process.stdout.write(text); return; }
   await fs.mkdir(path.dirname(path.resolve(outputPath)), { recursive: true, mode: 0o700 });
   await fs.writeFile(outputPath, text, { encoding: "utf8", mode: 0o600 });
-}
-
-async function withLock<T>(config: ReturnType<typeof loadConfig>, fn: (state: StateDatabase) => Promise<T>): Promise<T> {
-  const lock = new DaemonLock(path.join(config.stateDirectory, "daemon.lock"));
-  lock.acquire();
-  const state = new StateDatabase(config.stateDatabase);
-  try { return await fn(state); } finally { state.close(); lock.release(); }
 }
 
 function usage(): void {

@@ -87,10 +87,10 @@ test("status provider exposes queue and service health without secrets", async (
   const config = defaultConfig(root);
   const state = new StateDatabase(config.stateDatabase);
   state.heartbeat("idle");
-  state.close();
-  const executor = {
-    async exec() { return { stdout: "2|1|3|4|5\n", stderr: "", code: 0 }; },
-  };
+  state.upsertSession({ source: "pi", nativeSessionId: "status", documentId: "status", sourceLocator: "/fixture", sourceSize: 1, sourceMtime: 1, sourceFingerprint: { size: 1, mtimeMs: 1, sampleHash: "h", stableLocator: "/fixture" }, status: "discovered", lastSeenAt: new Date().toISOString() });
+  for (const [status, count] of [["queued", 2], ["submitted", 1], ["processing", 3], ["failed", 4], ["cleanup_pending", 5]] as const) {
+    for (let i = 0; i < count; i++) state.upsertGeneration({ source: "pi", nativeSessionId: "status", canonicalHash: `${status}-${i}`, operationId: `${status}-${i}`, state: status, queuedAt: new Date().toISOString(), attemptCount: 1 });
+  }
   const statusClient = {
     async health() { return { status: "healthy", database: "connected" }; },
     async getBankStats() {
@@ -105,7 +105,7 @@ test("status provider exposes queue and service health without secrets", async (
     },
     async listOperations() { return [{ id: "op-1", status: "processing", task_type: "consolidation" }]; },
   } as unknown as HindsightClient;
-  const direct = await collectHindsightStatus(config, executor, statusClient);
+  const direct = await collectHindsightStatus(config, statusClient);
   assert.deepEqual([direct.importer.queued, direct.importer.submitted, direct.importer.processing, direct.importer.failed, direct.importer.cleanupPending], [2, 1, 3, 4, 5]);
   assert.equal(direct.importer.running, true);
   assert.equal(direct.importer.scanErrors, 0);
@@ -114,15 +114,14 @@ test("status provider exposes queue and service health without secrets", async (
   assert.deepEqual(direct.issues, []);
   assert.doesNotMatch(JSON.stringify(direct), /token|password/i);
 
-  (statusClient as any).listOperations = async () => [{ id: "op-2", status: "processing", task_type: "retain" }];
-  const retaining = await collectHindsightStatus(config, executor, statusClient);
+  statusClient.listOperations = async () => [{ id: "op-2", status: "processing", task_type: "retain" }];
+  const retaining = await collectHindsightStatus(config, statusClient);
   assert.equal(retaining.service.processingOperations, 1);
   assert.equal(retaining.service.consolidationActive, false);
 
   let listener: ((data: unknown) => void) | undefined;
   let removed = false;
   const fakePi: any = {
-    exec: executor.exec,
     events: {
       on(channel: string, handler: (data: unknown) => void) {
         assert.equal(channel, HINDSIGHT_STATUS_REQUEST_EVENT);
@@ -134,9 +133,24 @@ test("status provider exposes queue and service health without secrets", async (
   const unregister = registerHindsightStatusProvider(fakePi, config, statusClient);
   let response: Promise<HindsightStatusSnapshotV1> | undefined;
   listener?.({ protocolVersion: 1, respond(value: Promise<HindsightStatusSnapshotV1>) { response = value; } });
+  let concurrent: Promise<HindsightStatusSnapshotV1> | undefined;
+  listener?.({ protocolVersion: 1, respond(value: Promise<HindsightStatusSnapshotV1>) { concurrent = value; } });
+  assert.equal(response, concurrent);
   assert.equal((await response)?.service.documents, 42);
+  state.heartbeat("error", "Temporary connection failure");
+  listener?.({ protocolVersion: 1, respond(value: Promise<HindsightStatusSnapshotV1>) { concurrent = value; } });
+  assert.notEqual(response, concurrent);
+  const failed = (await concurrent)!;
+  assert.match(failed.issues.join(" "), /Temporary connection failure/);
+  state.heartbeat("idle");
+  state.db.exec("UPDATE generations SET state='superseded' WHERE state='failed'");
+  const recovered = await collectHindsightStatus(config, statusClient);
+  assert.equal(recovered.importer.failed, 0);
+  assert.equal(recovered.service.failedOperations, 6);
+  assert.deepEqual(recovered.issues, []);
   unregister();
   assert.equal(removed, true);
+  state.close();
   await fs.rm(root, { recursive: true, force: true });
 });
 

@@ -113,7 +113,7 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
     if (frozen?.status === "ambiguous_preserved" && classification.kind !== "configured-exclusion") {
       state.clearScanCandidate(adapter.source, reference.nativeSessionId);
       state.clearScanError(adapter.source, reference.locator);
-      removeEvidence(config, frozen.documentId);
+      if (indexed.delete(frozen.documentId)) removeEvidence(config, frozen.documentId);
       summary.ambiguous += 1;
       summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: "ambiguous" });
       continue;
@@ -128,7 +128,7 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
       const safeToMutateSession = existing && (adapter.source !== "claude" || sameArtifact);
       state.clearScanCandidate(adapter.source, reference.nativeSessionId);
       if (safeToMutateSession) {
-        removeEvidence(config, existing.documentId);
+        if (indexed.delete(existing.documentId)) removeEvidence(config, existing.documentId);
         const latest = state.getLatestGeneration(adapter.source, reference.nativeSessionId);
         const preserveAmbiguous = classification.kind === "ambiguous" && latest?.state === "completed";
         const excludedStatus = classification.kind === "subagent" ? "excluded_subagent" : classification.kind === "configured-exclusion" ? "excluded_configured" : preserveAmbiguous ? "ambiguous_preserved" : "excluded_ambiguous";
@@ -198,6 +198,7 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
         loaded = true;
       }
     } catch (error) {
+      await session?.cleanup().catch(() => undefined);
       if (options.signal?.aborted) throw error;
       healthy.set(adapter.source, false); summary.errors += 1;
       const message = redactText(errorMessage(error)).text;

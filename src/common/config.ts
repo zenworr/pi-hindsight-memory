@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { absolutePath, defaultRuntimePaths, homeDirectory } from "./paths.js";
-import type { AppConfig, HindsightConfig, Source } from "./types.js";
+import type { AppConfig } from "./types.js";
 import { SOURCES } from "./types.js";
 
 const DEFAULT_BANK = "coding-history";
@@ -140,12 +140,4 @@ export function loadConfig(configPath?: string, home = homeDirectory()): AppConf
   if (process.env.PI_HINDSIGHT_REQUIRE_APPROVAL !== undefined) config.requireImportApproval = process.env.PI_HINDSIGHT_REQUIRE_APPROVAL !== "0";
 
   return validateConfig(config);
-}
-
-export function defaultHindsightConfig(): HindsightConfig {
-  return defaultConfig().hindsight;
-}
-
-export function enabledSources(config: AppConfig): Source[] {
-  return [...SOURCES].filter((source) => Boolean(config.sourceRoots[source]));
 }

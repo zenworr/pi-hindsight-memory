@@ -5,6 +5,7 @@ import { errorMessage } from "../common/logging.js";
 import { redactText } from "../canonical/redact.js";
 import { RETAIN_POLICY_VERSION } from "../common/types.js";
 import { expectedRetainMission } from "../common/retention-policy.js";
+import { sleep } from "../common/async.js";
 
 export interface FetchLike {
   (input: string | URL, init?: RequestInit): Promise<Response>;
@@ -69,24 +70,6 @@ function isRetryableStatus(status: number): boolean {
 
 function estimateTokens(text: string): number { return Math.ceil([...text].length / 4); }
 
-function combineSignals(signal: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; cleanup: () => void } {
-  const timeout = AbortSignal.timeout(Math.max(1, timeoutMs));
-  if (!signal) return { signal: timeout, cleanup: () => undefined };
-  const combined = AbortSignal.any([signal, timeout]);
-  return { signal: combined, cleanup: () => undefined };
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (ms <= 0) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    let timer: NodeJS.Timeout;
-    const cleanup = () => signal?.removeEventListener("abort", onAbort);
-    const onAbort = () => { clearTimeout(timer); cleanup(); reject(new Error("Operation aborted")); };
-    timer = setTimeout(() => { cleanup(); resolve(); }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
 export class HindsightClient {
   private bankEnsured = false;
   private bankConfigurationVerified = false;
@@ -118,30 +101,32 @@ export class HindsightClient {
   }
 
   async requestJson<T>(method: string, url: string, body?: unknown, signal?: AbortSignal, timeoutMs = this.config.requestTimeoutMs): Promise<T> {
+    signal?.throwIfAborted();
+    const deadline = Date.now() + timeoutMs;
+    const payload = body === undefined ? undefined : JSON.stringify(body);
     let token = await this.token();
     let authRetry = false;
-    const deadline = Date.now() + timeoutMs;
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      signal?.throwIfAborted();
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error(`${method} ${url}: request exceeded ${timeoutMs} ms`);
       const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${token}` };
       const request: RequestInit = { method, headers };
-      if (body !== undefined) { headers["Content-Type"] = "application/json"; request.body = JSON.stringify(body); }
-      const combined = combineSignals(signal, remaining);
-      request.signal = combined.signal;
+      if (payload !== undefined) { headers["Content-Type"] = "application/json"; request.body = payload; }
+      const timeout = AbortSignal.timeout(Math.max(1, remaining));
+      request.signal = signal ? AbortSignal.any([signal, timeout]) : timeout;
       let response: Response;
       try {
         response = await this.fetcher(url, request);
       } catch (error) {
-        combined.cleanup();
         if (attempt < 2 && !signal?.aborted && Date.now() < deadline) {
           await sleep(Math.min(100 * 2 ** attempt, Math.max(0, deadline - Date.now())), signal);
           continue;
         }
         throw new Error(`${method} ${url}: ${errorMessage(error)}`);
       }
-      combined.cleanup();
       if (response.status === 401 && !authRetry && await this.tokenChanged(token) && Date.now() < deadline) {
+        await response.body?.cancel();
         token = await this.token();
         authRetry = true;
         continue;

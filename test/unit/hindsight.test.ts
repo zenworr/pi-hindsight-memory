@@ -129,12 +129,25 @@ test("retain sends the canonical document with a caller-owned stable operation I
 
 test("request retries a transient failure but keeps one operation payload", async () => {
   let calls = 0;
-  const client = new HindsightClient(config(), async () => {
+  let serialized = 0;
+  const bodies: unknown[] = [];
+  const payload = { toJSON() { serialized++; return { operation_id: "stable-op" }; } };
+  const client = new HindsightClient(config(), async (_url, request) => {
     calls += 1;
+    bodies.push(request?.body);
     return calls === 1 ? jsonResponse({ error: "temporary" }, 503) : jsonResponse({ ok: true });
   }, "token");
-  assert.deepEqual(await client.requestJson("GET", "http://example.test/health"), { ok: true });
+  assert.deepEqual(await client.requestJson("POST", "http://example.test/memories", payload), { ok: true });
   assert.equal(calls, 2);
+  assert.equal(serialized, 1);
+  assert.deepEqual(bodies, ['{"operation_id":"stable-op"}', '{"operation_id":"stable-op"}']);
+});
+
+test("an already cancelled request sends no data", async () => {
+  let calls = 0;
+  const client = new HindsightClient(config(), async () => { calls++; return jsonResponse({}); }, "token");
+  await assert.rejects(() => client.health(AbortSignal.abort()));
+  assert.equal(calls, 0);
 });
 
 test("client rejects queries over Hindsight's token limit locally", async () => {

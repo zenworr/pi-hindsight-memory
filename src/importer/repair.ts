@@ -12,7 +12,7 @@ import { normalizeSessionLabel } from "./exclusions.js";
 import { StateDatabase } from "./state-db.js";
 import { ImportWorker } from "./worker.js";
 import { scan } from "./scanner.js";
-import { sleep } from "./scheduler.js";
+import { sleep } from "../common/async.js";
 
 export interface RepairTarget {
   source: Source;

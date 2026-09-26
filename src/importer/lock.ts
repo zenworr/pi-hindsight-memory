@@ -1,5 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { AppConfig } from "../common/types.js";
+import { StateDatabase } from "./state-db.js";
+
+export async function withStateLock<T>(config: AppConfig, fn: (state: StateDatabase) => Promise<T>): Promise<T> {
+  const lock = new DaemonLock(path.join(config.stateDirectory, "daemon.lock"));
+  lock.acquire();
+  try {
+    const state = new StateDatabase(config.stateDatabase);
+    try { return await fn(state); }
+    finally { state.close(); }
+  } finally { lock.release(); }
+}
 
 export class DaemonLock {
   private descriptor: number | undefined;

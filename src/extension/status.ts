@@ -1,3 +1,5 @@
+import { DatabaseSync } from "node:sqlite";
+import { generationCounts } from "../importer/state-db.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AppConfig, HindsightBankStats, HindsightOperation } from "../common/types.js";
 import { errorMessage } from "../common/logging.js";
@@ -39,10 +41,6 @@ export interface HindsightStatusRequestV1 {
   respond(status: Promise<HindsightStatusSnapshotV1>): void;
 }
 
-interface CommandExecutor {
-  exec(command: string, args: string[], options?: { timeout?: number }): Promise<{ stdout: string; stderr: string; code: number }>;
-}
-
 const STATUS_TIMEOUT_MS = 4_000;
 
 function count(value: unknown): number {
@@ -55,13 +53,13 @@ function isStatusRequest(value: unknown): value is HindsightStatusRequestV1 {
   return request.protocolVersion === 1 && typeof request.respond === "function";
 }
 
-async function importerStatus(config: AppConfig, executor: CommandExecutor): Promise<HindsightStatusSnapshotV1["importer"]> {
-  const sql = "SELECT COALESCE(SUM(state='queued'),0), COALESCE(SUM(state='submitted'),0), COALESCE(SUM(state='processing'),0), COALESCE(SUM(state='failed'),0), COALESCE(SUM(state='cleanup_pending'),0) FROM generations;";
-  const result = await executor.exec("sqlite3", ["-readonly", "-noheader", "-separator", "|", config.stateDatabase, sql], { timeout: STATUS_TIMEOUT_MS });
-  if (result.code !== 0) throw new Error("importer state query failed");
-  const values = result.stdout.trim().split("|").map(Number);
-  if (values.length !== 5 || values.some((value) => !Number.isFinite(value) || value < 0)) throw new Error("invalid importer state response");
-  return { queued: values[0]!, submitted: values[1]!, processing: values[2]!, failed: values[3]!, cleanupPending: values[4]!, ...importerHealth(config) };
+function importerStatus(config: AppConfig): HindsightStatusSnapshotV1["importer"] {
+  const db = new DatabaseSync(config.stateDatabase, { readOnly: true, timeout: 500 });
+  try {
+    db.exec("BEGIN");
+    const counts = generationCounts(db);
+    return { queued: counts.queued ?? 0, submitted: counts.submitted ?? 0, processing: counts.processing ?? 0, failed: counts.failed ?? 0, cleanupPending: counts.cleanup_pending ?? 0, ...importerHealth(config, db) };
+  } finally { db.close(); }
 }
 
 function serviceStatus(health: Record<string, unknown>, stats: HindsightBankStats, operations: HindsightOperation[]): HindsightStatusSnapshotV1["service"] {
@@ -82,7 +80,6 @@ function serviceStatus(health: Record<string, unknown>, stats: HindsightBankStat
 
 export async function collectHindsightStatus(
   config: AppConfig,
-  executor: CommandExecutor,
   client = new HindsightClient(config.hindsight),
 ): Promise<HindsightStatusSnapshotV1> {
   const issues: string[] = [];
@@ -101,7 +98,7 @@ export async function collectHindsightStatus(
 
   const signal = AbortSignal.timeout(STATUS_TIMEOUT_MS);
   const [importerResult, serviceResult] = await Promise.allSettled([
-    importerStatus(config, executor),
+    Promise.resolve().then(() => importerStatus(config)),
     Promise.all([client.health(signal), client.getBankStats(signal), client.listOperations("processing", signal)]),
   ]);
   if (importerResult.status === "fulfilled") {
@@ -134,8 +131,10 @@ export async function collectHindsightStatus(
 }
 
 export function registerHindsightStatusProvider(pi: ExtensionAPI, config: AppConfig, client: HindsightClient): () => void {
+  let inFlight: Promise<HindsightStatusSnapshotV1> | undefined;
   return pi.events.on(HINDSIGHT_STATUS_REQUEST_EVENT, (data) => {
     if (!isStatusRequest(data)) return;
-    data.respond(collectHindsightStatus(config, pi, client));
+    inFlight ??= collectHindsightStatus(config, client).finally(() => { inFlight = undefined; });
+    data.respond(inFlight);
   });
 }

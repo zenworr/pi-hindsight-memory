@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { StateDatabase } from "../../src/importer/state-db.js";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { generationCounts, StateDatabase } from "../../src/importer/state-db.js";
 import { operationIdFor, replayOperationIdFor, documentIdFor } from "../../src/common/hashing.js";
 
 function sessionRow(id: string) {
@@ -42,6 +45,39 @@ test("state atomically serializes generations for one mutable document", () => {
   assert.equal(state.claimGeneration(second), true);
   assert.equal(state.getGeneration("pi", "s1", "hash-b")?.state, "processing");
   state.close();
+});
+
+test("read-only state inspection cannot create databases or change stored state", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-readonly-"));
+  const file = path.join(root, "state.sqlite3");
+  try {
+    assert.throws(() => new StateDatabase(file, { readOnly: true }));
+    assert.deepEqual(await fs.readdir(root), []);
+    const writer = new StateDatabase(file);
+    writer.upsertSession(sessionRow("existing"));
+    writer.close();
+    const reader = new StateDatabase(file, { readOnly: true });
+    try {
+      assert.equal(reader.listSessions().length, 1);
+      assert.throws(() => reader.setSessionStatus("pi", "existing", "changed"), /readonly/i);
+      assert.equal(reader.getSession("pi", "existing")?.status, "discovered");
+    } finally { reader.close(); }
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("work selection is bounded, prioritizes active operations, and excludes exhausted failures", () => {
+  const state = new StateDatabase(":memory:");
+  try {
+    state.upsertSession(sessionRow("work"));
+    const states = ["completed", "failed", "queued", "submitted", "processing", "failed", "excluded", "superseded", "cleanup_pending"] as const;
+    states.forEach((value, i) => state.upsertGeneration({ source: "pi", nativeSessionId: "work", canonicalHash: `h${i}`, operationId: `op${i}`, state: value, attemptCount: i === 5 ? 3 : 1, queuedAt: `2026-01-01T00:00:0${i}.000Z` }));
+    assert.deepEqual(state.listWorkCandidates(3).map((g) => g.operationId), ["op3", "op4", "op2"]);
+    assert.deepEqual(state.listWorkCandidates().map((g) => g.operationId), ["op3", "op4", "op2", "op1"]);
+    assert.equal(state.hasActiveOperations(), true);
+    assert.equal(generationCounts(state.db).failed, 2);
+    state.db.exec("UPDATE generations SET state='superseded' WHERE state IN ('processing','submitted')");
+    assert.equal(state.hasActiveOperations(), false);
+  } finally { state.close(); }
 });
 
 test("budget reservations are idempotent and enforce approved limits", () => {

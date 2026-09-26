@@ -9,10 +9,10 @@ import { HindsightClient } from "../../src/hindsight/client.js";
 import { StateDatabase } from "../../src/importer/state-db.js";
 import { verifyFullImport } from "../../src/importer/verify.js";
 
-function fakeClient(documentId: string, pendingConsolidation: number, autoConsolidation: boolean, validBank = true): HindsightClient {
+function fakeClient(documentId: string, pendingConsolidation: number, autoConsolidation: boolean, validBank = true, failedOperations = 0): HindsightClient {
   return {
     listDocuments: async () => [{ id: documentId, content_hash: "hash" }],
-    getBankStats: async () => ({ pending_consolidation: pendingConsolidation, failed_consolidation: 0, pending_operations: 0, failed_operations: 0, operations_by_status: {} }),
+    getBankStats: async () => ({ pending_consolidation: pendingConsolidation, failed_consolidation: 0, pending_operations: 0, failed_operations: failedOperations, operations_by_status: {} }),
     getBankConfig: async () => ({ config: { enable_auto_consolidation: autoConsolidation } }),
     assertExtractionAvailable: async () => undefined,
     assertBankConfiguration: async () => {
@@ -51,7 +51,22 @@ test("readiness requires exact documents, idle Hindsight, and continuous consoli
     const ready = await verifyFullImport(config, fakeClient(documentId, 0, true));
     assert.equal(ready.idempotencyReady, true);
     assert.equal(ready.continuousReady, true);
+    const recovered = await verifyFullImport(config, fakeClient(documentId, 0, true, true, 42));
+    assert.equal(recovered.failedHindsightOperations, 42);
+    assert.equal(recovered.hindsightIdle, true);
+    assert.equal(recovered.continuousReady, true);
+    const wrongHash = fakeClient(documentId, 0, true, true, 42);
+    wrongHash.listDocuments = async () => [{ id: documentId, content_hash: "wrong" }];
+    assert.equal((await verifyFullImport(config, wrongHash)).activationReady, false);
+    const failedConsolidation = fakeClient(documentId, 0, true, true, 42);
+    failedConsolidation.getBankStats = async () => ({ failed_operations: 42, failed_consolidation: 1 });
+    assert.equal((await verifyFullImport(config, failedConsolidation)).activationReady, false);
     const stoppedState = new StateDatabase(config.stateDatabase);
+    stoppedState.upsertGeneration({ source: "pi", nativeSessionId: "ready-session", canonicalHash: "failed-update", operationId: "failed-op", state: "failed", queuedAt: "2026-01-02T00:00:00.000Z", attemptCount: 3 });
+    const unresolved = await verifyFullImport(config, fakeClient(documentId, 0, true, true, 42));
+    assert.equal(unresolved.failedGenerations, 1);
+    assert.equal(unresolved.activationReady, false);
+    stoppedState.setGenerationState("pi", "ready-session", "failed-update", "superseded");
     stoppedState.heartbeat("stopped");
     stoppedState.close();
     const stopped = await verifyFullImport(config, fakeClient(documentId, 0, true));

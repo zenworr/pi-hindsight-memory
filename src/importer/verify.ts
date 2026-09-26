@@ -8,7 +8,7 @@ function count(value: unknown): number {
 }
 
 export async function verifyFullImport(config: AppConfig, client = new HindsightClient(config.hindsight), options: { signal?: AbortSignal } = {}): Promise<Record<string, unknown>> {
-  const state = new StateDatabase(config.stateDatabase);
+  const state = new StateDatabase(config.stateDatabase, { readOnly: true });
   try {
     const sessions = state.listSessions();
     const generations = state.listGenerations();
@@ -43,7 +43,8 @@ export async function verifyFullImport(config: AppConfig, client = new Hindsight
     const bankConfigurationReady = bankConfigurationError === undefined;
     const sourceCoverageReady = importer.scanErrors === 0 && importer.deferred === 0 && importer.unprocessed === 0 && importer.staleSources === 0;
     const documentAccountingReady = pending === 0 && failed.length === 0 && missing.length === 0 && excludedPresent.length === 0 && unexpected.length === 0 && hashMismatches.length === 0;
-    const hindsightIdle = activeOperations === 0 && failedOperations === 0 && pendingConsolidation === 0 && failedConsolidation === 0;
+    // Terminal operation history does not describe current document or consolidation health.
+    const hindsightIdle = activeOperations === 0 && pendingConsolidation === 0 && failedConsolidation === 0;
     const idempotencyReady = documentAccountingReady && hindsightIdle && bankConfigurationReady;
     return {
       expectedDocuments: expected.size,

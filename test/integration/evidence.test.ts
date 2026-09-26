@@ -76,6 +76,24 @@ test("transcript evidence is private, idempotent, source-linked, and labels deri
   } finally { await f.close(); }
 });
 
+test("excluded evidence is removed once without repeated index writes", async () => {
+  const f = await fixture();
+  let index: DatabaseSync | undefined;
+  try {
+    await scan(f.config, f.state, { source: "pi", force: true, indexOnly: true });
+    f.config.sessionExclusions.exactLabels = ["blocked"];
+    await fs.appendFile(f.file, `${JSON.stringify({ type: "session_info", name: "blocked" })}\n`);
+    await scan(f.config, f.state, { source: "pi" });
+    assert.equal(searchEvidence(f.config, "Hindsight rollback").hits.length, 0);
+    index = new DatabaseSync(f.config.evidenceDatabase);
+    index.exec("BEGIN IMMEDIATE");
+    const result = await scan(f.config, f.state, { source: "pi" });
+    assert.equal(result.configured, 1);
+    assert.equal(result.errors, 0);
+    assert.equal(result.queued, 0);
+  } finally { index?.close(); await f.close(); }
+});
+
 test("retrieval keeps original evidence available during a Hindsight outage", async () => {
   const f = await fixture();
   try {
