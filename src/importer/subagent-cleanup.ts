@@ -40,6 +40,7 @@ function mergeClassification(left: SessionClassification, right: SessionClassifi
 }
 
 export async function discoverClassifications(config: AppConfig): Promise<{ groups: Map<string, ClassifiedGroup>; artifacts: SessionArtifactRecord[] }> {
+  if (config.desktopFeed.enabled) throw new Error("Subagent cleanup requires an origin-aware review before it can modify a multi-origin importer");
   const groups = new Map<string, ClassifiedGroup>();
   const artifacts: SessionArtifactRecord[] = [];
   for (const adapter of createAdapters(config)) {

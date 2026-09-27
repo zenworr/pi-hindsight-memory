@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import shutil
 import sqlite3
+import subprocess
 import stat
 import tempfile
 from datetime import datetime, timezone
@@ -177,6 +178,40 @@ def promote(base, generation):
         return published
 
 
+def assert_importer_stopped():
+    service = subprocess.run(["systemctl", "--user", "is-active", "pi-hindsight-importer.service"], capture_output=True, check=False)
+    if service.returncode == 0:
+        raise RuntimeError("Stop the dev importer before pruning feed generations")
+    for pid in Path("/proc").glob("[0-9]*"):
+        if pid.name == str(os.getpid()):
+            continue
+        try:
+            if "dist/src/importer/cli.js" in (pid / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="ignore"):
+                raise RuntimeError("An importer command is still using a feed generation")
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+
+
+def prune(base, keep):
+    if keep < 2 or base.is_symlink() or not base.is_dir() or base.stat().st_mode & 0o077:
+        raise ValueError("Pruning requires a private feed and at least two retained generations")
+    assert_importer_stopped()
+    with (base / ".publish.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current = (base / "current").resolve(strict=True)
+        generations = base / "generations"
+        if current.parent != generations or not current.is_dir():
+            raise ValueError("Current feed does not point to a published generation")
+        candidates = sorted((item for item in generations.iterdir() if item.is_dir() and not item.is_symlink()), key=lambda item: item.name, reverse=True)
+        if len(candidates) != len(list(generations.iterdir())):
+            raise ValueError("Unexpected entry in the generations directory")
+        retained = set(candidates[:keep]) | {current}
+        for item in candidates:
+            if item not in retained:
+                shutil.rmtree(item)
+        return len(candidates) - len(retained)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -189,6 +224,9 @@ def main():
     promote_cmd = commands.add_parser("promote")
     promote_cmd.add_argument("--base", type=Path, required=True)
     promote_cmd.add_argument("--generation", required=True)
+    prune_cmd = commands.add_parser("prune")
+    prune_cmd.add_argument("--base", type=Path, required=True)
+    prune_cmd.add_argument("--keep", type=int, default=4)
     args = parser.parse_args()
     if args.command == "capture":
         if args.output.exists() or args.output.is_symlink():
@@ -204,9 +242,11 @@ def main():
     elif args.command == "verify":
         result = verify(args.directory)
         print(json.dumps({"generation": result["generation"], "files": len(result["files"])}))
-    else:
+    elif args.command == "promote":
         result = promote(args.base, args.generation)
         print(f"Published {result.name}")
+    else:
+        print(f"Removed {prune(args.base, args.keep)} old generations")
 
 
 if __name__ == "__main__":

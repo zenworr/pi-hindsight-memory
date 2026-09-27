@@ -66,6 +66,26 @@ class PublisherTests(unittest.TestCase):
             publisher.promote(self.base, "generation-two")
         self.assertEqual((self.base / "current").resolve(), previous)
 
+    def test_prune_keeps_current_and_prior_generation_only_when_importer_is_stopped(self):
+        for name in ("generation-one", "generation-two", "generation-three"):
+            publisher.capture(self.home, self.base / "incoming" / name, name)
+            publisher.promote(self.base, name)
+        original = publisher.assert_importer_stopped
+        try:
+            def running():
+                raise RuntimeError("Stop the dev importer before pruning feed generations")
+            publisher.assert_importer_stopped = running
+            with self.assertRaisesRegex(RuntimeError, "Stop the dev importer"):
+                publisher.prune(self.base, 2)
+            self.assertTrue((self.base / "generations/generation-one").is_dir())
+            publisher.assert_importer_stopped = lambda: None
+            self.assertEqual(publisher.prune(self.base, 2), 1)
+            self.assertFalse((self.base / "generations/generation-one").exists())
+            self.assertTrue((self.base / "generations/generation-two").is_dir())
+            self.assertEqual(publisher.verify(self.base / "current")["generation"], "generation-three")
+        finally:
+            publisher.assert_importer_stopped = original
+
     def test_source_change_during_capture_is_rejected(self):
         original = publisher.copy_file
 

@@ -12,6 +12,7 @@ const DEFAULT_PILOT_CONCURRENCY = 2;
 export interface PilotRunResult { source: Source; nativeSessionId: string; canonicalBytes: number; modes: Record<string, Record<string, unknown>>; error?: string; }
 
 export async function runPilot(config: AppConfig, entries: PilotEntry[], modes = ["concise", "verbose"], maxConcurrent = DEFAULT_PILOT_CONCURRENCY): Promise<PilotRunResult[]> {
+  if (config.desktopFeed.enabled) throw new Error("Pilot extraction needs an explicit origin in multi-origin mode");
   const client = new HindsightClient(config.hindsight);
   await client.ensureBank();
   const adapters = new Map(createAdapters(config).map((adapter) => [adapter.source, adapter]));

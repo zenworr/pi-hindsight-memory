@@ -174,11 +174,13 @@ async function exportCanonical(config: ReturnType<typeof loadConfig>, args: Comm
   const [sourceText, nativeId, outputPath] = args.positionals;
   const source = sourceArg({ ...args, values: { source: sourceText } });
   if (!source || !nativeId || !outputPath) throw new Error("export-canonical requires SOURCE SESSION_ID OUTPUT_FILE");
-  const adapter = createAdapters(config).find((candidate) => candidate.source === source);
-  if (!adapter) throw new Error(`No adapter for ${source}`);
-  let reference;
-  for await (const candidate of adapter.discover()) if (candidate.nativeSessionId === nativeId) { reference = candidate; break; }
-  if (!reference) throw new Error(`Session not found: ${source}:${nativeId}`);
+  const matches = [];
+  for (const adapter of createAdapters(config).filter((candidate) => candidate.source === source)) {
+    if (adapter.origin === "desktop" && config.promotedSessions[source].includes(nativeId)) continue;
+    for await (const reference of adapter.discover()) if (reference.nativeSessionId === nativeId) matches.push({ adapter, reference });
+  }
+  if (matches.length !== 1) throw new Error(matches.length ? `Session has more than one artifact: ${source}:${nativeId}` : `Session not found: ${source}:${nativeId}`);
+  const { adapter, reference } = matches[0]!;
   const session = await adapter.load(reference, { spoolDirectory: config.spoolDirectory, maxCanonicalBytes: config.maxCanonicalBytes });
   try { await fs.copyFile(session.contentPath, outputPath); }
   finally { await session.cleanup(); }
