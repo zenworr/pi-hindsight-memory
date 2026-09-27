@@ -10,6 +10,7 @@ const SOURCE_ERROR_MAX_CHARS = 2_000;
 
 export interface SessionStateRecord {
   source: Source;
+  sourceOrigin?: string;
   nativeSessionId: string;
   documentId: string;
   sourceLocator: string;
@@ -301,6 +302,12 @@ export class StateDatabase {
         this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (4,?)").run(new Date().toISOString());
       });
     }
+    if (!this.db.prepare("SELECT version FROM schema_migrations WHERE version=5").get()) {
+      this.transaction(() => {
+        this.db.exec("ALTER TABLE sessions ADD COLUMN source_origin TEXT NOT NULL DEFAULT 'desktop'");
+        this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (5,?)").run(new Date().toISOString());
+      });
+    }
   }
 
   close(): void { this.db.close(); }
@@ -383,11 +390,12 @@ export class StateDatabase {
 
   upsertSession(record: SessionStateRecord): void {
     this.db.prepare(`INSERT INTO sessions(
-      source,native_session_id,document_id,source_locator,source_size,source_mtime,source_fingerprint,
+      source,source_origin,native_session_id,document_id,source_locator,source_size,source_mtime,source_fingerprint,
       canonical_hash,canonical_bytes,canonical_turns,canonical_schema,session_started_at,session_updated_at,
       status,last_seen_at,last_error,classification,classification_reason,classification_policy_version
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(source,native_session_id) DO UPDATE SET
+      source_origin=excluded.source_origin,
       document_id=excluded.document_id, source_locator=excluded.source_locator, source_size=excluded.source_size,
       source_mtime=excluded.source_mtime, source_fingerprint=excluded.source_fingerprint,
       canonical_hash=COALESCE(excluded.canonical_hash,sessions.canonical_hash),
@@ -399,7 +407,7 @@ export class StateDatabase {
       status=excluded.status,last_seen_at=excluded.last_seen_at,last_error=excluded.last_error,
       classification=excluded.classification,classification_reason=excluded.classification_reason,
       classification_policy_version=excluded.classification_policy_version`).run(
-      record.source, record.nativeSessionId, record.documentId, record.sourceLocator, record.sourceSize, record.sourceMtime,
+      record.source, record.sourceOrigin ?? "desktop", record.nativeSessionId, record.documentId, record.sourceLocator, record.sourceSize, record.sourceMtime,
       JSON.stringify(record.sourceFingerprint), record.canonicalHash ?? null, record.canonicalBytes ?? null, record.canonicalTurns ?? null,
       record.canonicalSchema ?? null, record.sessionStartedAt ?? null, record.sessionUpdatedAt ?? null, record.status, record.lastSeenAt, record.lastError ?? null,
       record.classification?.kind ?? "primary", record.classification?.reason ?? "legacy-unclassified", record.classification?.policyVersion ?? CLASSIFICATION_POLICY_VERSION,
@@ -410,8 +418,8 @@ export class StateDatabase {
     this.db.prepare("UPDATE sessions SET status='source_missing', last_seen_at=?, last_error=? WHERE source=? AND native_session_id=? AND status NOT IN ('excluded_subagent','excluded_ambiguous','excluded_configured','ambiguous_preserved','cleanup_pending')").run(at, "Native source was not found during a scan; Hindsight document was retained", source, nativeSessionId);
   }
 
-  markSessionSeen(source: Source, nativeSessionId: string, fingerprint: SourceFingerprint, sourceSize: number, sourceMtime: number, restoredStatus: string): void {
-    this.db.prepare("UPDATE sessions SET source_size=?, source_mtime=?, source_fingerprint=?, status=CASE WHEN status='source_missing' THEN ? ELSE status END, last_seen_at=?, last_error=NULL WHERE source=? AND native_session_id=? AND status NOT IN ('excluded_subagent','excluded_ambiguous','excluded_configured','ambiguous_preserved','cleanup_pending')").run(sourceSize, sourceMtime, JSON.stringify(fingerprint), restoredStatus, new Date().toISOString(), source, nativeSessionId);
+  markSessionSeen(source: Source, nativeSessionId: string, fingerprint: SourceFingerprint, sourceSize: number, sourceMtime: number, restoredStatus: string, locator?: string, origin?: string): void {
+    this.db.prepare("UPDATE sessions SET source_size=?, source_mtime=?, source_fingerprint=?, source_locator=COALESCE(?,source_locator), source_origin=COALESCE(?,source_origin), status=CASE WHEN status='source_missing' THEN ? ELSE status END, last_seen_at=?, last_error=NULL WHERE source=? AND native_session_id=? AND status NOT IN ('excluded_subagent','excluded_ambiguous','excluded_configured','ambiguous_preserved','cleanup_pending')").run(sourceSize, sourceMtime, JSON.stringify(fingerprint), locator ?? null, origin ?? null, restoredStatus, new Date().toISOString(), source, nativeSessionId);
   }
 
   setSessionStatus(source: Source, nativeSessionId: string, status: string): void {
@@ -507,6 +515,7 @@ export class StateDatabase {
     try { fingerprint = JSON.parse(String(row.source_fingerprint)) as SourceFingerprint; } catch { fingerprint = { size: Number(row.source_size), mtimeMs: Number(row.source_mtime), sampleHash: "", stableLocator: String(row.source_locator) }; }
     return {
       source: String(row.source) as Source,
+      sourceOrigin: nullableString(row.source_origin) ?? "desktop",
       nativeSessionId: String(row.native_session_id),
       documentId: String(row.document_id),
       sourceLocator: String(row.source_locator),

@@ -1,9 +1,8 @@
 import { statfs } from "node:fs/promises";
 import { HTTP_STATUS, isRetryableStatus } from "../hindsight/http.js";
-import type { AppConfig, CanonicalSession, CanonicalSessionMetadata, HindsightOperation, ImportApproval, SessionReference, Source } from "../common/types.js";
+import type { AppConfig, CanonicalSession, CanonicalSessionMetadata, HindsightOperation, ImportApproval, SessionReference } from "../common/types.js";
 import { CANONICAL_SCHEMA, ADAPTER_VERSION, REDACTION_POLICY_VERSION } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
-import type { SessionAdapter } from "../adapters/adapter.js";
 import type { HindsightClient} from "../hindsight/client.js";
 import { HindsightHttpError, HindsightOperationError, HindsightPollTimeoutError } from "../hindsight/client.js";
 import { errorMessage, Logger } from "../common/logging.js";
@@ -26,11 +25,9 @@ const TERMINAL_FAILURES = ["failed", "cancelled", "error", "rejected"];
 
 export class ImportWorker {
   private readonly limiter: Semaphore;
-  private readonly adapters: Map<Source, SessionAdapter>;
   private readonly logger: Logger;
   constructor(private readonly config: AppConfig, private readonly state: StateDatabase, private readonly client: HindsightClient, logger?: Logger, private readonly bulkMode = false, private readonly repairMode = false) {
     this.limiter = new Semaphore(config.maxInflightDocuments);
-    this.adapters = new Map(createAdapters(config).map((adapter) => [adapter.source, adapter]));
     this.logger = logger ?? new Logger("import-worker");
   }
 
@@ -120,9 +117,14 @@ export class ImportWorker {
         }
       }
       if (persisted) session = await loadPendingPayload(this.config.spoolDirectory, generation.operationId, generation.canonicalHash);
-      const adapter = this.adapters.get(generation.source);
-      if (!adapter) throw new Error(`No adapter for ${generation.source}`);
-      const reference = referenceFromState(sessionState);
+      const adapter = createAdapters(this.config).find((item) => item.source === generation.source && (item.origin ?? this.config.localOrigin) === (sessionState.sourceOrigin ?? this.config.localOrigin));
+      if (!adapter) throw new Error(`No adapter for ${generation.source} on ${sessionState.sourceOrigin}`);
+      let reference = referenceFromState(sessionState);
+      if (this.config.desktopFeed.enabled) {
+        for await (const current of adapter.discover()) {
+          if (current.nativeSessionId === sessionState.nativeSessionId) { reference = current; break; }
+        }
+      }
       let structuralClassification;
       try { structuralClassification = await adapter.classify(reference); }
       catch (error) {

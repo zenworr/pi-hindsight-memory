@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import { MS_PER_SECOND } from "../common/limits.js";
 
 import type { AppConfig, Source, SourceFingerprint, SessionReference, InventorySessionResult } from "../common/types.js";
-import { ADAPTER_VERSION, CANONICAL_SCHEMA, CLASSIFICATION_POLICY_VERSION, REDACTION_POLICY_VERSION, RETAIN_POLICY_VERSION } from "../common/types.js";
+import { ADAPTER_VERSION, CANONICAL_SCHEMA, CLASSIFICATION_POLICY_VERSION, REDACTION_POLICY_VERSION, RETAIN_POLICY_VERSION, SOURCES } from "../common/types.js";
 import { documentIdFor } from "../common/hashing.js";
 import { createAdapters } from "../adapters/index.js";
 import type { SessionAdapter } from "../adapters/adapter.js";
@@ -48,7 +48,10 @@ function processingSignature(config: AppConfig): string {
 interface Discovered { adapter: SessionAdapter; reference: SessionReference; }
 function fingerprintSignature(value: unknown): string { return JSON.stringify(value); }
 async function exists(value: string): Promise<boolean> { try { await fs.access(value); return true; } catch { return false; } }
-function sourceRoot(adapter: SessionAdapter, config: AppConfig): string { return adapter.source === "opencode" ? config.opencodeDatabase : config.sourceRoots[adapter.source]; }
+function sourceRoot(adapter: SessionAdapter, config: AppConfig): string {
+  if (adapter.discoveryRoot) return adapter.discoveryRoot;
+  return adapter.source === "opencode" ? config.opencodeDatabase : config.sourceRoots[adapter.source];
+}
 function withProcessingSignature(fingerprint: SourceFingerprint, signature: string): SourceFingerprint { return { ...fingerprint, processing_signature: signature }; }
 function timestampOf(reference: SessionReference): number { const value = reference.sessionStartedAt ? Date.parse(reference.sessionStartedAt) : Number.NaN; return Number.isNaN(value) ? Number.POSITIVE_INFINITY : value; }
 
@@ -63,28 +66,56 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
   const signature = processingSignature(config);
   const indexed = indexedDocumentHashes(config);
   const summary: ScanSummary = { discovered: 0, queued: 0, unchanged: 0, active: 0, empty: 0, errors: 0, sourceMissing: 0, excluded: 0, configured: 0, ambiguous: 0, results: [] };
-  const discovered: Discovered[] = [];
+  let discovered: Discovered[] = [];
   const healthy = new Map<Source, boolean>();
   const seen = new Map<Source, Set<string>>();
+  const discoveryErrors: Array<{ adapter: SessionAdapter; error: string }> = [];
   for (const adapter of adapters) {
-    state.upsertSource(adapter.source, sourceRoot(adapter, config));
-    healthy.set(adapter.source, true);
-    seen.set(adapter.source, new Set());
-    state.markScanStarted(adapter.source, new Date().toISOString());
+    if (!healthy.has(adapter.source)) healthy.set(adapter.source, true);
+    if (!seen.has(adapter.source)) seen.set(adapter.source, new Set());
     try {
-      if (!(await exists(sourceRoot(adapter, config))) && state.listSessions(adapter.source).length > 0) throw new Error("Configured source is unavailable; existing evidence was retained");
+      const known = state.listSessions(adapter.source).some((session) => session.sourceOrigin === (adapter.origin ?? config.localOrigin));
+      if (!(await exists(sourceRoot(adapter, config)))) {
+        if (known || adapter.origin === "desktop") throw new Error("Configured source is unavailable; existing evidence was retained");
+        continue;
+      }
       for await (const reference of adapter.discover()) {
         options.signal?.throwIfAborted();
         discovered.push({ adapter, reference });
       }
-      state.clearScanError(adapter.source, "<discovery>");
     } catch (error) {
       if (options.signal?.aborted) throw error;
       healthy.set(adapter.source, false);
-      state.recordScanError(adapter.source, "<discovery>", redactText(errorMessage(error)).text);
-      summary.errors += 1;
+      discoveryErrors.push({ adapter, error: redactText(errorMessage(error)).text });
     }
   }
+  for (const source of SOURCES) {
+    if (options.source && options.source !== source) continue;
+    for (const nativeId of config.promotedSessions[source]) {
+      if (!discovered.some(({ adapter, reference }) => adapter.source === source && (adapter.origin ?? config.localOrigin) === config.localOrigin && reference.nativeSessionId === nativeId)) {
+        throw new Error(`Promoted ${source} session ${nativeId} is absent from ${config.localOrigin}; no importer state was changed`);
+      }
+    }
+  }
+  discovered = discovered.filter(({ adapter, reference }) => adapter.origin !== "desktop" || !config.promotedSessions[adapter.source].includes(reference.nativeSessionId));
+  const owners = new Map<string, { origin: string; locator: string }>();
+  for (const { adapter, reference } of discovered) {
+    const key = `${adapter.source}\n${reference.nativeSessionId}`;
+    const origin = adapter.origin ?? config.localOrigin;
+    const earlier = owners.get(key);
+    if (earlier && earlier.origin !== origin) throw new Error(`Duplicate ${adapter.source} session ${reference.nativeSessionId} at ${earlier.locator} and ${reference.locator}; no importer state was changed`);
+    owners.set(key, { origin, locator: reference.locator });
+  }
+  for (const adapter of adapters) {
+    if (adapter.origin && adapter.origin !== config.localOrigin) continue;
+    state.upsertSource(adapter.source, sourceRoot(adapter, config));
+    state.markScanStarted(adapter.source, new Date().toISOString());
+  }
+  for (const { adapter, error } of discoveryErrors) {
+    state.recordScanError(adapter.source, "<discovery>", error);
+    summary.errors += 1;
+  }
+  for (const adapter of adapters) if (healthy.get(adapter.source) && !discoveryErrors.some((entry) => entry.adapter === adapter)) state.clearScanError(adapter.source, "<discovery>");
   discovered.sort((a, b) => timestampOf(a.reference) - timestampOf(b.reference) || a.adapter.source.localeCompare(b.adapter.source) || a.reference.nativeSessionId.localeCompare(b.reference.nativeSessionId));
   const offset = options.offset ?? 0;
   const matching = options.sessionIds ? discovered.filter(({ reference }) => options.sessionIds!.includes(effectiveReference(state, reference).nativeSessionId)) : discovered;
@@ -164,7 +195,7 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
       if (knownEmpty) summary.empty += 1;
       const latest = state.getLatestGeneration(adapter.source, reference.nativeSessionId);
       const restoredStatus = previous.status === "source_missing" ? latest?.state === "completed" ? "imported" : "discovered" : previous.status;
-      state.markSessionSeen(adapter.source, reference.nativeSessionId, fingerprint, fingerprint.size, fingerprint.mtimeMs, restoredStatus);
+      state.markSessionSeen(adapter.source, reference.nativeSessionId, fingerprint, fingerprint.size, fingerprint.mtimeMs, restoredStatus, reference.locator, adapter.origin ?? config.localOrigin);
       summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: knownEmpty ? "empty_after_normalization" : "eligible", canonicalBytes: previous.canonicalBytes, canonicalTurns: previous.canonicalTurns, startedAt: previous.sessionStartedAt, updatedAt: previous.sessionUpdatedAt });
       continue;
     }
@@ -229,7 +260,7 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
       state.clearScanError(adapter.source, reference.locator);
       if (session.emptyAfterNormalization) summary.empty += 1;
       if (!options.inventoryOnly) {
-        state.upsertSession({ source: session.source, nativeSessionId: session.nativeSessionId, documentId: session.documentId, sourceLocator: session.sourceLocator, sourceSize: fingerprint.size, sourceMtime: fingerprint.mtimeMs, sourceFingerprint: fingerprint, canonicalHash: session.canonicalHash, canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, canonicalSchema: CANONICAL_SCHEMA, sessionStartedAt: session.sessionStartedAt, sessionUpdatedAt: session.sessionUpdatedAt, status: session.emptyAfterNormalization ? "empty_after_normalization" : "discovered", lastSeenAt: new Date().toISOString(), classification: session.classification ?? classification });
+        state.upsertSession({ source: session.source, sourceOrigin: adapter.origin ?? config.localOrigin, nativeSessionId: session.nativeSessionId, documentId: session.documentId, sourceLocator: session.sourceLocator, sourceSize: fingerprint.size, sourceMtime: fingerprint.mtimeMs, sourceFingerprint: fingerprint, canonicalHash: session.canonicalHash, canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, canonicalSchema: CANONICAL_SCHEMA, sessionStartedAt: session.sessionStartedAt, sessionUpdatedAt: session.sessionUpdatedAt, status: session.emptyAfterNormalization ? "empty_after_normalization" : "discovered", lastSeenAt: new Date().toISOString(), classification: session.classification ?? classification });
         state.addAlias(session.source, reference.locator, session.nativeSessionId);
         const generation = options.indexOnly ? undefined : queueGeneration(state, session, config.hindsight.bankId);
         if (generation) summary.queued += 1;

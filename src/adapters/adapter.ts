@@ -14,6 +14,8 @@ const FALLBACK_HASH_CHARS = 32;
 
 export interface SessionAdapter {
   readonly source: Source;
+  readonly origin?: string;
+  readonly discoveryRoot?: string;
   discover(): AsyncIterable<SessionReference>;
   fingerprint(reference: SessionReference): Promise<SourceFingerprint>;
   classify(reference: SessionReference): Promise<SessionClassification>;

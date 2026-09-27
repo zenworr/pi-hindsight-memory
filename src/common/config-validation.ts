@@ -29,6 +29,12 @@ export function validateConfig(config: AppConfig): AppConfig {
     try { url = new URL(address); } catch { throw new Error(`hindsight.${name} must be a valid HTTP or HTTPS URL`); }
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error(`hindsight.${name} must use HTTP or HTTPS without credentials, a query, or a fragment`);
   }
+  if (!/^[a-z][a-z0-9_-]*$/.test(config.localOrigin)) throw new Error("localOrigin must be a simple lowercase name");
+  if (config.desktopFeed.enabled && config.localOrigin === "desktop") throw new Error("A desktop feed requires a separate localOrigin");
+  for (const [source, ids] of Object.entries(config.promotedSessions)) {
+    if (new Set(ids).size !== ids.length) throw new Error(`Duplicate promoted session ID in ${source}`);
+    if (ids.length && !config.desktopFeed.enabled) throw new Error("Promoted sessions require a desktop feed");
+  }
   if (!/^[A-Za-z0-9_-]+$/.test(config.hindsight.bankId)) throw new Error("hindsight.bankId must contain only letters, digits, underscores, or hyphens");
   for (const name of ["maxCanonicalBytes", "scanIntervalSeconds", "maxInflightDocuments"] as const) positiveInteger(config[name], name);
   positiveInteger(config.sessionSettleSeconds, "sessionSettleSeconds", true);

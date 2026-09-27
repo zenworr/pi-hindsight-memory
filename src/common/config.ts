@@ -20,6 +20,9 @@ export function defaultConfig(home = homeDirectory()): AppConfig {
   const opencodeDirectory = path.join(dataDirectory, "opencode");
   return {
     configPath: paths.configPath,
+    localOrigin: "desktop",
+    desktopFeed: { enabled: false, directory: path.join(paths.stateDirectory, "desktop-feed", "current"), sourceHome: home },
+    promotedSessions: { pi: [], codex: [], claude: [], opencode: [] },
     stateDirectory: paths.stateDirectory,
     stateDatabase: paths.stateDatabase,
     evidenceDatabase: path.join(paths.stateDirectory, "evidence.sqlite3"),
@@ -90,6 +93,8 @@ export function loadConfig(configPath?: string, home = homeDirectory()): AppConf
     ...fileConfig,
     configPath: selectedPath,
     importer: merge(defaults.importer, fileConfig.importer ?? {}),
+    desktopFeed: merge(defaults.desktopFeed, fileConfig.desktopFeed ?? {}),
+    promotedSessions: merge(defaults.promotedSessions, fileConfig.promotedSessions ?? {}),
     sourceRoots: merge(defaults.sourceRoots, fileConfig.sourceRoots ?? {}),
     sessionExclusions: { ...defaults.sessionExclusions, ...(fileConfig.sessionExclusions ?? {}) },
     hindsight: merge(defaults.hindsight, fileConfig.hindsight ?? {}),
@@ -98,6 +103,8 @@ export function loadConfig(configPath?: string, home = homeDirectory()): AppConf
   for (const source of SOURCES) config.sourceRoots[source] = absolutePath(config.sourceRoots[source], home);
   config.codexStateDatabase = absolutePath(config.codexStateDatabase, home);
   config.opencodeDatabase = absolutePath(config.opencodeDatabase, home);
+  config.desktopFeed.directory = absolutePath(config.desktopFeed.directory, home);
+  config.desktopFeed.sourceHome = absolutePath(config.desktopFeed.sourceHome, home);
   config.stateDirectory = absolutePath(config.stateDirectory, home);
   config.stateDatabase = absolutePath(config.stateDatabase, home);
   config.evidenceDatabase = absolutePath(config.evidenceDatabase, home);

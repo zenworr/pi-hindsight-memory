@@ -105,6 +105,7 @@ export async function collectHindsightStatus(
     if (importer.paused) issues.push("Importer is paused");
     else if (!importer.running) issues.push("Importer is not running or its heartbeat is stale");
     else if (importer.staleSources > 0) issues.push(`${importer.staleSources} sources have no recent successful scan`);
+    if (importer.desktopFeedStale) issues.push("Desktop history feed is stale or unavailable");
     if (importer.lastError) issues.push(`Importer cycle failed: ${redactText(importer.lastError).text.slice(0, ERROR_MESSAGE_MAX_CHARS)}`);
     if (importer.scanErrors > 0) issues.push(`${importer.scanErrors} source scan errors require attention`);
     if (importer.uncertain > 0) issues.push(`${importer.uncertain} remote operations await recovery`);

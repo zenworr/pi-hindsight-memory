@@ -68,6 +68,8 @@ export interface SessionReference {
   source: Source;
   nativeSessionId: string;
   locator: string;
+  origin?: string;
+  logicalLocator?: string;
   sourcePath?: string;
   sessionStartedAt?: string;
   sessionUpdatedAt?: string;
@@ -159,6 +161,9 @@ export interface SessionExclusionConfig {
 
 export interface AppConfig {
   configPath: string;
+  localOrigin: string;
+  desktopFeed: { enabled: boolean; directory: string; sourceHome: string };
+  promotedSessions: Record<Source, string[]>;
   stateDirectory: string;
   stateDatabase: string;
   evidenceDatabase: string;
