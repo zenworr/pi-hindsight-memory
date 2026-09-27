@@ -1,5 +1,6 @@
 export const MS_PER_SECOND = 1_000;
 export const HOUR_MS = 3_600_000;
+export const DEFAULT_DESKTOP_FEED_MAX_AGE_SECONDS = 14_400;
 export const DAY_MS = 86_400_000;
 export const MAX_TIMER_MS = 2_147_483_647;
 export const READ_BUFFER_BYTES = 65_536;

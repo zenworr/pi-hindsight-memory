@@ -31,6 +31,7 @@ export function validateConfig(config: AppConfig): AppConfig {
   }
   if (!/^[a-z][a-z0-9_-]*$/.test(config.localOrigin)) throw new Error("localOrigin must be a simple lowercase name");
   if (config.desktopFeed.enabled && config.localOrigin === "desktop") throw new Error("A desktop feed requires a separate localOrigin");
+  if (config.desktopFeed.maxAgeSeconds !== undefined) positiveInteger(config.desktopFeed.maxAgeSeconds, "desktopFeed.maxAgeSeconds");
   for (const [source, ids] of Object.entries(config.promotedSessions)) {
     if (new Set(ids).size !== ids.length) throw new Error(`Duplicate promoted session ID in ${source}`);
     if (ids.length && !config.desktopFeed.enabled) throw new Error("Promoted sessions require a desktop feed");

@@ -3,7 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AppConfig } from "../common/types.js";
 import { RETAIN_POLICY_VERSION } from "../common/types.js";
-import { MS_PER_SECOND } from "../common/limits.js";
+import { DEFAULT_DESKTOP_FEED_MAX_AGE_SECONDS, MS_PER_SECOND } from "../common/limits.js";
 
 const HEARTBEAT_STALE_MS = 45_000;
 const MIN_SCAN_STALE_MS = 600_000;
@@ -39,7 +39,7 @@ export function importerHealth(config: AppConfig, database?: DatabaseSync): Impo
         if (Number.isFinite(completed) && completed <= Date.now()) desktopFeedAgeSeconds = Math.floor((Date.now() - completed) / MS_PER_SECOND);
       } catch { /* An unavailable feed is reported as stale. */ }
     }
-    const desktopFeedStale = config.desktopFeed.enabled && (desktopFeedAgeSeconds === undefined || desktopFeedAgeSeconds * MS_PER_SECOND > Math.max(MIN_SCAN_STALE_MS, config.scanIntervalSeconds * MS_PER_SECOND * SCAN_GRACE_MULTIPLIER));
+    const desktopFeedStale = config.desktopFeed.enabled && (desktopFeedAgeSeconds === undefined || desktopFeedAgeSeconds > (config.desktopFeed.maxAgeSeconds ?? DEFAULT_DESKTOP_FEED_MAX_AGE_SECONDS));
     return {
       running,
       paused: fs.existsSync(path.join(config.stateDirectory, "paused")),

@@ -162,7 +162,7 @@ export interface SessionExclusionConfig {
 export interface AppConfig {
   configPath: string;
   localOrigin: string;
-  desktopFeed: { enabled: boolean; directory: string; sourceHome: string };
+  desktopFeed: { enabled: boolean; directory: string; sourceHome: string; maxAgeSeconds?: number };
   promotedSessions: Record<Source, string[]>;
   stateDirectory: string;
   stateDatabase: string;

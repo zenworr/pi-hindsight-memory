@@ -27,8 +27,11 @@ python3 "$script_dir/publish-desktop-history.py" capture --output "$local_captur
 ssh -o BatchMode=yes dev "install -d -m 700 '$remote_base' '$remote_base/incoming'"
 rsync -a --chmod=Du=rwx,Dgo=,Fu=rw,Fgo= \
   "$script_dir/publish-desktop-history.py" "dev:$remote_base/.publisher.py"
-rsync -a --chmod=Du=rwx,Dgo=,Fu=rw,Fgo= \
-  "$local_capture/" "dev:$remote_base/incoming/$generation/"
+rsync_options=(-a --checksum "--chmod=Du=rwx,Dgo=,Fu=rw,Fgo=")
+if ssh -o BatchMode=yes dev "test -f '$remote_base/current/manifest.json'"; then
+  rsync_options+=("--link-dest=$remote_base/current")
+fi
+rsync "${rsync_options[@]}" "$local_capture/" "dev:$remote_base/incoming/$generation/"
 ssh -o BatchMode=yes dev \
   "python3 '$remote_base/.publisher.py' promote --base '$remote_base' --generation '$generation'"
 printf 'Published desktop history generation: %s\n' "$generation"

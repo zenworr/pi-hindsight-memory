@@ -87,6 +87,8 @@ def backup_database(source, destination):
             if copy.execute("PRAGMA quick_check").fetchone() != ("ok",):
                 raise RuntimeError(f"Database backup failed integrity check: {source}")
     destination.chmod(0o600)
+    source_mtime = source.stat().st_mtime_ns
+    os.utime(destination, ns=(source_mtime, source_mtime))
 
 
 def capture(home, destination, generation):

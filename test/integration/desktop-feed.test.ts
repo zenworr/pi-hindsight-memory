@@ -10,6 +10,7 @@ import { scan } from "../../src/importer/scanner.js";
 import { StateDatabase } from "../../src/importer/state-db.js";
 import { ImportWorker } from "../../src/importer/worker.js";
 import { importerHealth } from "../../src/importer/health.js";
+import { HOUR_MS } from "../../src/common/limits.js";
 import type { CanonicalSession } from "../../src/common/types.js";
 
 const fixture = path.join(import.meta.dirname, "../../..", "test/fixtures/pi/session.jsonl");
@@ -29,6 +30,8 @@ test("desktop feed age is reported even when importer scans still succeed", () =
     config.desktopFeed = { enabled: true, directory: feed, sourceHome: root };
     fs.writeFileSync(path.join(feed, "manifest.json"), JSON.stringify({ completedAt: "2020-01-01T00:00:00Z" }));
     assert.equal(importerHealth(config, state.db).desktopFeedStale, true);
+    fs.writeFileSync(path.join(feed, "manifest.json"), JSON.stringify({ completedAt: new Date(Date.now() - HOUR_MS).toISOString() }));
+    assert.equal(importerHealth(config, state.db).desktopFeedStale, false);
     fs.writeFileSync(path.join(feed, "manifest.json"), JSON.stringify({ completedAt: new Date().toISOString() }));
     assert.equal(importerHealth(config, state.db).desktopFeedStale, false);
     fs.unlinkSync(path.join(feed, "manifest.json"));

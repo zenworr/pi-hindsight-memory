@@ -3,7 +3,7 @@ import path from "node:path";
 import { absolutePath, defaultRuntimePaths, homeDirectory } from "./paths.js";
 import type { AppConfig } from "./types.js";
 import { SOURCES } from "./types.js";
-import { DEFAULT_MAX_CANONICAL_BYTES, DAY_MS, HOUR_MS } from "./limits.js";
+import { DEFAULT_DESKTOP_FEED_MAX_AGE_SECONDS, DEFAULT_MAX_CANONICAL_BYTES, DAY_MS, HOUR_MS } from "./limits.js";
 import { validateConfig, validateOverrides } from "./config-validation.js";
 
 const DEFAULT_BANK = "coding-history";
@@ -21,7 +21,7 @@ export function defaultConfig(home = homeDirectory()): AppConfig {
   return {
     configPath: paths.configPath,
     localOrigin: "desktop",
-    desktopFeed: { enabled: false, directory: path.join(paths.stateDirectory, "desktop-feed", "current"), sourceHome: home },
+    desktopFeed: { enabled: false, directory: path.join(paths.stateDirectory, "desktop-feed", "current"), sourceHome: home, maxAgeSeconds: DEFAULT_DESKTOP_FEED_MAX_AGE_SECONDS },
     promotedSessions: { pi: [], codex: [], claude: [], opencode: [] },
     stateDirectory: paths.stateDirectory,
     stateDatabase: paths.stateDatabase,
