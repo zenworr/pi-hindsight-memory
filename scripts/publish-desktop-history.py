@@ -32,6 +32,10 @@ DATABASES = {
 GENERATION = re.compile(r"^[a-zA-Z0-9_-]{8,80}$")
 
 
+class SourceChanged(RuntimeError):
+    pass
+
+
 def timestamp():
     return datetime.now(timezone.utc).isoformat()
 
@@ -65,15 +69,26 @@ def copy_file(source, destination, expected):
     with source.open("rb") as original, destination.open("xb") as copy:
         opened = os.fstat(original.fileno())
         if (opened.st_size, opened.st_mtime_ns) != expected:
-            raise RuntimeError(f"Source changed before copy: {source}")
+            raise SourceChanged(f"Source changed before copy: {source}")
         shutil.copyfileobj(original, copy, length=1024 * 1024)
         after = os.fstat(original.fileno())
         if (after.st_size, after.st_mtime_ns) != expected:
-            raise RuntimeError(f"Source changed during copy: {source}")
+            raise SourceChanged(f"Source changed during copy: {source}")
     os.chmod(destination, 0o600)
     os.utime(destination, ns=(expected[1], expected[1]))
     if (destination.stat().st_size, destination.stat().st_mtime_ns) != expected:
         raise RuntimeError(f"Copy does not match source metadata: {source}")
+
+
+def validate_jsonl(file):
+    with file.open("rb") as stream:
+        for line in stream:
+            if not line.endswith(b"\n"):
+                raise SourceChanged(f"Active JSONL has an incomplete final record: {file}")
+            try:
+                json.loads(line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                raise ValueError(f"Malformed complete JSONL record: {file}") from error
 
 
 def backup_database(source, destination):
@@ -92,33 +107,65 @@ def backup_database(source, destination):
     os.utime(destination, ns=(source_mtime, source_mtime))
 
 
-def capture(home, destination, generation):
+def capture(home, destination, generation, previous=None):
     if not GENERATION.fullmatch(generation):
         raise ValueError("Invalid generation name")
+    if previous and (previous.get("version") != 1 or previous.get("origin") != "desktop" or previous.get("sourceHome") != str(home.resolve())):
+        raise ValueError("Previous manifest does not match the desktop history source")
+    previous_entries = {entry["path"]: entry for entry in previous["files"]} if previous else {}
+    if previous and (len(previous_entries) != len(previous["files"]) or any(not isinstance(name, str) or Path(name).is_absolute() or ".." in Path(name).parts for name in previous_entries)):
+        raise ValueError("Invalid path in the previous manifest")
     destination.mkdir(mode=0o700)
     started = timestamp()
-    entries = []
+    entries = {}
+    captured = {}
+    deferred = set()
+    omitted = set()
     snapshots = {name: files_at(home / logical) for name, logical in SOURCES.items()}
+
+    def defer(name):
+        (destination / name).unlink(missing_ok=True)
+        if name in previous_entries:
+            entries[name] = previous_entries[name]
+            deferred.add(name)
+        else:
+            entries.pop(name, None)
+            omitted.add(name)
+
     for name, logical in SOURCES.items():
         root = home / logical
         for relative, expected in snapshots[name].items():
-            output = destination / name / relative
-            copy_file(root / relative, output, expected)
-            entries.append({"path": f"{name}/{relative}", "size": expected[0], "mtimeNs": expected[1], "sha256": hash_file(output)})
-        if files_at(root) != snapshots[name]:
-            raise RuntimeError(f"History root changed during capture: {root}")
+            path = f"{name}/{relative}"
+            output = destination / path
+            try:
+                copy_file(root / relative, output, expected)
+                validate_jsonl(output)
+            except SourceChanged:
+                defer(path)
+                continue
+            entries[path] = {"path": path, "size": expected[0], "mtimeNs": expected[1], "sha256": hash_file(output)}
+            captured[path] = expected
+        for path in previous_entries:
+            if path.startswith(f"{name}/") and path[len(name) + 1:] not in snapshots[name]:
+                defer(path)
     for name, logical in DATABASES.items():
         output = destination / name / Path(logical).name
         backup_database(home / logical, output)
-        entries.append({"path": str(output.relative_to(destination)), "size": output.stat().st_size, "mtimeNs": output.stat().st_mtime_ns, "sha256": hash_file(output)})
-    # Recheck after database backups, not only immediately after each file tree.
+        path = str(output.relative_to(destination))
+        entries[path] = {"path": path, "size": output.stat().st_size, "mtimeNs": output.stat().st_mtime_ns, "sha256": hash_file(output)}
+    # A writer can append after its file was copied but before the database backups finish.
     for name, logical in SOURCES.items():
-        if files_at(home / logical) != snapshots[name]:
-            raise RuntimeError(f"History root changed during database backup: {home / logical}")
-    manifest = {"version": 1, "origin": "desktop", "sourceHome": str(home.resolve()), "generation": generation, "startedAt": started, "completedAt": timestamp(), "sourceRoots": SOURCES, "databases": DATABASES, "files": sorted(entries, key=lambda entry: entry["path"])}
+        observed = files_at(home / logical)
+        for path, expected in captured.items():
+            if path.startswith(f"{name}/") and observed.get(path[len(name) + 1:]) != expected:
+                defer(path)
+    manifest = {"version": 1, "origin": "desktop", "sourceHome": str(home.resolve()), "generation": generation, "startedAt": started, "completedAt": timestamp(), "sourceRoots": SOURCES, "databases": DATABASES, "files": sorted(entries.values(), key=lambda entry: entry["path"]), "deferred": sorted(deferred), "omittedActive": sorted(omitted)}
+    if deferred:
+        manifest["previousGeneration"] = previous["generation"]
     (destination / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
     (destination / "manifest.json").chmod(0o600)
-    verify(destination)
+    if not deferred:
+        verify(destination)
     return manifest
 
 
@@ -165,6 +212,25 @@ def promote(base, generation):
         incoming = base / "incoming" / generation
         if incoming.is_symlink():
             raise ValueError("Refusing a symlinked incoming generation")
+        manifest = json.loads((incoming / "manifest.json").read_text())
+        deferred = manifest.get("deferred", [])
+        if deferred:
+            previous = (base / "current").resolve(strict=True)
+            if previous.name != manifest.get("previousGeneration"):
+                raise RuntimeError("The previous feed generation changed during capture")
+            previous_entries = {entry["path"]: entry for entry in verify(previous)["files"]}
+            requested = {entry["path"]: entry for entry in manifest["files"]}
+            for name in deferred:
+                if not isinstance(name, str) or Path(name).is_absolute() or ".." in Path(name).parts or previous_entries.get(name) != requested.get(name) or name not in requested:
+                    raise ValueError("Deferred file does not match the previous verified feed")
+                source = previous / name
+                if not stat.S_ISREG(source.lstat().st_mode):
+                    raise ValueError("Deferred feed source is not a regular file")
+                target = incoming / name
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                if not target.parent.resolve().is_relative_to(incoming.resolve()):
+                    raise ValueError("Deferred feed target escapes the incoming generation")
+                os.link(source, target)
         verify(incoming)
         (base / "generations").mkdir(mode=0o700, exist_ok=True)
         published = base / "generations" / generation
@@ -219,6 +285,7 @@ def main():
     capture_cmd.add_argument("--home", type=Path, default=Path.home())
     capture_cmd.add_argument("--output", type=Path, required=True)
     capture_cmd.add_argument("--generation", required=True)
+    capture_cmd.add_argument("--previous-manifest", type=Path)
     verify_cmd = commands.add_parser("verify")
     verify_cmd.add_argument("directory", type=Path)
     promote_cmd = commands.add_parser("promote")
@@ -232,13 +299,14 @@ def main():
         if args.output.exists() or args.output.is_symlink():
             raise FileExistsError(args.output)
         try:
-            result = capture(args.home, args.output, args.generation)
+            previous = json.loads(args.previous_manifest.read_text()) if args.previous_manifest else None
+            result = capture(args.home, args.output, args.generation, previous)
         except BaseException:
             # A failed capture is never a candidate for publication.
             if args.output.is_dir() and not args.output.is_symlink():
                 shutil.rmtree(args.output)
             raise
-        print(json.dumps({"generation": result["generation"], "files": len(result["files"])}))
+        print(json.dumps({"generation": result["generation"], "files": len(result["files"]), "deferred": len(result["deferred"]), "omittedActive": len(result["omittedActive"])}))
     elif args.command == "verify":
         result = verify(args.directory)
         print(json.dumps({"generation": result["generation"], "files": len(result["files"])}))

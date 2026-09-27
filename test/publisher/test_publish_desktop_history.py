@@ -86,22 +86,42 @@ class PublisherTests(unittest.TestCase):
         finally:
             publisher.assert_importer_stopped = original
 
-    def test_source_change_during_capture_is_rejected(self):
+    def test_active_writer_uses_the_previous_complete_record(self):
+        previous = publisher.capture(self.home, self.base / "incoming" / "generation-one", "generation-one")
+        old = publisher.promote(self.base, "generation-one")
         original = publisher.copy_file
 
         def changed_source(source, destination, expected):
             original(source, destination, expected)
             if source.name == "one.jsonl" and "pi/agent" in str(source):
                 with source.open("a") as output:
-                    output.write("new turn\n")
+                    output.write('{"id":"new"}\n')
 
         publisher.copy_file = changed_source
         try:
-            with self.assertRaisesRegex(RuntimeError, "changed during capture"):
-                publisher.capture(self.home, self.base / "incoming" / "generation-race", "generation-race")
+            result = publisher.capture(self.home, self.base / "incoming" / "generation-race", "generation-race", previous)
         finally:
             publisher.copy_file = original
-        self.assertFalse((self.base / "current").exists())
+        self.assertEqual(result["deferred"], ["pi/one.jsonl"])
+        self.assertFalse((self.base / "incoming/generation-race/pi/one.jsonl").exists())
+        published = publisher.promote(self.base, "generation-race")
+        self.assertEqual(publisher.verify(published)["generation"], "generation-race")
+        self.assertEqual(publisher.hash_file(old / "pi/one.jsonl"), publisher.hash_file(published / "pi/one.jsonl"))
+        self.assertEqual((published / "pi/one.jsonl").stat().st_ino, (old / "pi/one.jsonl").stat().st_ino)
+
+    def test_incomplete_new_session_is_omitted_until_complete(self):
+        (self.home / publisher.SOURCES["pi"] / "one.jsonl").write_text('{"id":"active"}')
+        result = publisher.capture(self.home, self.base / "incoming" / "generation-live", "generation-live")
+        self.assertEqual(result["omittedActive"], ["pi/one.jsonl"])
+        self.assertEqual(publisher.verify(self.base / "incoming/generation-live")["generation"], "generation-live")
+
+    def test_malformed_complete_record_keeps_last_verified_generation(self):
+        publisher.capture(self.home, self.base / "incoming" / "generation-one", "generation-one")
+        old = publisher.promote(self.base, "generation-one")
+        (self.home / publisher.SOURCES["pi"] / "one.jsonl").write_text('{not json}\n')
+        with self.assertRaisesRegex(ValueError, "Malformed complete JSONL"):
+            publisher.capture(self.home, self.base / "incoming" / "generation-bad", "generation-bad")
+        self.assertEqual((self.base / "current").resolve(), old)
 
     def test_reject_unexpected_files_and_symlinks(self):
         incoming = self.base / "incoming" / "generation-one"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 if (($#)); then
   printf 'Usage: %s\n' "$0" >&2
@@ -16,15 +17,22 @@ chmod 600 "$state/lock"
 
 generation="desktop-$(date -u +%Y%m%dT%H%M%SZ)-$(python3 -c 'import secrets; print(secrets.token_hex(4))')"
 local_capture="$state/$generation"
+previous_manifest="$state/$generation.previous-manifest.json"
 cleanup() {
   rm -rf -- "$local_capture"
+  rm -f -- "$previous_manifest"
   # Never remove the published generation, even if the SSH reply was lost.
   ssh -o BatchMode=yes dev "rm -rf -- '$remote_base/incoming/$generation'" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
-python3 "$script_dir/publish-desktop-history.py" capture --output "$local_capture" --generation "$generation"
 ssh -o BatchMode=yes dev "install -d -m 700 '$remote_base' '$remote_base/incoming'"
+ssh -o BatchMode=yes dev "python3 -c 'from pathlib import Path; import sys; p=Path(sys.argv[1]); sys.stdout.write(p.read_text() if p.is_file() else \"\")' '$remote_base/current/manifest.json'" > "$previous_manifest"
+capture_options=(--output "$local_capture" --generation "$generation")
+if [[ -s $previous_manifest ]]; then
+  capture_options+=(--previous-manifest "$previous_manifest")
+fi
+python3 "$script_dir/publish-desktop-history.py" capture "${capture_options[@]}"
 rsync -a --chmod=Du=rwx,Dgo=,Fu=rw,Fgo= \
   "$script_dir/publish-desktop-history.py" "dev:$remote_base/.publisher.py"
 rsync_options=(-a --checksum "--chmod=Du=rwx,Dgo=,Fu=rw,Fgo=")
