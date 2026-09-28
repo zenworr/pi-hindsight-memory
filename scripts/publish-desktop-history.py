@@ -266,6 +266,9 @@ def prune(base, keep):
         fcntl.flock(lock, fcntl.LOCK_EX)
         current = (base / "current").resolve(strict=True)
         generations = base / "generations"
+        if generations.is_symlink():
+            raise ValueError("Current feed does not point to a published generation")
+        generations = generations.resolve(strict=True)
         if current.parent != generations or not current.is_dir():
             raise ValueError("Current feed does not point to a published generation")
         candidates = sorted((item for item in generations.iterdir() if item.is_dir() and not item.is_symlink()), key=lambda item: item.name, reverse=True)

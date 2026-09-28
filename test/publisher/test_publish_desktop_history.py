@@ -15,7 +15,7 @@ class PublisherTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve()
         self.home = self.root / "desktop"
         for relative in publisher.SOURCES.values():
             (self.home / relative).mkdir(parents=True)
@@ -83,6 +83,25 @@ class PublisherTests(unittest.TestCase):
             self.assertFalse((self.base / "generations/generation-one").exists())
             self.assertTrue((self.base / "generations/generation-two").is_dir())
             self.assertEqual(publisher.verify(self.base / "current")["generation"], "generation-three")
+        finally:
+            publisher.assert_importer_stopped = original
+
+    def test_prune_accepts_a_canonical_parent_alias_but_not_a_generations_symlink(self):
+        for name in ("generation-one", "generation-two", "generation-three"):
+            publisher.capture(self.home, self.base / "incoming" / name, name)
+            publisher.promote(self.base, name)
+        alias = self.root / "parent-alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        original = publisher.assert_importer_stopped
+        try:
+            publisher.assert_importer_stopped = lambda: None
+            self.assertEqual(publisher.prune(alias / "feed", 2), 1)
+            self.assertEqual(publisher.verify(self.base / "current")["generation"], "generation-three")
+            generations = self.base / "generations"
+            generations.rename(self.root / "moved-generations")
+            generations.symlink_to(self.root / "moved-generations", target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "Current feed"):
+                publisher.prune(self.base, 2)
         finally:
             publisher.assert_importer_stopped = original
 
