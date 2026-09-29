@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { loadConfig } from "../common/config.js";
+import { startTelemetry } from "../common/telemetry.js";
 import { ERROR_MESSAGE_MAX_CHARS } from "../common/limits.js";
 import { errorMessage } from "../common/logging.js";
 import { stripInjectedMemory } from "../canonical/injected-memory.js";
@@ -50,7 +51,9 @@ export default function piHindsightMemory(pi: ExtensionAPI): void {
   const client = new HindsightClient(config.hindsight);
   let unregisterStatusProvider: (() => void) | undefined;
   let toolRegistered = false;
+  let stopTelemetry: (() => Promise<void>) | undefined;
   pi.on("session_start", () => {
+    stopTelemetry ??= startTelemetry("hindsight-retrieval");
     unregisterStatusProvider ??= registerHindsightStatusProvider(pi, config, client);
     if (toolRegistered) return;
     const collision = pi.getAllTools().find((tool) => tool.name === "memory_search");
@@ -58,8 +61,11 @@ export default function piHindsightMemory(pi: ExtensionAPI): void {
     pi.registerTool(createMemorySearchTool(client, config.hindsight.minRelevanceScore, config));
     toolRegistered = true;
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
     unregisterStatusProvider?.();
     unregisterStatusProvider = undefined;
+    const stop = stopTelemetry;
+    stopTelemetry = undefined;
+    await stop?.();
   });
 }

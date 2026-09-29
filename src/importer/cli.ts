@@ -5,6 +5,7 @@ import process from "node:process";
 import { defaultConfig, loadConfig } from "../common/config.js";
 import { DAY_MS, JSON_INDENT } from "../common/limits.js";
 import { parseArguments, type CommandArguments } from "./arguments.js";
+import { startTelemetry } from "../common/telemetry.js";
 
 import { activeProvider, assertImportApproval, estimateCostUsd, estimateInputTokens, readApproval } from "../common/approval.js";
 import { errorMessage, Logger } from "../common/logging.js";
@@ -274,4 +275,5 @@ async function main(): Promise<void> {
   throw new Error(`Unknown command: ${command}`);
 }
 
-main().catch((error) => { new Logger("cli").error("Command failed", { error: errorMessage(error) }); process.exitCode = 1; });
+const stopTelemetry = startTelemetry("hindsight-importer");
+main().catch((error) => { new Logger("cli").error("Command failed", { error: errorMessage(error) }); process.exitCode = 1; }).finally(stopTelemetry);

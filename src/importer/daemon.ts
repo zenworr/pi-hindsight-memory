@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import { inSpan, telemetryGauge } from "../common/telemetry.js";
+import { startHealthTelemetry } from "./telemetry.js";
 import path from "node:path";
 import type { AppConfig } from "../common/types.js";
 import { Logger, errorMessage } from "../common/logging.js";
@@ -19,12 +21,18 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 const DAEMON_TICK_MS = 1_000;
 
 export async function runImportCycle(config: AppConfig, state: StateDatabase, client: HindsightClient, logger = new Logger("importer"), signal?: AbortSignal, scanFirst = true): Promise<{ scan?: Awaited<ReturnType<typeof scan>>; worker: Awaited<ReturnType<ImportWorker["runOnce"]>> }> {
+  return inSpan("hindsight.import.cycle", { "hindsight.scan.enabled": scanFirst }, () => runCycle(config, state, client, logger, signal, scanFirst));
+}
+
+async function runCycle(config: AppConfig, state: StateDatabase, client: HindsightClient, logger: Logger, signal: AbortSignal | undefined, scanFirst: boolean): ReturnType<typeof runImportCycle> {
   const worker = new ImportWorker(config, state, client, logger);
-  await worker.preflight(signal);
+  await inSpan("hindsight.import.preflight", {}, () => worker.preflight(signal));
   const scanResult = scanFirst ? await scan(config, state, { signal }) : undefined;
   const workerResult = await worker.runOnce(config.importer.workBatchSize, signal);
   if (state.pendingWorkCount(config.importer.maxAttempts) === 0 && !signal?.aborted) {
-    const verification = await verifyFullImport(config, client, { signal });
+    const verification = await inSpan("hindsight.import.verify", {}, () => verifyFullImport(config, client, { signal }));
+    telemetryGauge("hindsight.importer.document_accounting_ready", Number(verification.documentAccountingReady));
+    telemetryGauge("hindsight.importer.document_mismatches", verification.documentHashMismatchCount);
     if (!verification.documentAccountingReady) {
       throw new Error(`Import verification failed: ${verification.failedGenerations} failed session updates, ${verification.missingDocumentCount} missing documents, ${verification.unexpectedDocumentCount} unexpected documents, ${verification.excludedDocumentsPresentCount} excluded documents present, ${verification.documentHashMismatchCount} hash mismatches; run verify-import for details`);
     }
@@ -52,6 +60,7 @@ async function runLockedDaemon(config: AppConfig, state: StateDatabase, options:
   let phase = "starting";
   let lastError: string | undefined;
   state.heartbeat(phase);
+  const stopHealthTelemetry = startHealthTelemetry(config);
   const heartbeat = setInterval(() => { state.heartbeat(phase, lastError); }, HEARTBEAT_INTERVAL_MS);
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
@@ -92,6 +101,7 @@ async function runLockedDaemon(config: AppConfig, state: StateDatabase, options:
     state.heartbeat("stopped");
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
+    await stopHealthTelemetry();
   }
 }
 

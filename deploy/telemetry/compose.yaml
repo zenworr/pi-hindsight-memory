@@ -1,0 +1,16 @@
+services:
+  hindsight-app:
+    environment:
+      PYTHONPATH: /opt/hindsight-telemetry:/app/api
+      HINDSIGHT_OTEL_ADAPTER_ENABLED: "1"
+      HINDSIGHT_API_OTEL_TRACES_ENABLED: "true"
+      HINDSIGHT_API_OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:?Set the OTLP HTTP base endpoint}
+      HINDSIGHT_API_OTEL_SERVICE_NAME: hindsight-api
+      HINDSIGHT_API_OTEL_DEPLOYMENT_ENVIRONMENT: production
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_EXPORTER_OTLP_TIMEOUT: "3"
+      HINDSIGHT_OTEL_SERVICE_VERSION: "0.9.2"
+      HINDSIGHT_OTEL_HOST_NAME: ${HINDSIGHT_OTEL_HOST_NAME:-hindsight}
+    volumes:
+      - ../telemetry:/opt/hindsight-telemetry:ro

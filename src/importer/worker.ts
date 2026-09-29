@@ -1,4 +1,6 @@
 import { statfs } from "node:fs/promises";
+import { SpanStatusCode } from "@opentelemetry/api";
+import { inSpan, telemetryCount } from "../common/telemetry.js";
 import { HTTP_STATUS, isRetryableStatus } from "../hindsight/http.js";
 import type { AppConfig, CanonicalSession, CanonicalSessionMetadata, HindsightOperation, ImportApproval, SessionReference } from "../common/types.js";
 import { CANONICAL_SCHEMA, ADAPTER_VERSION, REDACTION_POLICY_VERSION } from "../common/types.js";
@@ -84,6 +86,16 @@ export class ImportWorker {
   }
 
   private async process(generation: GenerationRecord, shutdownSignal?: AbortSignal): Promise<"completed" | "failed" | "deferred"> {
+    return inSpan("hindsight.import.generation", { source: generation.source, "retry.attempt": generation.attemptCount + 1 }, async (span) => {
+      const result = await this.processGeneration(generation, shutdownSignal);
+      span?.setAttribute("hindsight.outcome", result);
+      if (result === "failed") span?.setStatus({ code: SpanStatusCode.ERROR });
+      telemetryCount("hindsight.import.generations", 1, { source: generation.source, outcome: result });
+      return result;
+    });
+  }
+
+  private async processGeneration(generation: GenerationRecord, shutdownSignal?: AbortSignal): Promise<"completed" | "failed" | "deferred"> {
     if (generation.state === "failed" && generation.attemptCount >= this.config.importer.maxAttempts) return "deferred";
     if (!this.state.claimGeneration(generation)) return "deferred";
     generation = this.state.getGeneration(generation.source, generation.nativeSessionId, generation.canonicalHash)!;
@@ -148,7 +160,7 @@ export class ImportWorker {
         return "deferred";
       }
       if (!session) {
-        session = await adapter.load(reference, { spoolDirectory: this.config.spoolDirectory, maxCanonicalBytes: this.config.maxCanonicalBytes, signal: operationSignal });
+        session = await inSpan("hindsight.source.normalize", { source: generation.source }, () => adapter.load(reference, { spoolDirectory: this.config.spoolDirectory, maxCanonicalBytes: this.config.maxCanonicalBytes, signal: operationSignal }));
         operationSignal.throwIfAborted();
         if (session.canonicalHash !== generation.canonicalHash) {
           if (persisted) throw new Error("Submitted source changed and its immutable payload is unavailable; remote reconciliation is required");
@@ -169,7 +181,7 @@ export class ImportWorker {
       }
       if (generation.repair && !this.repairMode) throw new Error("Historical evidence-policy repair requires a reviewed plan-repair/repair command");
       if (!persisted) {
-        await savePendingPayload(this.config.spoolDirectory, generation.operationId, session);
+        await inSpan("hindsight.payload.persist", { source: generation.source, "hindsight.canonical.bytes": session.canonicalBytes }, () => savePendingPayload(this.config.spoolDirectory, generation.operationId, session!));
         this.state.durableTransaction(() => {
           this.state.upsertGeneration(generation);
           this.state.upsertOperation({ operationId: generation.operationId, documentId: session!.documentId, canonicalHash: generation.canonicalHash, hindsightStatus: "prepared", retryCount: 0 });
@@ -196,7 +208,7 @@ export class ImportWorker {
         this.state.upsertOperation({ ...persisted!, hindsightStatus: "submitting", submittedAt: new Date().toISOString() });
         this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { submittedAt: new Date().toISOString() });
       });
-      const response = await this.client.retainWithOperationId(session, generation.operationId, operationSignal);
+      const response = await inSpan("hindsight.retain.submit", { source: generation.source, "hindsight.canonical.bytes": session.canonicalBytes, "hindsight.canonical.turns": session.canonicalTurns }, () => this.client.retainWithOperationId(session!, generation.operationId, operationSignal));
       if (response.operation_id && response.operation_id !== generation.operationId) throw new Error("Hindsight did not honor the requested operation identifier");
       this.state.upsertOperation({ ...persisted, hindsightStatus: "pending", submittedAt: new Date().toISOString() });
       const operation = await this.client.waitForOperation(generation.operationId, operationSignal, Math.min(OPERATION_POLL_SLICE_MS, this.config.hindsight.retainWallTimeoutMs));

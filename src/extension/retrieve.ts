@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { inSpan, telemetryCount, telemetryGauge } from "../common/telemetry.js";
 import { DatabaseSync } from "node:sqlite";
 import type { AppConfig } from "../common/types.js";
 import type { HindsightClient } from "../hindsight/client.js";
@@ -11,6 +12,16 @@ const MAX_REVIEWED_SOURCE_CHARS = 600;
 const MAX_SUPERSEDED_TEXT_CHARS = 800;
 
 export async function retrieveMemory(config: AppConfig, client: HindsightClient, query: string, signal?: AbortSignal): Promise<{ text: string; details: MemorySearchDetails }> {
+  return inSpan("hindsight.memory.search", {}, async (span) => {
+    const result = await retrieve(config, client, query, signal);
+    span?.setAttributes({ "hindsight.results": result.details.resultCount, "hindsight.degraded": result.details.degraded === true, "hindsight.no_match": result.details.noMatch });
+    telemetryCount("hindsight.memory.searches", 1, { degraded: result.details.degraded === true, no_match: result.details.noMatch });
+    telemetryGauge("hindsight.memory.results", result.details.resultCount);
+    return result;
+  });
+}
+
+async function retrieve(config: AppConfig, client: HindsightClient, query: string, signal?: AbortSignal): Promise<{ text: string; details: MemorySearchDetails }> {
   const callerSignal = signal;
   signal = signal ? AbortSignal.any([signal, AbortSignal.timeout(config.hindsight.requestTimeoutMs)]) : AbortSignal.timeout(config.hindsight.requestTimeoutMs);
   signal.throwIfAborted();
@@ -32,7 +43,7 @@ export async function retrieveMemory(config: AppConfig, client: HindsightClient,
   try { facts = reviewedFacts(config, query); }
   catch { warnings.push("Reviewed current facts could not be read; check current-facts.json."); }
   let derived: ReturnType<typeof formatRecallResponse> | undefined;
-  try { derived = formatRecallResponse(await client.recall(query, signal), { minRelevanceScore: config.hindsight.minRelevanceScore }); }
+  try { derived = await inSpan("hindsight.memory.recall", {}, async () => formatRecallResponse(await client.recall(query, signal), { minRelevanceScore: config.hindsight.minRelevanceScore })); }
   catch (error) {
     if (callerSignal?.aborted || hits.length + facts.length === 0) throw error;
     warnings.push("Hindsight is unavailable. Only local evidence is shown.");

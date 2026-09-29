@@ -1,3 +1,5 @@
+import { telemetryLog } from "./telemetry.js";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 const rank: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
@@ -14,6 +16,7 @@ export class Logger {
     if (rank[level] < rank[this.minimum]) return;
     const record = { timestamp: new Date().toISOString(), level, component: this.component, message, ...details };
     process.stderr.write(`${JSON.stringify(record)}\n`);
+    telemetryLog(level, this.component, message, details);
   }
 }
 

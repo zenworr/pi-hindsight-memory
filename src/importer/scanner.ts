@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
+import { SpanStatusCode } from "@opentelemetry/api";
+import { inSpan, telemetryCount } from "../common/telemetry.js";
 import { MS_PER_SECOND } from "../common/limits.js";
 
-import type { AppConfig, Source, SourceFingerprint, SessionReference, InventorySessionResult } from "../common/types.js";
+import type { AppConfig, Source, SourceFingerprint, SessionReference, InventorySessionResult, CanonicalSession } from "../common/types.js";
 import { ADAPTER_VERSION, CANONICAL_SCHEMA, CLASSIFICATION_POLICY_VERSION, REDACTION_POLICY_VERSION, RETAIN_POLICY_VERSION, SOURCES } from "../common/types.js";
 import { documentIdFor } from "../common/hashing.js";
 import { createAdapters } from "../adapters/index.js";
@@ -62,6 +64,16 @@ function effectiveReference(state: StateDatabase, reference: SessionReference): 
 }
 
 export async function scan(config: AppConfig, state: StateDatabase, options: ScanOptions = {}): Promise<ScanSummary> {
+  return inSpan("hindsight.scan", { "hindsight.scan.forced": options.force === true, "hindsight.scan.index_only": options.indexOnly === true }, async (span) => {
+    const result = await scanSources(config, state, options);
+    span?.setAttributes({ "hindsight.scan.discovered": result.discovered, "hindsight.scan.queued": result.queued, "hindsight.scan.errors": result.errors });
+    if (result.errors > 0) span?.setStatus({ code: SpanStatusCode.ERROR });
+    for (const outcome of ["discovered", "queued", "unchanged", "active", "empty", "errors", "sourceMissing", "excluded", "configured", "ambiguous"] as const) telemetryCount("hindsight.scan.sessions", result[outcome], { outcome });
+    return result;
+  });
+}
+
+async function scanSources(config: AppConfig, state: StateDatabase, options: ScanOptions): Promise<ScanSummary> {
   const adapters = createAdapters(config).filter((adapter) => !options.source || adapter.source === options.source);
   const signature = processingSignature(config);
   const indexed = indexedDocumentHashes(config);
@@ -79,10 +91,12 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
         if (known || adapter.origin === "desktop") throw new Error("Configured source is unavailable; existing evidence was retained");
         continue;
       }
-      for await (const reference of adapter.discover()) {
-        options.signal?.throwIfAborted();
-        discovered.push({ adapter, reference });
-      }
+      await inSpan("hindsight.source.discover", { source: adapter.source, origin: adapter.origin ?? config.localOrigin }, async () => {
+        for await (const reference of adapter.discover()) {
+          options.signal?.throwIfAborted();
+          discovered.push({ adapter, reference });
+        }
+      });
     } catch (error) {
       if (options.signal?.aborted) throw error;
       healthy.set(adapter.source, false);
@@ -213,11 +227,11 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
     }
     state.clearScanCandidate(adapter.source, reference.nativeSessionId);
 
-    let session;
+    let session: CanonicalSession | undefined;
     let loaded = false;
     try {
       for (let attempt = 0; attempt < SOURCE_READ_ATTEMPTS && !loaded; attempt += 1) {
-        session = await adapter.load(reference, { spoolDirectory: config.spoolDirectory, maxCanonicalBytes: config.maxCanonicalBytes, signal: options.signal });
+        session = await inSpan("hindsight.source.normalize", { source: adapter.source, origin: adapter.origin ?? config.localOrigin }, () => adapter.load(reference, { spoolDirectory: config.spoolDirectory, maxCanonicalBytes: config.maxCanonicalBytes, signal: options.signal }));
         if (options.signal?.aborted) {
           await session.cleanup();
           options.signal.throwIfAborted();
@@ -248,7 +262,7 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
       summary.results.push({ source: adapter.source, nativeSessionId: session.nativeSessionId, locator: reference.locator, status: tooLarge ? "too_large" : session.emptyAfterNormalization ? "empty_after_normalization" : "eligible", canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, redactionCount: session.redactionCount, startedAt: session.sessionStartedAt, updatedAt: session.sessionUpdatedAt });
       if (tooLarge) { healthy.set(adapter.source, false); summary.errors += 1; state.recordScanError(adapter.source, reference.locator, "Canonical document is too large"); continue; }
       if (!options.inventoryOnly) {
-        try { await indexEvidence(config, session, options.indexOnly && options.force); }
+        try { await inSpan("hindsight.evidence.index", { source: session.source, "hindsight.canonical.bytes": session.canonicalBytes }, () => indexEvidence(config, session, options.indexOnly && options.force)); }
         catch (error) {
           healthy.set(adapter.source, false); summary.errors += 1;
           const message = `Evidence index failed: ${redactText(errorMessage(error)).text}`;

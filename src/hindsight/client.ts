@@ -8,6 +8,8 @@ import { expectedRetainMission } from "../common/retention-policy.js";
 import { sleep } from "../common/async.js";
 import { MS_PER_SECOND, CHARS_PER_ESTIMATED_TOKEN } from "../common/limits.js";
 import { HTTP_STATUS, isRetryableStatus } from "./http.js";
+import { inSpan, telemetryCount, traceHeaders } from "../common/telemetry.js";
+import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
 
 const RETRY_BACKOFF_FACTOR = 2;
 const RATE_LIMIT_FALLBACK_DELAY_MS = 1_000;
@@ -101,6 +103,19 @@ export class HindsightClient {
   }
 
   async requestJson<T>(method: string, url: string, body?: unknown, signal?: AbortSignal, timeoutMs = this.config.requestTimeoutMs): Promise<T> {
+    return inSpan("hindsight.http.request", { "http.request.method": method, "http.route": this.route(url) }, () => this.sendJson<T>(method, url, body, signal, timeoutMs));
+  }
+
+  private route(url: string): string {
+    const pathname = new URL(url).pathname;
+    if (["/health", "/version"].includes(pathname)) return pathname;
+    const suffix = pathname.startsWith(new URL(this.bankUrl()).pathname) ? pathname.slice(new URL(this.bankUrl()).pathname.length) : "/other";
+    if (["", "/profile", "/config", "/stats", "/import", "/memories", "/memories/recall", "/memories/dry-run-extract", "/consolidate", "/operations", "/documents"].includes(suffix)) return `/banks/{bank}${suffix}`;
+    if (/^\/(operations|documents)\/[^/]+$/.test(suffix)) return `/banks/{bank}/${suffix.split("/")[1]}/{id}`;
+    return "/other";
+  }
+
+  private async sendJson<T>(method: string, url: string, body: unknown, signal: AbortSignal | undefined, timeoutMs: number): Promise<T> {
     signal?.throwIfAborted();
     const deadline = Date.now() + timeoutMs;
     const payload = body === undefined ? undefined : JSON.stringify(body);
@@ -117,9 +132,17 @@ export class HindsightClient {
       request.signal = signal ? AbortSignal.any([signal, timeout]) : timeout;
       let response: Response;
       try {
-        response = await this.fetcher(url, request);
+        response = await inSpan("hindsight.http.attempt", { "http.request.method": method, "http.route": this.route(url), "retry.attempt": attempt + 1 }, async (span) => {
+          Object.assign(headers, traceHeaders());
+          const result = await this.fetcher(url, request);
+          span?.setAttribute("http.response.status_code", result.status);
+          if (!result.ok) span?.setStatus({ code: SpanStatusCode.ERROR });
+          telemetryCount("hindsight.http.responses", 1, { method, route: this.route(url), status: result.status });
+          return result;
+        }, SpanKind.CLIENT);
       } catch (error) {
         if (attempt + 1 < this.config.httpMaxAttempts && !signal?.aborted && Date.now() < deadline) {
+          telemetryCount("hindsight.http.retries", 1, { reason: "transport" });
           await sleep(Math.min(this.config.httpRetryDelayMs * RETRY_BACKOFF_FACTOR ** attempt, this.config.httpMaxRetryDelayMs, Math.max(0, deadline - Date.now())), signal);
           continue;
         }
@@ -129,6 +152,7 @@ export class HindsightClient {
       if (response.status === HTTP_STATUS.UNAUTHORIZED && !authRetry && await this.tokenChanged(token) && Date.now() < deadline) {
         await response.body?.cancel();
         token = await this.token();
+        telemetryCount("hindsight.http.retries", 1, { reason: "authentication" });
         authRetry = true;
         continue;
       }
@@ -142,6 +166,7 @@ export class HindsightClient {
       const responseBody = await response.text();
       const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
       if (isRetryableStatus(response.status) && attempt + 1 < this.config.httpMaxAttempts && !signal?.aborted && Date.now() < deadline) {
+        telemetryCount("hindsight.http.retries", 1, { reason: "http", status: response.status });
         const requestedWait = Math.min(this.config.httpMaxRetryDelayMs, response.status === HTTP_STATUS.TOO_MANY_REQUESTS ? retryAfterMs ?? RATE_LIMIT_FALLBACK_DELAY_MS : this.config.httpRetryDelayMs * RETRY_BACKOFF_FACTOR ** attempt);
         const wait = Math.min(requestedWait, Math.max(0, deadline - Date.now()));
         await sleep(wait, signal);

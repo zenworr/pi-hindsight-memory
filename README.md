@@ -142,4 +142,5 @@ See also:
 - [Remote deployment](docs/REMOTE-DEPLOYMENT.md)
 - [Security](docs/SECURITY.md)
 - [Status integration](docs/STATUS-INTEGRATION.md)
+- [OpenTelemetry and SigNoz](docs/TELEMETRY.md)
 - [Testing](docs/TESTING.md)
