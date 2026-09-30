@@ -1,5 +1,15 @@
+variable "alert_channels" {
+  type        = list(string)
+  default     = []
+  description = "Existing SigNoz notification channel names. Empty disables missing-data rules."
+  validation {
+    condition     = alltrue([for name in var.alert_channels : trimspace(name) != ""])
+    error_message = "Notification channel names must not be empty."
+  }
+}
+
 resource "signoz_rule" "telemetry_missing" {
-  for_each       = toset(["hindsight-importer", "hindsight-api"])
+  for_each       = length(var.alert_channels) > 0 ? toset(["hindsight-importer", "hindsight-api"]) : toset([])
   alert          = "${each.value}: telemetry missing"
   alert_type     = "METRIC_BASED_ALERT"
   rule_type      = "threshold_rule"
@@ -37,7 +47,7 @@ resource "signoz_rule" "telemetry_missing" {
     thresholds = {
       basic = {
         kind = "basic"
-        spec = [{ name = "warning", op = "below", target = 1, match_type = "at_least_once", channels = [] }]
+        spec = [{ name = "warning", op = "below", target = 1, match_type = "at_least_once", channels = var.alert_channels }]
       }
     }
   }

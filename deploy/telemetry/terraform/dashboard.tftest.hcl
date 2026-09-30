@@ -2,6 +2,9 @@ mock_provider "signoz" {}
 
 run "dashboard_contract" {
   command = apply
+  variables {
+    alert_channels = ["telemetry-test"]
+  }
   assert {
     condition     = signoz_dashboard.hindsight.name == "hindsight-health-7haadkeb" && signoz_dashboard.hindsight.schema_version == "v6"
     error_message = "Keep the existing dashboard identity and V2 schema."
@@ -37,5 +40,16 @@ run "dashboard_contract" {
       strcontains(rule.condition.composite_query.queries[0].builder_query.spec.metrics.filter.expression, "production")
     )]) && length(signoz_rule.telemetry_missing) == 2
     error_message = "Missing-data rules must cover only the two always-on production services."
+  }
+}
+
+run "no_notification_channel" {
+  command = plan
+  variables {
+    alert_channels = []
+  }
+  assert {
+    condition     = length(signoz_rule.telemetry_missing) == 0
+    error_message = "Do not create rules without a real notification channel."
   }
 }
