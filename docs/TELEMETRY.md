@@ -86,6 +86,24 @@ The SDK batches exports with bounded queues and three-second export budgets. Exp
 
 ## SigNoz dashboard
 
-Import [Hindsight Health](../deploy/telemetry/hindsight-health.json) into SigNoz 0.135 or later. The dashboard uses the v6 schema. It shows importer and server health, queue and coverage, feed freshness, consolidation, latency, retries, process use, and database pool use. The panels select Hindsight service names, so other instrumented projects remain separate. Health values use green for the expected state and red for other values. Health number panels use the last five minutes. Duration panels calculate average latency from histogram sum and count rates. Work and token panels can have no data while idle or before the first operation; do not interpret these gaps as a fault or as proof of health.
+Manage Hindsight Health with the pinned `SigNoz/signoz` Terraform provider `0.1.5` and its typed V2 resource. SigNoz must be version 0.135 or later. The [dashboard catalog](../deploy/telemetry/hindsight-health.json) is the single source for panel definitions and queries; [Terraform](../deploy/telemetry/terraform/main.tf) maps it to the provider schema. Do not maintain a separate UI-edited copy. The dashboard uses the v6 schema. It shows importer and server health, queue and coverage, feed freshness, consolidation, latency, retries, process use, and database pool use. The panels select Hindsight service names, so other instrumented projects remain separate. Health values use green for the expected state and red for other values. Health number panels use the last five minutes. Duration panels calculate average latency from histogram sum and count rates. Work and token panels can have no data while idle or before the first operation; do not interpret these gaps as a fault or as proof of health.
+
+### Provisioning and verification
+
+Run dashboard management from an authorized management host, not from application workers. Keep management access separate from OTLP ingestion. The wrapper reads `SIGNOZ_ACCESS_TOKEN` or the protected `~/.config/signoz/api-header` file without printing its value. It disables Terraform debug logging. It does not change SigNoz authentication or create credentials.
+
+```bash
+scripts/telemetry-dashboard.sh validate
+# Import an existing dashboard before the first plan on this host.
+scripts/telemetry-dashboard.sh import signoz_dashboard.hindsight <dashboard-id>
+scripts/telemetry-dashboard.sh plan
+# Review the plan before applying it.
+scripts/telemetry-dashboard.sh apply
+scripts/telemetry-dashboard.sh plan -detailed-exitcode
+```
+
+The last command must report no changes. `prevent_destroy` protects the dashboard from replacement. The wrapper keeps per-project state under `$XDG_STATE_HOME/pi-hindsight-memory/signoz` (default `~/.local/state/pi-hindsight-memory/signoz`) and provider data under `$XDG_CACHE_HOME/pi-hindsight-memory/signoz-terraform`. These directories have mode 0700. State and backup files have mode 0600. Retain the protected state backup when moving management to another host. Never reuse another project's state. Commit the dependency lock file, not state, plans, credentials, or caches.
+
+The mock-provider test verifies schema, identity, query references, service filters, and layout without credentials. This is not a live-data check. After apply, run every stored query with the authenticated V5 query API and inspect errors, warnings, timestamps, and numeric samples. Verify stored traces, metrics, and logs separately. A quiet retry or token panel is not a fault. Do not restart an application for a dashboard-only change.
 
 For details, open Traces or Logs and filter `service.name` to `hindsight-importer`, `hindsight-retrieval`, or `hindsight-api`. HTTP calls share trace IDs across the client and server. Asynchronous server tasks can have separate traces; do not assume that an HTTP request span covers the whole retain operation.

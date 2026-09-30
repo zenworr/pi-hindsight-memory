@@ -20,3 +20,11 @@ current-facts.json
 *.dump
 *.tar.gz
 /canonical/
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+crash.*.log
