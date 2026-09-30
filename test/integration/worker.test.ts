@@ -60,6 +60,8 @@ test("worker shutdown leaves submitted work recoverable instead of failed", asyn
   state.upsertGeneration({ source: "pi", nativeSessionId: canonical.nativeSessionId, canonicalHash: canonical.canonicalHash, operationId, state: "queued", queuedAt: new Date().toISOString(), attemptCount: 0 });
   await canonical.cleanup();
   const controller = new AbortController();
+  let pollingStarted!: () => void;
+  const polling = new Promise<void>((resolve) => { pollingStarted = resolve; });
   const fakeClient = {
     ensureBank: async () => undefined,
     assertBankConfiguration: async () => ({}),
@@ -69,12 +71,13 @@ test("worker shutdown leaves submitted work recoverable instead of failed", asyn
       signal.throwIfAborted();
       return new Promise((_, reject) => {
         signal.addEventListener("abort", () => { reject(new Error("aborted")); }, { once: true });
+        pollingStarted();
       });
     },
   };
   try {
     const running = new ImportWorker(config, state, fakeClient as any).runOnce(1, controller.signal);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await polling;
     controller.abort();
     const result = await running;
     assert.equal(result.deferred, 1);

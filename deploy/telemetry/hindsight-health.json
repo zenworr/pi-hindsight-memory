@@ -29,13 +29,28 @@
             "kind": "signoz/NumberPanel",
             "spec": {
               "visualization": {
-                "timePreference": "global_time"
+                "timePreference": "last_5_min"
               },
               "formatting": {
                 "unit": "none",
                 "decimalPrecision": "0"
               },
-              "thresholds": null
+              "thresholds": [
+                {
+                  "value": 1,
+                  "operator": "equal",
+                  "unit": "none",
+                  "color": "#52c41a",
+                  "format": "text"
+                },
+                {
+                  "value": 1,
+                  "operator": "not_equal",
+                  "unit": "none",
+                  "color": "#ff4e50",
+                  "format": "text"
+                }
+              ]
             }
           },
           "queries": [
@@ -90,13 +105,28 @@
             "kind": "signoz/NumberPanel",
             "spec": {
               "visualization": {
-                "timePreference": "global_time"
+                "timePreference": "last_5_min"
               },
               "formatting": {
                 "unit": "none",
                 "decimalPrecision": "0"
               },
-              "thresholds": null
+              "thresholds": [
+                {
+                  "value": 1,
+                  "operator": "equal",
+                  "unit": "none",
+                  "color": "#52c41a",
+                  "format": "text"
+                },
+                {
+                  "value": 1,
+                  "operator": "not_equal",
+                  "unit": "none",
+                  "color": "#ff4e50",
+                  "format": "text"
+                }
+              ]
             }
           },
           "queries": [
@@ -151,13 +181,28 @@
             "kind": "signoz/NumberPanel",
             "spec": {
               "visualization": {
-                "timePreference": "global_time"
+                "timePreference": "last_5_min"
               },
               "formatting": {
                 "unit": "none",
                 "decimalPrecision": "0"
               },
-              "thresholds": null
+              "thresholds": [
+                {
+                  "value": 1,
+                  "operator": "equal",
+                  "unit": "none",
+                  "color": "#52c41a",
+                  "format": "text"
+                },
+                {
+                  "value": 1,
+                  "operator": "not_equal",
+                  "unit": "none",
+                  "color": "#ff4e50",
+                  "format": "text"
+                }
+              ]
             }
           },
           "queries": [
@@ -212,13 +257,28 @@
             "kind": "signoz/NumberPanel",
             "spec": {
               "visualization": {
-                "timePreference": "global_time"
+                "timePreference": "last_5_min"
               },
               "formatting": {
                 "unit": "none",
                 "decimalPrecision": "0"
               },
-              "thresholds": null
+              "thresholds": [
+                {
+                  "value": 0,
+                  "operator": "equal",
+                  "unit": "none",
+                  "color": "#52c41a",
+                  "format": "text"
+                },
+                {
+                  "value": 0,
+                  "operator": "not_equal",
+                  "unit": "none",
+                  "color": "#ff4e50",
+                  "format": "text"
+                }
+              ]
             }
           },
           "queries": [
@@ -273,13 +333,28 @@
             "kind": "signoz/NumberPanel",
             "spec": {
               "visualization": {
-                "timePreference": "global_time"
+                "timePreference": "last_5_min"
               },
               "formatting": {
                 "unit": "none",
                 "decimalPrecision": "0"
               },
-              "thresholds": null
+              "thresholds": [
+                {
+                  "value": 0,
+                  "operator": "equal",
+                  "unit": "none",
+                  "color": "#52c41a",
+                  "format": "text"
+                },
+                {
+                  "value": 0,
+                  "operator": "not_equal",
+                  "unit": "none",
+                  "color": "#ff4e50",
+                  "format": "text"
+                }
+              ]
             }
           },
           "queries": [
@@ -334,13 +409,28 @@
             "kind": "signoz/NumberPanel",
             "spec": {
               "visualization": {
-                "timePreference": "global_time"
+                "timePreference": "last_5_min"
               },
               "formatting": {
                 "unit": "none",
                 "decimalPrecision": "0"
               },
-              "thresholds": null
+              "thresholds": [
+                {
+                  "value": 0,
+                  "operator": "equal",
+                  "unit": "none",
+                  "color": "#52c41a",
+                  "format": "text"
+                },
+                {
+                  "value": 0,
+                  "operator": "not_equal",
+                  "unit": "none",
+                  "color": "#ff4e50",
+                  "format": "text"
+                }
+              ]
             }
           },
           "queries": [
@@ -1277,42 +1367,96 @@
             {
               "kind": "time_series",
               "spec": {
-                "name": "A",
+                "name": "F1",
                 "plugin": {
-                  "kind": "signoz/BuilderQuery",
+                  "kind": "signoz/CompositeQuery",
                   "spec": {
-                    "name": "A",
-                    "stepInterval": 60,
-                    "signal": "metrics",
-                    "source": "",
-                    "aggregations": [
+                    "queries": [
                       {
-                        "metricName": "hindsight.stage.duration",
-                        "temporality": "",
-                        "timeAggregation": "avg",
-                        "spaceAggregation": "avg",
-                        "reduceTo": "avg"
-                      }
-                    ],
-                    "disabled": false,
-                    "filter": {
-                      "expression": "service.name IN ('hindsight-importer', 'hindsight-retrieval', 'hindsight-api')"
-                    },
-                    "groupBy": [
+                        "type": "builder_query",
+                        "spec": {
+                          "name": "A",
+                          "stepInterval": 60,
+                          "signal": "metrics",
+                          "source": "",
+                          "aggregations": [
+                            {
+                              "metricName": "hindsight.stage.duration.sum",
+                              "temporality": "Cumulative",
+                              "timeAggregation": "rate",
+                              "spaceAggregation": "sum",
+                              "reduceTo": "avg"
+                            }
+                          ],
+                          "disabled": true,
+                          "filter": {
+                            "expression": "service.name IN ('hindsight-importer', 'hindsight-retrieval', 'hindsight-api')"
+                          },
+                          "groupBy": [
+                            {
+                              "name": "stage",
+                              "signal": "",
+                              "fieldContext": "attribute",
+                              "fieldDataType": "string"
+                            }
+                          ],
+                          "order": [],
+                          "limit": 30,
+                          "having": {
+                            "expression": ""
+                          },
+                          "functions": [],
+                          "legend": "{{stage}}"
+                        }
+                      },
                       {
-                        "name": "stage",
-                        "signal": "",
-                        "fieldContext": "attribute",
-                        "fieldDataType": "string"
+                        "type": "builder_query",
+                        "spec": {
+                          "name": "B",
+                          "stepInterval": 60,
+                          "signal": "metrics",
+                          "source": "",
+                          "aggregations": [
+                            {
+                              "metricName": "hindsight.stage.duration.count",
+                              "temporality": "Cumulative",
+                              "timeAggregation": "rate",
+                              "spaceAggregation": "sum",
+                              "reduceTo": "avg"
+                            }
+                          ],
+                          "disabled": true,
+                          "filter": {
+                            "expression": "service.name IN ('hindsight-importer', 'hindsight-retrieval', 'hindsight-api')"
+                          },
+                          "groupBy": [
+                            {
+                              "name": "stage",
+                              "signal": "",
+                              "fieldContext": "attribute",
+                              "fieldDataType": "string"
+                            }
+                          ],
+                          "order": [],
+                          "limit": 30,
+                          "having": {
+                            "expression": ""
+                          },
+                          "functions": [],
+                          "legend": "{{stage}}"
+                        }
+                      },
+                      {
+                        "type": "builder_formula",
+                        "spec": {
+                          "name": "F1",
+                          "expression": "A / B",
+                          "disabled": false,
+                          "legend": "{{stage}}",
+                          "functions": []
+                        }
                       }
-                    ],
-                    "order": [],
-                    "limit": 30,
-                    "having": {
-                      "expression": ""
-                    },
-                    "functions": [],
-                    "legend": "{{stage}}"
+                    ]
                   }
                 }
               }
@@ -1639,42 +1783,96 @@
             {
               "kind": "time_series",
               "spec": {
-                "name": "A",
+                "name": "F1",
                 "plugin": {
-                  "kind": "signoz/BuilderQuery",
+                  "kind": "signoz/CompositeQuery",
                   "spec": {
-                    "name": "A",
-                    "stepInterval": 60,
-                    "signal": "metrics",
-                    "source": "",
-                    "aggregations": [
+                    "queries": [
                       {
-                        "metricName": "hindsight.operation.duration",
-                        "temporality": "",
-                        "timeAggregation": "avg",
-                        "spaceAggregation": "avg",
-                        "reduceTo": "avg"
-                      }
-                    ],
-                    "disabled": false,
-                    "filter": {
-                      "expression": "service.name IN ('hindsight-importer', 'hindsight-retrieval', 'hindsight-api')"
-                    },
-                    "groupBy": [
+                        "type": "builder_query",
+                        "spec": {
+                          "name": "A",
+                          "stepInterval": 60,
+                          "signal": "metrics",
+                          "source": "",
+                          "aggregations": [
+                            {
+                              "metricName": "hindsight.operation.duration.sum",
+                              "temporality": "Cumulative",
+                              "timeAggregation": "rate",
+                              "spaceAggregation": "sum",
+                              "reduceTo": "avg"
+                            }
+                          ],
+                          "disabled": true,
+                          "filter": {
+                            "expression": "service.name IN ('hindsight-importer', 'hindsight-retrieval', 'hindsight-api')"
+                          },
+                          "groupBy": [
+                            {
+                              "name": "operation",
+                              "signal": "",
+                              "fieldContext": "attribute",
+                              "fieldDataType": "string"
+                            }
+                          ],
+                          "order": [],
+                          "limit": 30,
+                          "having": {
+                            "expression": ""
+                          },
+                          "functions": [],
+                          "legend": "{{operation}}"
+                        }
+                      },
                       {
-                        "name": "operation",
-                        "signal": "",
-                        "fieldContext": "attribute",
-                        "fieldDataType": "string"
+                        "type": "builder_query",
+                        "spec": {
+                          "name": "B",
+                          "stepInterval": 60,
+                          "signal": "metrics",
+                          "source": "",
+                          "aggregations": [
+                            {
+                              "metricName": "hindsight.operation.duration.count",
+                              "temporality": "Cumulative",
+                              "timeAggregation": "rate",
+                              "spaceAggregation": "sum",
+                              "reduceTo": "avg"
+                            }
+                          ],
+                          "disabled": true,
+                          "filter": {
+                            "expression": "service.name IN ('hindsight-importer', 'hindsight-retrieval', 'hindsight-api')"
+                          },
+                          "groupBy": [
+                            {
+                              "name": "operation",
+                              "signal": "",
+                              "fieldContext": "attribute",
+                              "fieldDataType": "string"
+                            }
+                          ],
+                          "order": [],
+                          "limit": 30,
+                          "having": {
+                            "expression": ""
+                          },
+                          "functions": [],
+                          "legend": "{{operation}}"
+                        }
+                      },
+                      {
+                        "type": "builder_formula",
+                        "spec": {
+                          "name": "F1",
+                          "expression": "A / B",
+                          "disabled": false,
+                          "legend": "{{operation}}",
+                          "functions": []
+                        }
                       }
-                    ],
-                    "order": [],
-                    "limit": 30,
-                    "having": {
-                      "expression": ""
-                    },
-                    "functions": [],
-                    "legend": "{{operation}}"
+                    ]
                   }
                 }
               }
@@ -1728,42 +1926,96 @@
             {
               "kind": "time_series",
               "spec": {
-                "name": "A",
+                "name": "F1",
                 "plugin": {
-                  "kind": "signoz/BuilderQuery",
+                  "kind": "signoz/CompositeQuery",
                   "spec": {
-                    "name": "A",
-                    "stepInterval": 60,
-                    "signal": "metrics",
-                    "source": "",
-                    "aggregations": [
+                    "queries": [
                       {
-                        "metricName": "hindsight.llm.duration",
-                        "temporality": "",
-                        "timeAggregation": "avg",
-                        "spaceAggregation": "avg",
-                        "reduceTo": "avg"
-                      }
-                    ],
-                    "disabled": false,
-                    "filter": {
-                      "expression": "service.name IN ('hindsight-importer', 'hindsight-retrieval', 'hindsight-api')"
-                    },
-                    "groupBy": [
+                        "type": "builder_query",
+                        "spec": {
+                          "name": "A",
+                          "stepInterval": 60,
+                          "signal": "metrics",
+                          "source": "",
+                          "aggregations": [
+                            {
+                              "metricName": "hindsight.llm.duration.sum",
+                              "temporality": "Cumulative",
+                              "timeAggregation": "rate",
+                              "spaceAggregation": "sum",
+                              "reduceTo": "avg"
+                            }
+                          ],
+                          "disabled": true,
+                          "filter": {
+                            "expression": "service.name IN ('hindsight-importer', 'hindsight-retrieval', 'hindsight-api')"
+                          },
+                          "groupBy": [
+                            {
+                              "name": "scope",
+                              "signal": "",
+                              "fieldContext": "attribute",
+                              "fieldDataType": "string"
+                            }
+                          ],
+                          "order": [],
+                          "limit": 30,
+                          "having": {
+                            "expression": ""
+                          },
+                          "functions": [],
+                          "legend": "{{scope}}"
+                        }
+                      },
                       {
-                        "name": "scope",
-                        "signal": "",
-                        "fieldContext": "attribute",
-                        "fieldDataType": "string"
+                        "type": "builder_query",
+                        "spec": {
+                          "name": "B",
+                          "stepInterval": 60,
+                          "signal": "metrics",
+                          "source": "",
+                          "aggregations": [
+                            {
+                              "metricName": "hindsight.llm.duration.count",
+                              "temporality": "Cumulative",
+                              "timeAggregation": "rate",
+                              "spaceAggregation": "sum",
+                              "reduceTo": "avg"
+                            }
+                          ],
+                          "disabled": true,
+                          "filter": {
+                            "expression": "service.name IN ('hindsight-importer', 'hindsight-retrieval', 'hindsight-api')"
+                          },
+                          "groupBy": [
+                            {
+                              "name": "scope",
+                              "signal": "",
+                              "fieldContext": "attribute",
+                              "fieldDataType": "string"
+                            }
+                          ],
+                          "order": [],
+                          "limit": 30,
+                          "having": {
+                            "expression": ""
+                          },
+                          "functions": [],
+                          "legend": "{{scope}}"
+                        }
+                      },
+                      {
+                        "type": "builder_formula",
+                        "spec": {
+                          "name": "F1",
+                          "expression": "A / B",
+                          "disabled": false,
+                          "legend": "{{scope}}",
+                          "functions": []
+                        }
                       }
-                    ],
-                    "order": [],
-                    "limit": 30,
-                    "having": {
-                      "expression": ""
-                    },
-                    "functions": [],
-                    "legend": "{{scope}}"
+                    ]
                   }
                 }
               }

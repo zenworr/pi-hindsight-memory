@@ -1,5 +1,6 @@
 """Content-safe OTLP export for the pinned Hindsight Python runtime."""
 import atexit
+from dataclasses import replace
 import logging
 import math
 import os
@@ -22,17 +23,69 @@ def safe_attributes(attributes):
     for key, value in (attributes or {}).items():
         if key in NUMBER_ATTRIBUTES and isinstance(value, (int, float)) and math.isfinite(value):
             result[key] = value
-        elif key in STRING_ATTRIBUTES and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,120}", value):
+        elif key in {"http.request.method", "http.method"} and value in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+            result[key] = value
+        elif key in STRING_ATTRIBUTES - {"http.request.method", "http.method"} and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,120}", value):
             result[key] = value
         elif key == "http.route" and isinstance(value, str):
             result[key] = safe_route(value)
     return result
 
 
+METRIC_ATTRIBUTES = {
+    "operation", "operation_type", "provider", "model", "scope", "status", "budget",
+    "source", "method", "type", "state", "phase", "outcome", "mode", "result",
+}
+
+
+def safe_metric_attributes(attributes):
+    result = safe_attributes(attributes)
+    for key, value in (attributes or {}).items():
+        if key == "method" and value in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"):
+            result[key] = value
+        elif key in METRIC_ATTRIBUTES - {"method"} and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,120}", value):
+            result[key] = value
+        elif key in {"http.target", "endpoint", "route"} and isinstance(value, str):
+            result[key] = safe_route(value)
+        elif key == "success" and value in ("true", "false"):
+            result[key] = value
+        elif key == "token_bucket" and value in ("0-100", "100-500", "500-1k", "1k-5k", "5k-10k", "10k-50k", "50k+"):
+            result[key] = value
+        elif key == "status_code" and isinstance(value, str) and re.fullmatch(r"[1-5][0-9]{2}", value):
+            result[key] = value
+        elif key == "status_class" and value in ("1xx", "2xx", "3xx", "4xx", "5xx"):
+            result[key] = value
+        elif key == "max_tokens" and isinstance(value, str) and re.fullmatch(r"[0-9]{1,6}", value):
+            result[key] = value
+    return result
+
+
+def safe_metrics(metrics_data, resource):
+    resources = []
+    for item in metrics_data.resource_metrics:
+        scopes = []
+        for scope in item.scope_metrics:
+            metrics = []
+            for metric in scope.metrics:
+                points = [replace(point, attributes=safe_metric_attributes(point.attributes), exemplars=[]) for point in metric.data.data_points]
+                metrics.append(replace(metric, data=replace(metric.data, data_points=points)))
+            scopes.append(replace(scope, metrics=metrics))
+        resources.append(replace(item, resource=resource, scope_metrics=scopes))
+    return replace(metrics_data, resource_metrics=resources)
+
+
+ROUTE_SEGMENTS = {
+    "v1", "v2", "default", "banks", "documents", "operations", "mental-models", "entities",
+    "memories", "retain", "recall", "reflect", "stats", "config", "profile", "mission",
+    "strategies", "observations", "consolidate", "health", "version", "metrics", "dry-run",
+    "import", "export", "sync", "tags", "batch", "list", "search", "{id}",
+}
+
+
 def safe_route(route):
     route = route.split("?", 1)[0]
     route = re.sub(r"/(banks|documents|operations|mental-models|entities)/[^/]+", r"/\1/{id}", route)
-    if re.fullmatch(r"[/A-Za-z0-9_{}.-]{1,200}", route):
+    if len(route) <= 200 and all(part in ROUTE_SEGMENTS for part in route.split("/") if part):
         return route
     return "/other"
 
@@ -93,6 +146,12 @@ def initialize():
         return original_export(self, cleaned)
 
     OTLPSpanExporter.export = export
+    original_metric_export = OTLPMetricExporter.export
+
+    def export_metrics(self, metrics_data, *args, **kwargs):
+        return original_metric_export(self, safe_metrics(metrics_data, resource), *args, **kwargs)
+
+    OTLPMetricExporter.export = export_metrics
     original_metrics_init = MeterProvider.__init__
 
     def metrics_init(self, *args, **kwargs):

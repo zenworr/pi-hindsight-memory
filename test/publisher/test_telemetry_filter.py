@@ -1,4 +1,5 @@
 import importlib.util
+from dataclasses import dataclass
 from pathlib import Path
 import unittest
 
@@ -26,6 +27,33 @@ class TelemetryFilterTests(unittest.TestCase):
         self.assertEqual(module.safe_name("chat CANARY"), "hindsight.operation")
         self.assertEqual(module.log_event("CANARY request failed with CANARY"), "Hindsight operation failed")
         self.assertEqual(module.log_event("CANARY_PROMPT"), "Hindsight runtime event")
+
+    def test_metric_payload_is_copied_without_private_labels_or_exemplars(self):
+        @dataclass
+        class Node:
+            resource_metrics: object = None
+            resource: object = None
+            scope_metrics: object = None
+            metrics: object = None
+            data: object = None
+            data_points: object = None
+            attributes: object = None
+            exemplars: object = None
+            value: int = 0
+
+        point = Node(value=7, attributes={"bank_id": "CANARY_BANK", "tenant": "CANARY_TENANT", "password": 123456, "scope": "retain", "success": "true", "token_bucket": "50k+", "http.target": "/banks/CANARY/documents/CANARY"}, exemplars=["CANARY_EXEMPLAR"])
+        payload = Node(resource_metrics=[Node(resource="CANARY_RESOURCE", scope_metrics=[Node(metrics=[Node(data=Node(data_points=[point]))])])])
+        cleaned = module.safe_metrics(payload, "safe-resource")
+        result = cleaned.resource_metrics[0].scope_metrics[0].metrics[0].data.data_points[0]
+        self.assertNotIn("CANARY", str(cleaned))
+        self.assertNotIn("password", result.attributes)
+        self.assertEqual(result.value, 7)
+        self.assertEqual(result.attributes["scope"], "retain")
+        self.assertEqual(result.attributes["token_bucket"], "50k+")
+        self.assertEqual(result.exemplars, [])
+        self.assertEqual(point.exemplars, ["CANARY_EXEMPLAR"])
+        self.assertEqual(module.safe_route("/CANARY_UNKNOWN_PATH"), "/other")
+        self.assertNotIn("http.method", module.safe_attributes({"http.method": "CANARY_METHOD"}))
 
     def test_invalid_attribute_values_fail_closed(self):
         self.assertEqual(module.safe_attributes({"gen_ai.usage.input_tokens": float("nan"), "gen_ai.request.model": "model with CANARY secret", "unknown": "CANARY"}), {})

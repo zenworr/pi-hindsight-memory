@@ -32,6 +32,8 @@ Set `OTEL_SDK_DISABLED=true` to stop telemetry. Remove the endpoint to return to
 - Structured application logs, correlated with the active span.
 - Process RSS, CPU time, and uptime.
 
+The test commands clear inherited OTEL settings and ignore the operator's telemetry file. Telemetry tests use in-memory exporters or a local test receiver, not the production collector.
+
 An independent sample inside the daemon runs every 60 seconds, including while the importer is paused or idle. It uses read-only local state and bounded remote API calls. It reports:
 
 | Metric | Meaning |
@@ -84,6 +86,6 @@ The SDK batches exports with bounded queues and three-second export budgets. Exp
 
 ## SigNoz dashboard
 
-Import [Hindsight Health](../deploy/telemetry/hindsight-health.json) into SigNoz 0.135 or later. The dashboard uses the v6 schema. It shows importer and server health, queue and coverage, feed freshness, consolidation, latency, retries, process use, and database pool use. The panels select Hindsight service names, so other instrumented projects remain separate.
+Import [Hindsight Health](../deploy/telemetry/hindsight-health.json) into SigNoz 0.135 or later. The dashboard uses the v6 schema. It shows importer and server health, queue and coverage, feed freshness, consolidation, latency, retries, process use, and database pool use. The panels select Hindsight service names, so other instrumented projects remain separate. Health values use green for the expected state and red for other values. Health number panels use the last five minutes. Duration panels calculate average latency from histogram sum and count rates. Work and token panels can have no data while idle or before the first operation; do not interpret these gaps as a fault or as proof of health.
 
 For details, open Traces or Logs and filter `service.name` to `hindsight-importer`, `hindsight-retrieval`, or `hindsight-api`. HTTP calls share trace IDs across the client and server. Asynchronous server tasks can have separate traces; do not assume that an HTTP request span covers the whole retain operation.

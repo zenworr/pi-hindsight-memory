@@ -27,9 +27,9 @@
     "check:package": "node scripts/checks/package.mjs",
     "validate": "npm run check && npm run lint && npm run lint:shell && npm run deps:check && npm run check:docs && npm test && npm run check:package",
     "release:check": "npm run validate && npm run deps:audit",
-    "test": "npm run build && node --test dist/test/unit/*.test.js dist/test/integration/*.test.js && npm run test:publisher",
+    "test": "npm run build && node --import ./scripts/checks/test-telemetry.mjs --test dist/test/unit/*.test.js dist/test/integration/*.test.js && npm run test:publisher",
     "test:publisher": "python3 -W error::ResourceWarning -m unittest discover -s test/publisher",
-    "test:unit": "npm run build && node --test dist/test/unit/*.test.js",
+    "test:unit": "npm run build && node --import ./scripts/checks/test-telemetry.mjs --test dist/test/unit/*.test.js",
     "inventory": "node dist/src/importer/cli.js inventory",
     "doctor": "node dist/src/importer/cli.js doctor",
     "prepare": "npm run build",
@@ -57,6 +57,11 @@
     "knip": "6.38.0",
     "typescript": "5.9.3",
     "typescript-eslint": "8.70.1"
+  },
+  "overrides": {
+    "@earendil-works/pi-coding-agent": {
+      "undici": "8.10.2"
+    }
   },
   "repository": {
     "type": "git",
