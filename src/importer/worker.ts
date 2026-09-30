@@ -1,6 +1,6 @@
 import { statfs } from "node:fs/promises";
-import { SpanStatusCode } from "@opentelemetry/api";
-import { inSpan, telemetryCount } from "../common/telemetry.js";
+import { SpanKind } from "@opentelemetry/api";
+import { inSpan, telemetryCount, telemetryQueueWait } from "../common/telemetry.js";
 import { HTTP_STATUS, isRetryableStatus } from "../hindsight/http.js";
 import type { AppConfig, CanonicalSession, CanonicalSessionMetadata, HindsightOperation, ImportApproval, SessionReference } from "../common/types.js";
 import { CANONICAL_SCHEMA, ADAPTER_VERSION, REDACTION_POLICY_VERSION } from "../common/types.js";
@@ -12,7 +12,7 @@ import { assertImportApproval, estimateCostUsd, estimateInputTokens, readApprova
 import { redactText } from "../canonical/redact.js";
 import { Semaphore } from "./scheduler.js";
 import { sleep } from "../common/async.js";
-import { ERROR_MESSAGE_MAX_CHARS } from "../common/limits.js";
+import { ERROR_MESSAGE_MAX_CHARS, MS_PER_SECOND } from "../common/limits.js";
 import type { GenerationRecord, SessionStateRecord } from "./state-db.js";
 import type { StateDatabase } from "./state-db.js";
 import { configuredExclusion } from "./exclusions.js";
@@ -88,16 +88,16 @@ export class ImportWorker {
   private async process(generation: GenerationRecord, shutdownSignal?: AbortSignal): Promise<"completed" | "failed" | "deferred"> {
     return inSpan("hindsight.import.generation", { source: generation.source, "retry.attempt": generation.attemptCount + 1 }, async (span) => {
       const result = await this.processGeneration(generation, shutdownSignal);
-      span?.setAttribute("hindsight.outcome", result);
-      if (result === "failed") span?.setStatus({ code: SpanStatusCode.ERROR });
+      span?.setAttribute("hindsight.result", result);
       telemetryCount("hindsight.import.generations", 1, { source: generation.source, outcome: result });
       return result;
-    });
+    }, SpanKind.INTERNAL, (result) => result === "failed" ? "error" : result === "deferred" ? shutdownSignal?.aborted ? "cancelled" : "incomplete" : "ok");
   }
 
   private async processGeneration(generation: GenerationRecord, shutdownSignal?: AbortSignal): Promise<"completed" | "failed" | "deferred"> {
     if (generation.state === "failed" && generation.attemptCount >= this.config.importer.maxAttempts) return "deferred";
     if (!this.state.claimGeneration(generation)) return "deferred";
+    if (generation.state === "queued" && generation.attemptCount === 0) telemetryQueueWait((Date.now() - Date.parse(generation.queuedAt)) / MS_PER_SECOND, generation.source);
     generation = this.state.getGeneration(generation.source, generation.nativeSessionId, generation.canonicalHash)!;
     const sessionState = this.state.getSession(generation.source, generation.nativeSessionId)!;
     let session: CanonicalSession | undefined;

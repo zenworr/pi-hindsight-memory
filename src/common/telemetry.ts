@@ -29,6 +29,21 @@ const SAFE_LOG_NUMBERS = new Set(["discovered", "queued", "unchanged", "active",
 const active = new AsyncLocalStorage<Span>();
 
 interface Exporters { traceExporter: SpanExporter; metricExporter: PushMetricExporter; logExporter: LogRecordExporter; }
+type Outcome = "ok" | "error" | "cancelled" | "incomplete";
+
+function watchExport<T, R extends { code: number }>(signal: string, send: (batch: T, done: (result: R) => void) => void, health: Map<string, { failures: number; successAt?: number }>) {
+  const state = { failures: 0, successAt: undefined as number | undefined };
+  health.set(signal, state);
+  return (batch: T, done: (result: R) => void) => {
+    try {
+      send(batch, (result) => {
+        if (result.code === 0) state.successAt = Date.now();
+        else state.failures += 1;
+        done(result);
+      });
+    } catch (error) { state.failures += 1; throw error; }
+  };
+}
 
 let runtime: ReturnType<typeof createRuntime> | undefined;
 let users = 0;
@@ -56,14 +71,29 @@ function endpoint(environment: Record<string, string | undefined>, signal: "trac
 
 function createRuntime(service: string, exporters: Exporters, environment: Record<string, string | undefined>) {
   // Keep providers and context private: Pi can host other instrumented extensions.
-  const resource = resourceFromAttributes({ "service.name": environment.OTEL_SERVICE_NAME ?? service, "service.instance.id": `${os.hostname()}:${process.pid}`, "host.name": os.hostname(), "process.runtime.name": "nodejs", "process.runtime.version": process.version });
+  const manifest = JSON.parse(fs.readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { version: string };
+  const deployment = environment.OTEL_DEPLOYMENT_ENVIRONMENT ?? "production";
+  if (!["production", "development", "test"].includes(deployment)) throw new Error("Invalid telemetry environment");
+  const resource = resourceFromAttributes({ "service.name": environment.OTEL_SERVICE_NAME ?? service, "service.version": manifest.version, "deployment.environment.name": deployment, "service.instance.id": `${os.hostname()}:${process.pid}`, "host.name": os.hostname(), "process.runtime.name": "nodejs", "process.runtime.version": process.version });
+  const health = new Map<string, { failures: number; successAt?: number }>();
+  exporters.traceExporter.export = watchExport("traces", exporters.traceExporter.export.bind(exporters.traceExporter), health);
+  exporters.metricExporter.export = watchExport("metrics", exporters.metricExporter.export.bind(exporters.metricExporter), health);
+  exporters.logExporter.export = watchExport("logs", exporters.logExporter.export.bind(exporters.logExporter), health);
   const traces = new BasicTracerProvider({ resource, spanProcessors: [new BatchSpanProcessor(exporters.traceExporter, { maxQueueSize: QUEUE_SIZE, exportTimeoutMillis: EXPORT_TIMEOUT_MS })] });
   const meterProvider = new MeterProvider({ resource, readers: [new PeriodicExportingMetricReader({ exporter: exporters.metricExporter, exportIntervalMillis: EXPORT_INTERVAL_MS, exportTimeoutMillis: EXPORT_TIMEOUT_MS })] });
   const logs = new LoggerProvider({ resource, processors: [new BatchLogRecordProcessor({ exporter: exporters.logExporter, maxQueueSize: QUEUE_SIZE, exportTimeoutMillis: EXPORT_TIMEOUT_MS })] });
   const tracer = traces.getTracer(SCOPE);
   const meter = meterProvider.getMeter(SCOPE);
   const duration = meter.createHistogram("hindsight.stage.duration", { unit: "s", description: "Duration of importer, retrieval, and service-client stages" });
-  const operations = meter.createCounter("hindsight.stage.operations", { description: "Completed stages by outcome" });
+  const operations = meter.createCounter("hindsight.stage.operations", { description: "Finished stage attempts by outcome" });
+  const queueWait = meter.createHistogram("hindsight.import.queue_wait", { unit: "s", description: "Time from queue admission to the first worker attempt; excludes session settling" });
+  meter.createObservableGauge("hindsight.telemetry.heartbeat", { unit: "s" }).addCallback((result) => { result.observe(Date.now() / MS_PER_SECOND); });
+  meter.createObservableCounter("hindsight.telemetry.export_failures").addCallback((result) => {
+    for (const [signal, state] of health) result.observe(state.failures, { signal });
+  });
+  meter.createObservableGauge("hindsight.telemetry.last_success_age", { unit: "s" }).addCallback((result) => {
+    for (const [signal, state] of health) if (state.successAt !== undefined) result.observe((Date.now() - state.successAt) / MS_PER_SECOND, { signal });
+  });
   const gauges = new Map<string, ReturnType<typeof meter.createGauge>>();
   const counters = new Map<string, ReturnType<typeof meter.createCounter>>();
   meter.createObservableGauge("process.memory.usage", { unit: "By" }).addCallback((result) => { result.observe(process.memoryUsage().rss); });
@@ -74,7 +104,7 @@ function createRuntime(service: string, exporters: Exporters, environment: Recor
     result.observe(usage.system / MICROSECONDS_PER_SECOND, { mode: "system" });
   });
   meter.createObservableGauge("process.uptime", { unit: "s" }).addCallback((result) => { result.observe(process.uptime()); });
-  return { traces, meterProvider, logs, tracer, meter, duration, operations, gauges, counters, logger: logs.getLogger(SCOPE) };
+  return { traces, meterProvider, logs, tracer, meter, duration, operations, queueWait, gauges, counters, logger: logs.getLogger(SCOPE) };
 }
 
 export function startTelemetry(service: string, exporters?: Exporters): () => Promise<void> {
@@ -110,23 +140,27 @@ export function startTelemetry(service: string, exporters?: Exporters): () => Pr
   };
 }
 
-export async function inSpan<T>(name: string, attributes: Attributes, work: (span?: Span) => Promise<T>, kind = SpanKind.INTERNAL): Promise<T> {
+export async function inSpan<T>(name: string, attributes: Attributes, work: (span?: Span) => Promise<T>, kind = SpanKind.INTERNAL, resultOutcome?: (result: T) => Outcome): Promise<T> {
   const current = runtime;
   if (!current) return work();
   const parent = active.getStore();
   const span = current.tracer.startSpan(name, { attributes, kind }, parent ? trace.setSpan(ROOT_CONTEXT, parent) : ROOT_CONTEXT);
   const started = performance.now();
-  let outcome = "ok";
+  let outcome: Outcome = "incomplete";
   return active.run(span, async () => {
-    try { return await work(span); }
+    try {
+      const result = await work(span);
+      outcome = resultOutcome?.(result) ?? "ok";
+      return result;
+    }
     catch (error) {
       outcome = error instanceof Error && error.name === "AbortError" ? "cancelled" : "error";
-      span.setAttribute("hindsight.outcome", outcome);
-      span.setStatus({ code: outcome === "cancelled" ? SpanStatusCode.UNSET : SpanStatusCode.ERROR });
       // Error messages and stacks can contain source text, paths, and credentials.
       span.recordException({ name: outcome === "cancelled" ? "AbortError" : "OperationError", message: "Operation did not complete" });
       throw error;
     } finally {
+      span.setAttribute("hindsight.outcome", outcome);
+      if (outcome === "error") span.setStatus({ code: SpanStatusCode.ERROR });
       span.end();
       const labels = { stage: name, outcome };
       current.duration.record((performance.now() - started) / MS_PER_SECOND, labels);
@@ -136,6 +170,10 @@ export async function inSpan<T>(name: string, attributes: Attributes, work: (spa
 }
 
 export function telemetryEnabled(): boolean { return runtime !== undefined; }
+
+export function telemetryQueueWait(seconds: number, source: string): void {
+  if (Number.isFinite(seconds) && seconds >= 0) runtime?.queueWait.record(seconds, { source });
+}
 
 export function traceHeaders(): Record<string, string> {
   const span = active.getStore();

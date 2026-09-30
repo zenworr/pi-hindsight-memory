@@ -20,7 +20,7 @@ OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 
 Use `PI_HINDSIGHT_TELEMETRY_FILE` to select another file. Process environment variables take precedence. A base endpoint gets `/v1/traces`, `/v1/metrics`, and `/v1/logs` appended. You can instead set all three `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` variables to full URLs. URL credentials, queries, and fragments are not supported.
 
-The service names are `hindsight-importer` and `hindsight-retrieval`. `OTEL_SERVICE_NAME` can override the name. The file is read at startup. Restart the importer and fully exit and restart Pi to load the package. Resources start on `session_start`, stop on `session_shutdown`, and restart after reload. The package uses private providers and private asynchronous context. It does not replace another extension's global OpenTelemetry provider.
+The service names are `hindsight-importer` and `hindsight-retrieval`. `OTEL_SERVICE_NAME` can override the name. Resources include the package release version and `deployment.environment.name`. Set `OTEL_DEPLOYMENT_ENVIRONMENT` to `production` (default), `development`, or `test`. The file is read at startup. Restart the importer and fully exit and restart Pi to load the package. Resources start on `session_start`, stop on `session_shutdown`, and restart after reload. The package uses private providers and private asynchronous context. It does not replace another extension's global OpenTelemetry provider.
 
 Set `OTEL_SDK_DISABLED=true` to stop telemetry. Remove the endpoint to return to the default disabled mode.
 
@@ -51,6 +51,10 @@ An independent sample inside the daemon runs every 60 seconds, including while t
 | `hindsight.importer.disk.available` | Free bytes on the state filesystem |
 | `hindsight.stage.duration`, `.operations` | Stage duration histogram and outcome counter |
 | `hindsight.import.generations` | Generation results by source and outcome |
+| `hindsight.import.queue_wait` | Seconds from queue admission to the first worker attempt; excludes settling and execution |
+| `hindsight.telemetry.heartbeat` | Current Unix time, sampled by the metric reader even while idle |
+| `hindsight.telemetry.export_failures` | Cumulative failed export batches, labelled by signal |
+| `hindsight.telemetry.last_success_age` | Seconds since the last successful export, labelled by signal; omitted until the first success |
 | `hindsight.http.responses`, `.retries` | HTTP responses and retries |
 | `hindsight.scan.sessions` | Scan results by outcome |
 | `hindsight.memory.searches`, `.results` | Search outcomes and result counts |
@@ -61,7 +65,7 @@ Retained historical Hindsight failure records do not count as current health fai
 
 Hindsight 0.9.2 has native operation and LLM spans, FastAPI trace-context propagation, and metrics for LLM calls, HTTP requests, operations, process use, and the database pool. Its normal tracing also includes prompts and completions. Do not enable that exporter without the content filter.
 
-The optional [Compose override](../deploy/telemetry/compose.yaml) mounts [sitecustomize.py](../deploy/telemetry/sitecustomize.py) into the pinned Python runtime. It filters native traces before export, adds an OTLP metric reader alongside the existing Prometheus reader, and exports content-safe Python logs. It does not change the Hindsight image, database, provider, bank, or evidence policy.
+The optional [Compose override](../deploy/telemetry/compose.yaml) mounts [sitecustomize.py](../deploy/telemetry/sitecustomize.py) into the pinned Python runtime. It filters span names, attributes, events, links, status descriptions, and metric labels before SDK storage. The export filter remains as a second check. It adds an OTLP metric reader alongside the existing Prometheus reader and exports content-safe Python logs. Both metric readers receive the filtered labels; numeric measurements are preserved. It does not change the Hindsight image, database, provider, bank, or evidence policy.
 
 Add the OTLP base endpoint to the private Compose environment, then include the override after your normal files. Keep any provider-specific local override:
 
@@ -79,6 +83,8 @@ Omit `compose.local.yaml` if it does not exist. Stop the importer and let remote
 This adapter is tested against the pinned Hindsight 0.9.2 Python SDK. Test it again before an image upgrade. If initialization fails, it disables native trace export to prevent content leakage. Remove the telemetry override and recreate only the app to roll back.
 
 ## Privacy and failure behavior
+
+Stages report `ok`, `error`, `cancelled`, or `incomplete`. Handled failures and deferred work retain their real outcome in both spans and counters.
 
 No session text, search query, recall result, prompt, completion, source path, session ID, API token, authorization header, error message, or stack trace is exported. Routes use ID placeholders. Server span events and links are removed. Server logs use known operational event categories instead of raw messages. Original diagnostic logs remain local. Log labels and metric labels use bounded operational values, not session or document identifiers.
 
@@ -104,6 +110,14 @@ scripts/telemetry-dashboard.sh plan -detailed-exitcode
 
 The last command must report no changes. `prevent_destroy` protects the dashboard from replacement. The wrapper keeps per-project state under `$XDG_STATE_HOME/pi-hindsight-memory/signoz` (default `~/.local/state/pi-hindsight-memory/signoz`) and provider data under `$XDG_CACHE_HOME/pi-hindsight-memory/signoz-terraform`. These directories have mode 0700. State and backup files have mode 0600. Retain the protected state backup when moving management to another host. Never reuse another project's state. Commit the dependency lock file, not state, plans, credentials, or caches.
 
-The mock-provider test verifies schema, identity, query references, service filters, and layout without credentials. This is not a live-data check. After apply, run every stored query with the authenticated V5 query API and inspect errors, warnings, timestamps, and numeric samples. Verify stored traces, metrics, and logs separately. A quiet retry or token panel is not a fault. Do not restart an application for a dashboard-only change.
+Terraform also manages two missing-data rules, for the always-on production importer and Hindsight API. They evaluate each minute: a two-minute heartbeat window must be empty for three minutes before alerting, about five to six minutes after the last sample. Pi retrieval is not continuously running and has no such rule. These rules do not change the desktop-feed age limit. Alerts appear in SigNoz; delivery outside SigNoz requires an operator-configured notification channel.
+
+The mock-provider test verifies schema, identity, query references, service filters, layout, and missing-data rules without credentials. This is not a live-data check. After apply, run every stored query with the authenticated V5 query API and inspect errors, warnings, timestamps, and numeric samples. Verify stored traces, metrics, and logs separately. A quiet retry or token panel is not a fault. Do not restart an application for a dashboard-only change.
+
+### Runtime checks
+
+Run `scripts/checks/telemetry-sdk.py` with the pinned Python SDK `1.44.0` and OTLP HTTP exporter `1.44.0`, or inside the pinned Hindsight image with its argument set to the shim path. CI uses an isolated virtual environment. This checks SDK buffers before export, parent/child context, numeric metrics, and private-field removal without provider calls.
+
+After `npm run build`, run `node --import ./scripts/checks/test-telemetry.mjs scripts/checks/telemetry-overhead.mjs disabled` and repeat with `enabled`. The temporary 100-session workflow uses mocked remote operations and discard exporters. Python SDK hot-path checks use `scripts/checks/telemetry-overhead.py disabled` and `enabled` in the isolated SDK environment. Compare repeated runs. Measurements exclude initialization and shutdown; they do not represent remote-provider latency or collector network cost. Do not make a timing threshold a flaky CI gate.
 
 For details, open Traces or Logs and filter `service.name` to `hindsight-importer`, `hindsight-retrieval`, or `hindsight-api`. HTTP calls share trace IDs across the client and server. Asynchronous server tasks can have separate traces; do not assume that an HTTP request span covers the whole retain operation.

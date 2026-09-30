@@ -43,6 +43,8 @@ test("telemetry has nested spans, correlated safe logs, metrics, and no global p
     const spans = e.traceExporter.getFinishedSpans();
     const parent = spans.find((span) => span.name === "cycle")!;
     assert.equal(spans.length, 3);
+    assert.match(parent.resource.attributes["service.version"] as string, /^\d+\.\d+\.\d+$/);
+    assert.equal(parent.resource.attributes["deployment.environment.name"], "production");
     for (const child of spans.filter((span) => span.name === "normalize")) assert.equal(child.parentSpanContext?.spanId, parent.spanContext().spanId);
     const logs = e.logExporter.getFinishedLogRecords().filter((record) => record.body === "Imported session");
     assert.equal(logs.length, 2);
@@ -65,12 +67,16 @@ test("HTTP propagation excludes request bodies, identifiers, query strings, and 
   try {
     await inSpan("search", {}, async () => { await client.requestJson("POST", "http://example.test/v1/default/banks/CANARY_BANK/memories/recall?query=CANARY_QUERY", { query: "CANARY_QUERY" }); });
     await assert.rejects(inSpan("failure", {}, async () => { throw new Error("CANARY_SECRET /private/file"); }));
+    const rejected = new HindsightClient(config, async () => new Response("CANARY_ERROR", { status: 429 }), "CANARY_TOKEN");
+    await assert.rejects(rejected.requestJson("GET", "http://example.test/v1/default/banks/CANARY_BANK/stats"));
     await stop();
     assert.match((requests[0]!.headers as Record<string, string>).traceparent!, /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
     const spans = e.traceExporter.getFinishedSpans();
     assert.doesNotMatch(JSON.stringify(spans.map(({ name, attributes, events, status }) => ({ name, attributes, events, status }))), /CANARY|private\/file/);
     assert.equal(spans.find((span) => span.name === "failure")?.status.code, SpanStatusCode.ERROR);
     assert.equal(spans.find((span) => span.name === "hindsight.http.attempt")?.attributes["http.route"], "/banks/{bank}/memories/recall");
+    const rejectedSpan = spans.find((span) => span.attributes["http.response.status_code"] === 429)!;
+    assert.equal(rejectedSpan.attributes["hindsight.outcome"], "error");
   } finally { await stop(); restore(); }
 });
 
@@ -92,6 +98,42 @@ test("telemetry is optional, reference-counted, and can restart after reload", a
     assert.equal(await inSpan("disabled", {}, () => Promise.resolve(42)), 42);
     await invalid();
   } finally { restore(); }
+});
+
+test("handled failure, cancellation, and unfinished work have truthful stage counts", async () => {
+  const restore = enabled(); const e = exporters(); const stop = startTelemetry("hindsight-test", e);
+  try {
+    for (const outcome of ["ok", "error", "cancelled", "incomplete"] as const) {
+      assert.equal(await inSpan(`handled.${outcome}`, {}, () => Promise.resolve(outcome), undefined, (result) => result), outcome);
+    }
+    await stop();
+    const spans = e.traceExporter.getFinishedSpans().filter((span) => span.name.startsWith("handled."));
+    for (const span of spans) {
+      const outcome = span.name.split(".")[1];
+      assert.equal(span.attributes["hindsight.outcome"], outcome);
+      assert.equal(span.status.code, outcome === "error" ? SpanStatusCode.ERROR : SpanStatusCode.UNSET);
+    }
+    const metrics = e.metricExporter.getMetrics().flatMap((resource) => resource.scopeMetrics.flatMap((scope) => scope.metrics));
+    const counts = metrics.find((metric) => metric.descriptor.name === "hindsight.stage.operations")!;
+    assert.deepEqual(counts.dataPoints.map((point) => point.attributes.outcome).sort(), ["cancelled", "error", "incomplete", "ok"]);
+  } finally { await stop(); restore(); }
+});
+
+test("export health records failed batches without exposing exporter errors", async () => {
+  const restore = enabled(); const e = exporters();
+  e.traceExporter.export = (_spans, done) => { done({ code: 1, error: new Error("CANARY_COLLECTOR_SECRET") }); };
+  const stop = startTelemetry("hindsight-test", e);
+  try {
+    e.traceExporter.export([], () => undefined);
+    await inSpan("work", {}, () => Promise.resolve(42));
+    await stop();
+    const resources = e.metricExporter.getMetrics();
+    const metrics = resources.flatMap((resource) => resource.scopeMetrics.flatMap((scope) => scope.metrics));
+    const failures = metrics.find((metric) => metric.descriptor.name === "hindsight.telemetry.export_failures")!;
+    assert.ok(failures.dataPoints.some((point) => point.attributes.signal === "traces" && Number(point.value) >= 1));
+    assert.ok(metrics.some((metric) => metric.descriptor.name === "hindsight.telemetry.heartbeat"));
+    assert.doesNotMatch(JSON.stringify(resources), /CANARY/);
+  } finally { await stop(); restore(); }
 });
 
 test("collector failure does not fail application work or shutdown", async () => {

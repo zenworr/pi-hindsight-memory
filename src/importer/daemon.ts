@@ -21,7 +21,7 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
 const DAEMON_TICK_MS = 1_000;
 
 export async function runImportCycle(config: AppConfig, state: StateDatabase, client: HindsightClient, logger = new Logger("importer"), signal?: AbortSignal, scanFirst = true): Promise<{ scan?: Awaited<ReturnType<typeof scan>>; worker: Awaited<ReturnType<ImportWorker["runOnce"]>> }> {
-  return inSpan("hindsight.import.cycle", { "hindsight.scan.enabled": scanFirst }, () => runCycle(config, state, client, logger, signal, scanFirst));
+  return inSpan("hindsight.import.cycle", { "hindsight.scan.enabled": scanFirst }, () => runCycle(config, state, client, logger, signal, scanFirst), undefined, (result) => result.worker.failed || result.scan?.errors ? "error" : result.worker.deferred ? signal?.aborted ? "cancelled" : "incomplete" : "ok");
 }
 
 async function runCycle(config: AppConfig, state: StateDatabase, client: HindsightClient, logger: Logger, signal: AbortSignal | undefined, scanFirst: boolean): ReturnType<typeof runImportCycle> {

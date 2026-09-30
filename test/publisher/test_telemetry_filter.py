@@ -55,6 +55,58 @@ class TelemetryFilterTests(unittest.TestCase):
         self.assertEqual(module.safe_route("/CANARY_UNKNOWN_PATH"), "/other")
         self.assertNotIn("http.method", module.safe_attributes({"http.method": "CANARY_METHOD"}))
 
+    def test_filter_runs_before_sdk_storage(self):
+        class Status:
+            def __init__(self, status_code, description=None):
+                self.status_code, self.description = status_code, description
+
+        class Span:
+            def __init__(self):
+                self.attributes, self.events = {}, []
+            def set_attribute(self, key, value):
+                self.attributes[key] = value
+            def set_attributes(self, attributes):
+                self.attributes.update(attributes)
+            def update_name(self, name):
+                self.name = name
+            def set_status(self, status):
+                self.status = status
+            def add_event(self, name, attributes=None):
+                self.events.append((name, attributes))
+            def record_exception(self, error):
+                self.events.append(str(error))
+
+        class Tracer:
+            def start_span(self, name, **options):
+                self.received = {"name": name, **options}
+                return Span()
+
+        @dataclass
+        class Measurement:
+            value: float
+            time_unix_nano: int
+            instrument: object
+            context: object
+            attributes: object = None
+
+        module.install_sdk_filters(Tracer, Span, Measurement, Status)
+        tracer = Tracer()
+        span = tracer.start_span("chat CANARY", attributes={"gen_ai.input.messages": "CANARY", "gen_ai.usage.input_tokens": 7}, links=["CANARY"])
+        self.assertNotIn("CANARY", str(tracer.received))
+        span.set_attribute("gen_ai.output.messages", "CANARY")
+        span.set_attributes({"password": "CANARY", "http.response.status_code": 200})
+        span.update_name("CANARY")
+        span.set_status(Status(2, "CANARY"))
+        span.add_event("CANARY")
+        span.record_exception(RuntimeError("CANARY"))
+        self.assertNotIn("CANARY", str(vars(span)))
+        self.assertEqual(span.attributes, {"http.response.status_code": 200})
+        self.assertIsNone(span.status.description)
+        self.assertEqual(span.events, [])
+        point = Measurement(42, 1, None, None, {"bank_id": "CANARY", "scope": "retain"})
+        self.assertEqual(point.value, 42)
+        self.assertEqual(point.attributes, {"scope": "retain"})
+
     def test_invalid_attribute_values_fail_closed(self):
         self.assertEqual(module.safe_attributes({"gen_ai.usage.input_tokens": float("nan"), "gen_ai.request.model": "model with CANARY secret", "unknown": "CANARY"}), {})
 

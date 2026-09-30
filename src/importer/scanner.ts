@@ -1,5 +1,4 @@
 import fs from "node:fs/promises";
-import { SpanStatusCode } from "@opentelemetry/api";
 import { inSpan, telemetryCount } from "../common/telemetry.js";
 import { MS_PER_SECOND } from "../common/limits.js";
 
@@ -67,10 +66,9 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
   return inSpan("hindsight.scan", { "hindsight.scan.forced": options.force === true, "hindsight.scan.index_only": options.indexOnly === true }, async (span) => {
     const result = await scanSources(config, state, options);
     span?.setAttributes({ "hindsight.scan.discovered": result.discovered, "hindsight.scan.queued": result.queued, "hindsight.scan.errors": result.errors });
-    if (result.errors > 0) span?.setStatus({ code: SpanStatusCode.ERROR });
     for (const outcome of ["discovered", "queued", "unchanged", "active", "empty", "errors", "sourceMissing", "excluded", "configured", "ambiguous"] as const) telemetryCount("hindsight.scan.sessions", result[outcome], { outcome });
     return result;
-  });
+  }, undefined, (result) => result.errors > 0 ? "error" : "ok");
 }
 
 async function scanSources(config: AppConfig, state: StateDatabase, options: ScanOptions): Promise<ScanSummary> {

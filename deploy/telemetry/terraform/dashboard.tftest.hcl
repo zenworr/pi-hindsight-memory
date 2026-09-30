@@ -30,4 +30,12 @@ run "dashboard_contract" {
     ]]))
     error_message = "Layout references must select catalog panels and fit the grid."
   }
+  assert {
+    condition = alltrue([for service, rule in signoz_rule.telemetry_missing : (
+      rule.condition.alert_on_absent && rule.condition.absent_for == 3 &&
+      strcontains(rule.condition.composite_query.queries[0].builder_query.spec.metrics.filter.expression, service) &&
+      strcontains(rule.condition.composite_query.queries[0].builder_query.spec.metrics.filter.expression, "production")
+    )]) && length(signoz_rule.telemetry_missing) == 2
+    error_message = "Missing-data rules must cover only the two always-on production services."
+  }
 }

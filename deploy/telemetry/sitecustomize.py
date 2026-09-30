@@ -6,6 +6,7 @@ import math
 import os
 import re
 import socket
+import time
 
 STRING_ATTRIBUTES = {
     "http.request.method", "http.method", "gen_ai.operation.name", "gen_ai.provider.name",
@@ -34,7 +35,7 @@ def safe_attributes(attributes):
 
 METRIC_ATTRIBUTES = {
     "operation", "operation_type", "provider", "model", "scope", "status", "budget",
-    "source", "method", "type", "state", "phase", "outcome", "mode", "result",
+    "source", "method", "type", "state", "phase", "outcome", "mode", "result", "signal",
 }
 
 
@@ -113,9 +114,52 @@ def log_event(message):
     return "Hindsight runtime event"
 
 
+def install_sdk_filters(tracer, span, measurement, status_type):
+    original_start = tracer.start_span
+    original_set = span.set_attribute
+    original_sets = span.set_attributes
+    original_name = span.update_name
+    original_status = span.set_status
+    original_measurement = measurement.__init__
+
+    def start(self, name, context=None, kind=None, attributes=None, links=(), start_time=None, record_exception=True, set_status_on_exception=True):
+        options = dict(context=context, attributes=safe_attributes(attributes), links=(), start_time=start_time,
+                       record_exception=record_exception, set_status_on_exception=set_status_on_exception)
+        if kind is not None:
+            options["kind"] = kind
+        return original_start(self, safe_name(name), **options)
+
+    def set_attribute(self, key, value):
+        for safe_key, safe_value in safe_attributes({key: value}).items():
+            original_set(self, safe_key, safe_value)
+
+    def set_attributes(self, attributes):
+        return original_sets(self, safe_attributes(attributes))
+
+    def update_name(self, name):
+        return original_name(self, safe_name(name))
+
+    def set_status(self, status, description=None):
+        return original_status(self, status_type(status.status_code) if hasattr(status, "status_code") else status)
+
+    def measure(self, value, time_unix_nano, instrument, context, attributes=None):
+        return original_measurement(self, value, time_unix_nano, instrument, context, safe_metric_attributes(attributes))
+
+    tracer.start_span = start
+    span.set_attribute = set_attribute
+    span.set_attributes = set_attributes
+    span.update_name = update_name
+    span.set_status = set_status
+    span.add_event = lambda *args, **kwargs: None
+    span.record_exception = lambda *args, **kwargs: None
+    measurement.__init__ = measure
+
+
 def initialize():
     from opentelemetry.sdk.resources import Resource
-    from opentelemetry.sdk.trace import ReadableSpan
+    from opentelemetry.sdk.trace import ReadableSpan, Tracer, Span
+    from opentelemetry.sdk.metrics._internal.measurement import Measurement
+    from opentelemetry.metrics import Observation
     from opentelemetry.trace import Status
     from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
     from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
@@ -133,6 +177,21 @@ def initialize():
         "host.name": os.getenv("HINDSIGHT_OTEL_HOST_NAME", socket.gethostname()),
         "deployment.environment.name": "production",
     })
+    install_sdk_filters(Tracer, Span, Measurement, Status)
+    health = {signal: {"failures": 0, "success_at": None} for signal in ("traces", "metrics", "logs")}
+
+    def observed_export(signal, send, *args, **kwargs):
+        try:
+            result = send(*args, **kwargs)
+            if result.name == "SUCCESS":
+                health[signal]["success_at"] = time.time()
+            else:
+                health[signal]["failures"] += 1
+            return result
+        except Exception:
+            health[signal]["failures"] += 1
+            raise
+
     original_export = OTLPSpanExporter.export
 
     def export(self, spans):
@@ -143,13 +202,13 @@ def initialize():
             start_time=span.start_time, end_time=span.end_time,
             instrumentation_scope=span.instrumentation_scope,
         ) for span in spans]
-        return original_export(self, cleaned)
+        return observed_export("traces", original_export, self, cleaned)
 
     OTLPSpanExporter.export = export
     original_metric_export = OTLPMetricExporter.export
 
     def export_metrics(self, metrics_data, *args, **kwargs):
-        return original_metric_export(self, safe_metrics(metrics_data, resource), *args, **kwargs)
+        return observed_export("metrics", original_metric_export, self, safe_metrics(metrics_data, resource), *args, **kwargs)
 
     OTLPMetricExporter.export = export_metrics
     original_metrics_init = MeterProvider.__init__
@@ -164,8 +223,18 @@ def initialize():
         kwargs["metric_readers"] = readers
         kwargs["resource"] = resource
         original_metrics_init(self, *args, **kwargs)
+        meter = self.get_meter("pi-hindsight-memory")
+        meter.create_observable_gauge("hindsight.telemetry.heartbeat", unit="s", callbacks=[lambda _: [Observation(time.time())]])
+        meter.create_observable_counter("hindsight.telemetry.export_failures", callbacks=[lambda _: [Observation(state["failures"], {"signal": signal}) for signal, state in health.items()]])
+        meter.create_observable_gauge("hindsight.telemetry.last_success_age", unit="s", callbacks=[lambda _: [Observation(time.time() - state["success_at"], {"signal": signal}) for signal, state in health.items() if state["success_at"] is not None]])
 
     MeterProvider.__init__ = metrics_init
+    original_log_export = OTLPLogExporter.export
+
+    def export_logs(self, records):
+        return observed_export("logs", original_log_export, self, records)
+
+    OTLPLogExporter.export = export_logs
     provider = LoggerProvider(resource=resource)
     provider.add_log_record_processor(BatchLogRecordProcessor(
         OTLPLogExporter(endpoint=endpoint + "/v1/logs", timeout=3),
@@ -187,7 +256,9 @@ def initialize():
     atexit.register(provider.shutdown)
 
 
-if os.getenv("HINDSIGHT_OTEL_ADAPTER_ENABLED") == "1":
+if os.getenv("OTEL_SDK_DISABLED") == "true":
+    os.environ["HINDSIGHT_API_OTEL_TRACES_ENABLED"] = "false"
+elif os.getenv("HINDSIGHT_OTEL_ADAPTER_ENABLED") == "1":
     try:
         initialize()
     except Exception:

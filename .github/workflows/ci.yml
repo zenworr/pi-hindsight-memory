@@ -25,6 +25,11 @@ jobs:
           terraform_version: 1.16.4
           terraform_wrapper: false
       - run: scripts/telemetry-dashboard.sh validate
+      - name: Check the pinned Python telemetry SDK
+        run: |
+          python3 -m venv "$RUNNER_TEMP/hindsight-telemetry-sdk"
+          "$RUNNER_TEMP/hindsight-telemetry-sdk/bin/pip" install opentelemetry-sdk==1.44.0 opentelemetry-exporter-otlp-proto-http==1.44.0
+          "$RUNNER_TEMP/hindsight-telemetry-sdk/bin/python" scripts/checks/telemetry-sdk.py
       - run: npm ci
       - run: npm run lint
       - run: npm run lint:shell

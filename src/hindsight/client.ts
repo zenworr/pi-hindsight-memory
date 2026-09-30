@@ -9,7 +9,7 @@ import { sleep } from "../common/async.js";
 import { MS_PER_SECOND, CHARS_PER_ESTIMATED_TOKEN } from "../common/limits.js";
 import { HTTP_STATUS, isRetryableStatus } from "./http.js";
 import { inSpan, telemetryCount, traceHeaders } from "../common/telemetry.js";
-import { SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { SpanKind } from "@opentelemetry/api";
 
 const RETRY_BACKOFF_FACTOR = 2;
 const RATE_LIMIT_FALLBACK_DELAY_MS = 1_000;
@@ -136,10 +136,9 @@ export class HindsightClient {
           Object.assign(headers, traceHeaders());
           const result = await this.fetcher(url, request);
           span?.setAttribute("http.response.status_code", result.status);
-          if (!result.ok) span?.setStatus({ code: SpanStatusCode.ERROR });
           telemetryCount("hindsight.http.responses", 1, { method, route: this.route(url), status: result.status });
           return result;
-        }, SpanKind.CLIENT);
+        }, SpanKind.CLIENT, (result) => result.ok ? "ok" : "error");
       } catch (error) {
         if (attempt + 1 < this.config.httpMaxAttempts && !signal?.aborted && Date.now() < deadline) {
           telemetryCount("hindsight.http.retries", 1, { reason: "transport" });
