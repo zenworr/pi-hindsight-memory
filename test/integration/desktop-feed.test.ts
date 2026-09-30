@@ -20,7 +20,10 @@ async function first<T>(values: AsyncIterable<T>): Promise<T | undefined> {
   return undefined;
 }
 
-test("desktop feed age is reported even when importer scans still succeed", () => {
+test("desktop feed age is reported even when importer scans still succeed", (t) => {
+  const now = Date.parse("2026-01-01T00:00:00Z");
+  t.mock.method(Date, "now", () => now);
+  assert.equal(defaultConfig(os.tmpdir()).desktopFeed.maxAgeSeconds, 48 * 60 * 60);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-feed-age-"));
   const state = new StateDatabase(path.join(root, "state.sqlite3"));
   try {
@@ -32,7 +35,13 @@ test("desktop feed age is reported even when importer scans still succeed", () =
     assert.equal(importerHealth(config, state.db).desktopFeedStale, true);
     fs.writeFileSync(path.join(feed, "manifest.json"), JSON.stringify({ completedAt: new Date(Date.now() - HOUR_MS).toISOString() }));
     assert.equal(importerHealth(config, state.db).desktopFeedStale, false);
-    fs.writeFileSync(path.join(feed, "manifest.json"), JSON.stringify({ completedAt: new Date().toISOString() }));
+    for (const hours of [4, 24, 48]) {
+      fs.writeFileSync(path.join(feed, "manifest.json"), JSON.stringify({ completedAt: new Date(now - hours * HOUR_MS).toISOString() }));
+      assert.equal(importerHealth(config, state.db).desktopFeedStale, false);
+    }
+    fs.writeFileSync(path.join(feed, "manifest.json"), JSON.stringify({ completedAt: new Date(now - 48 * HOUR_MS - 1000).toISOString() }));
+    assert.equal(importerHealth(config, state.db).desktopFeedStale, true);
+    config.desktopFeed.maxAgeSeconds = 72 * 60 * 60;
     assert.equal(importerHealth(config, state.db).desktopFeedStale, false);
     fs.unlinkSync(path.join(feed, "manifest.json"));
     assert.equal(importerHealth(config, state.db).desktopFeedStale, true);

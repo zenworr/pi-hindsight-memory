@@ -50,6 +50,10 @@ A small file is sufficient. Omitted settings retain their defaults.
 }
 ```
 
+## Desktop history feed
+
+`desktopFeed.maxAgeSeconds` defaults to `172800` (48 hours). An enabled feed is reported as stale only when its last completed snapshot is older than this limit. A missing or unreadable snapshot manifest is reported as unavailable immediately. Turning off the desktop does not remove previously imported history.
+
 ## Import settings
 
 | Key | Default | Purpose |
