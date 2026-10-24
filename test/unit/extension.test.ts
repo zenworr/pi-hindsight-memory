@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { StateDatabase } from "../../src/importer/state-db.js";
 import { defaultConfig } from "../../src/common/config.js";
 import { HindsightClient } from "../../src/hindsight/client.js";
@@ -105,7 +106,12 @@ test("status provider exposes queue and service health without secrets", async (
     },
     async listOperations() { return [{ id: "op-1", status: "processing", task_type: "consolidation" }]; },
   } as unknown as HindsightClient;
-  const direct = await collectHindsightStatus(config, statusClient);
+  const prepare = Object.getOwnPropertyDescriptor(DatabaseSync.prototype, "prepare")!;
+  let direct: HindsightStatusSnapshotV1;
+  try {
+    DatabaseSync.prototype.prepare = () => { throw new Error("Status query ran on Pi's thread"); };
+    direct = await collectHindsightStatus(config, statusClient);
+  } finally { Object.defineProperty(DatabaseSync.prototype, "prepare", prepare); }
   assert.deepEqual([direct.importer.queued, direct.importer.submitted, direct.importer.processing, direct.importer.failed, direct.importer.cleanupPending], [2, 1, 3, 4, 5]);
   assert.equal(direct.importer.running, true);
   assert.equal(direct.importer.scanErrors, 0);
@@ -152,6 +158,13 @@ test("status provider exposes queue and service health without secrets", async (
   assert.equal(removed, true);
   state.close();
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test("importer status workers have a bounded timeout", async () => {
+  const config = defaultConfig("/nonexistent/status-timeout-test");
+  config.hindsight.statusTimeoutMs = 1;
+  const snapshot = await collectHindsightStatus(config, client({ status: "healthy", database: "connected" }));
+  assert.ok(snapshot.issues.some((issue) => issue.includes("Importer status timed out")));
 });
 
 test("empty memory search queries fail before contacting Hindsight", async () => {

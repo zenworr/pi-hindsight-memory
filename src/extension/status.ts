@@ -1,11 +1,10 @@
-import { DatabaseSync } from "node:sqlite";
-import { generationCounts } from "../importer/state-db.js";
+import { Worker } from "node:worker_threads";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AppConfig, HindsightBankStats, HindsightOperation } from "../common/types.js";
 import { errorMessage } from "../common/logging.js";
 import { ERROR_MESSAGE_MAX_CHARS } from "../common/limits.js";
 import { HindsightClient } from "../hindsight/client.js";
-import { importerHealth, type ImporterHealth } from "../importer/health.js";
+import type { ImporterHealth } from "../importer/health.js";
 import { redactText } from "../canonical/redact.js";
 
 export const HINDSIGHT_STATUS_REQUEST_EVENT = "pi-hindsight-memory:status:request:v1";
@@ -52,13 +51,17 @@ function isStatusRequest(value: unknown): value is HindsightStatusRequestV1 {
   return request.protocolVersion === 1 && typeof request.respond === "function";
 }
 
-function importerStatus(config: AppConfig): HindsightStatusSnapshotV1["importer"] {
-  const db = new DatabaseSync(config.stateDatabase, { readOnly: true, timeout: 500 });
-  try {
-    db.exec("BEGIN");
-    const counts = generationCounts(db);
-    return { queued: counts.queued ?? 0, submitted: counts.submitted ?? 0, processing: counts.processing ?? 0, failed: counts.failed ?? 0, cleanupPending: counts.cleanup_pending ?? 0, ...importerHealth(config, db) };
-  } finally { db.close(); }
+function importerStatus(config: AppConfig): Promise<HindsightStatusSnapshotV1["importer"]> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./status-worker.js", import.meta.url), { workerData: config });
+    const timer = setTimeout(() => {
+      void worker.terminate();
+      reject(new Error("Importer status timed out"));
+    }, config.hindsight.statusTimeoutMs);
+    worker.once("message", resolve);
+    worker.once("error", reject);
+    worker.once("exit", () => { clearTimeout(timer); });
+  });
 }
 
 function serviceStatus(health: Record<string, unknown>, stats: HindsightBankStats, operations: HindsightOperation[]): HindsightStatusSnapshotV1["service"] {
@@ -97,7 +100,7 @@ export async function collectHindsightStatus(
 
   const signal = AbortSignal.timeout(config.hindsight.statusTimeoutMs);
   const [importerResult, serviceResult] = await Promise.allSettled([
-    Promise.resolve().then(() => importerStatus(config)),
+    importerStatus(config),
     Promise.all([client.health(signal), client.getBankStats(signal), client.listOperations("processing", signal)]),
   ]);
   if (importerResult.status === "fulfilled") {
