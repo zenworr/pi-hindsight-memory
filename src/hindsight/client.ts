@@ -178,7 +178,7 @@ export class HindsightClient {
 
   async ensureBank(signal?: AbortSignal): Promise<void> {
     if (this.bankEnsured) return;
-    const url = this.bankUrl("/profile");
+    const url = this.bankUrl("/config");
     try { await this.requestJson("GET", url, undefined, signal); this.bankEnsured = true; return; }
     catch (error) {
       if (!(error instanceof HindsightHttpError) || error.status !== HTTP_STATUS.NOT_FOUND) throw error;

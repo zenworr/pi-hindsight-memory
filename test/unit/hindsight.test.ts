@@ -38,10 +38,32 @@ test("ensureBank creates a missing bank with PUT at the documented endpoint", as
     return requests.length === 1 ? jsonResponse({ detail: "not found" }, 404) : jsonResponse({ bank_id: "coding-history" });
   }, "token");
   await client.ensureBank();
-  assert.equal(requests[0]?.url.endsWith("/banks/coding-history/profile"), true);
+  assert.equal(requests[0]?.url.endsWith("/banks/coding-history/config"), true);
   assert.equal(requests[1]?.method, "PUT");
   assert.equal(requests[1]?.url.endsWith("/banks/coding-history"), true);
   assert.deepEqual(JSON.parse(requests[1]?.body ?? "{}"), { name: "coding-history" });
+});
+
+test("ensureBank checks configuration once without calling the removed profile endpoint", async () => {
+  const requests: string[] = [];
+  const client = new HindsightClient(config(), async (url, request) => {
+    requests.push(`${request?.method} ${String(url)}`);
+    if (String(url).endsWith("/profile")) return jsonResponse({ detail: "removed" }, 410);
+    return jsonResponse({ bank_id: "coding-history", config: {}, overrides: {} });
+  }, "token");
+  await client.ensureBank();
+  await client.ensureBank();
+  assert.deepEqual(requests, ["GET http://127.0.0.1:8888/v1/default/banks/coding-history/config"]);
+});
+
+test("ensureBank does not create a bank when its configuration read is unauthorized", async () => {
+  let calls = 0;
+  const client = new HindsightClient(config(), async () => {
+    calls++;
+    return jsonResponse({ detail: "unauthorized" }, 401);
+  }, "token");
+  await assert.rejects(() => client.ensureBank(), /HTTP 401/);
+  assert.equal(calls, 1);
 });
 
 test("operation listing filters by status and follows pagination", async () => {
@@ -73,7 +95,7 @@ test("configuration and retain use the v0.9.2 request envelopes", async () => {
   await client.updateBankConfig({ enable_auto_consolidation: false });
   const order = requests.map((item) => `${item.method} ${item.url.split("/v1")[1]}`);
   assert.deepEqual(order.slice(0, 3), [
-    "GET /default/banks/coding-history/profile",
+    "GET /default/banks/coding-history/config",
     "POST /default/banks/coding-history/import",
     "PATCH /default/banks/coding-history/config",
   ]);
