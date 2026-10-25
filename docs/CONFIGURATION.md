@@ -68,6 +68,8 @@ A small file is sufficient. Omitted settings retain their defaults.
 | `importer.maxAttempts` | 3 | Maximum attempts for a failed generation. Submitted operations remain recoverable. |
 | `importer.workBatchSize` | 1000 | Maximum candidates selected per worker pass. The concurrency limit still applies. |
 
+The approval file can set `maxEstimatedInputTokens: null` to disable its cumulative token ceiling without disabling other checks. See [provider approval](PROVIDER-GATE.md#approval).
+
 Increasing `maxAttempts` can make exhausted failures eligible again. Review the root cause and budget first. The same limit applies to queue counts, candidate selection, and execution. `retry-failed` remains an explicit reset command.
 
 Counters, sizes, and time values must be safe positive integers, except documented zero values. Internal file-format offsets, HTTP codes, redaction policy, identity rules, and output safety bounds are named constants, not user settings.

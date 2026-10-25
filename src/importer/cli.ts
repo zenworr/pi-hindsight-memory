@@ -126,7 +126,7 @@ async function runPilotCommand(config: ReturnType<typeof loadConfig>, args: Comm
   const approval = assertImportApproval(config);
   const estimatedTokens = entries.reduce((sum, entry) => sum + estimateInputTokens(entry.canonicalBytes) * PILOT_EXTRACTION_MODES, 0);
   const estimatedCost = estimateCostUsd(estimatedTokens, approval);
-  if (estimatedTokens > approval.maxEstimatedInputTokens) throw new Error(`Two-mode pilot estimate ${estimatedTokens} exceeds approved input-token limit ${approval.maxEstimatedInputTokens}`);
+  if (approval.maxEstimatedInputTokens !== null && estimatedTokens > approval.maxEstimatedInputTokens) throw new Error(`Two-mode pilot estimate ${estimatedTokens} exceeds approved input-token limit ${approval.maxEstimatedInputTokens}`);
   if (estimatedCost > approval.maxEstimatedCostUsd) throw new Error(`Two-mode pilot estimate $${estimatedCost.toFixed(COST_DECIMAL_PLACES)} exceeds approved cost limit $${approval.maxEstimatedCostUsd}`);
   await writePilotResults(outputPath, await runPilot(config, entries));
   process.stdout.write(`${JSON.stringify({ output: outputPath, count: entries.length })}\n`);

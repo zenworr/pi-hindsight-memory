@@ -33,6 +33,10 @@ scripts/create-import-approval.sh \
 
 The importer checks the approval against the provider and model recorded in its local `hindsight.env` metadata, then verifies that the server reports extraction support. In a split-host deployment, keep those two local metadata values aligned with the service host. The importer transactionally reserves estimated input and cost before each retain.
 
+Token reservations are cumulative across imports and session updates. They do not reset each month. Set `maxEstimatedInputTokens` to JSON `null` in the approval file to disable only the token ceiling, or pass `null` as the helper's first argument. This is useful for ongoing subscription-based imports. A positive number keeps a finite ceiling; a missing value is invalid. Accounting continues with either setting. Provider, model, privacy, cost, disk-space, and failure-rate checks remain enabled.
+
+The cost estimate defaults to zero when token prices are omitted. A zero-dollar ceiling with no prices is not an actual spending limit.
+
 The estimate is a guardrail, not a provider invoice. Prompt overhead and consolidation can increase actual use. Configure a provider-side budget or rate limit as well.
 
 ## Required sequence

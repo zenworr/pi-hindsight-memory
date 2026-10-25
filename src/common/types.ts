@@ -282,7 +282,7 @@ export interface ImportApproval {
   provider: string;
   model: string;
   privacy: ImportPrivacyMode;
-  maxEstimatedInputTokens: number;
+  maxEstimatedInputTokens: number | null;
   maxEstimatedCostUsd: number;
   inputUsdPerMillionTokens?: number;
   outputUsdPerMillionTokens?: number;

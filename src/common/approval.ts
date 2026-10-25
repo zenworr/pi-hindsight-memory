@@ -50,7 +50,7 @@ export function assertImportApproval(config: AppConfig): ImportApproval {
   if (approval.privacy !== "remote-redacted" && approval.privacy !== "local") throw new Error("Import approval privacy must be remote-redacted or local");
   const approvedAt = Date.parse(approval.approvedAt);
   if (Number.isNaN(approvedAt)) throw new Error("Import approval approvedAt must be an ISO date");
-  positive(approval.maxEstimatedInputTokens, "maxEstimatedInputTokens");
+  if (approval.maxEstimatedInputTokens !== null) positive(approval.maxEstimatedInputTokens, "maxEstimatedInputTokens");
   if (typeof approval.maxEstimatedCostUsd !== "number" || !Number.isFinite(approval.maxEstimatedCostUsd) || approval.maxEstimatedCostUsd < 0) throw new Error("Import approval maxEstimatedCostUsd must be non-negative");
   if (approval.inputUsdPerMillionTokens !== undefined && approval.inputUsdPerMillionTokens < 0) throw new Error("Import approval inputUsdPerMillionTokens must not be negative");
   if (approval.outputUsdPerMillionTokens !== undefined && approval.outputUsdPerMillionTokens < 0) throw new Error("Import approval outputUsdPerMillionTokens must not be negative");

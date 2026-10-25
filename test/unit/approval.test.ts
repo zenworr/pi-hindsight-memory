@@ -28,5 +28,15 @@ test("approval gate matches the active provider and estimates a bounded cost", a
   assert.equal(approval.provider, "local");
   assert.equal(estimateInputTokens(401), 101);
   assert.equal(estimateCostUsd(1000, approval), 0.002);
+  await fs.writeFile(config.approvalFile, JSON.stringify({ ...approval, maxEstimatedInputTokens: null }));
+  assert.equal(assertImportApproval(config).maxEstimatedInputTokens, null);
+  for (const invalid of [undefined, 0, -1, "unlimited", "null", false]) {
+    await fs.writeFile(config.approvalFile, JSON.stringify({ ...approval, maxEstimatedInputTokens: invalid }));
+    assert.throws(() => assertImportApproval(config), /maxEstimatedInputTokens must be positive/);
+  }
+  await fs.writeFile(config.approvalFile, JSON.stringify({ ...approval, maxEstimatedInputTokens: null, provider: "other" }));
+  assert.throws(() => assertImportApproval(config), /does not match active provider/);
+  await fs.writeFile(config.approvalFile, JSON.stringify({ ...approval, maxEstimatedInputTokens: null, maxEstimatedCostUsd: -1 }));
+  assert.throws(() => assertImportApproval(config), /maxEstimatedCostUsd must be non-negative/);
   await fs.rm(root, { recursive: true, force: true });
 });

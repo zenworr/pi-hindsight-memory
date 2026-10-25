@@ -486,14 +486,14 @@ export class StateDatabase {
     return Number(row.count ?? 0);
   }
 
-  reserveBudget(operationId: string, inputTokens: number, estimatedCostUsd: number, maxInputTokens: number, maxCostUsd: number): boolean {
+  reserveBudget(operationId: string, inputTokens: number, estimatedCostUsd: number, maxInputTokens: number | null, maxCostUsd: number): boolean {
     return this.transaction(() => {
       const existing = this.db.prepare("SELECT operation_id FROM budget_reservations WHERE operation_id=?").get(operationId);
       if (existing) return true;
       const row = this.db.prepare("SELECT reserved_input_tokens, estimated_cost_usd FROM import_budget WHERE id=1").get() as Record<string, unknown>;
       const tokens = Number(row.reserved_input_tokens ?? 0);
       const cost = Number(row.estimated_cost_usd ?? 0);
-      if (tokens + inputTokens > maxInputTokens || cost + estimatedCostUsd > maxCostUsd) return false;
+      if ((maxInputTokens !== null && tokens + inputTokens > maxInputTokens) || cost + estimatedCostUsd > maxCostUsd) return false;
       this.db.prepare("UPDATE import_budget SET reserved_input_tokens=?, estimated_cost_usd=?, updated_at=? WHERE id=1").run(tokens + inputTokens, cost + estimatedCostUsd, new Date().toISOString());
       this.db.prepare("INSERT INTO budget_reservations(operation_id,input_tokens,estimated_cost_usd,reserved_at) VALUES (?, ?, ?, ?)").run(operationId, inputTokens, estimatedCostUsd, new Date().toISOString());
       return true;

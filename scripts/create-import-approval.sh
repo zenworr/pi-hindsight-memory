@@ -3,7 +3,7 @@ set -euo pipefail
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pi-hindsight-memory"
 ENV_FILE="$CONFIG_DIR/hindsight.env"
 OUTPUT="$CONFIG_DIR/import-approval.json"
-USAGE='Usage: create-import-approval.sh MAX_INPUT_TOKENS MAX_COST_USD PRIVACY [INPUT_USD_PER_MILLION] [OUTPUT_USD_PER_MILLION]'
+USAGE='Usage: create-import-approval.sh MAX_INPUT_TOKENS_OR_NULL MAX_COST_USD PRIVACY [INPUT_USD_PER_MILLION] [OUTPUT_USD_PER_MILLION]'
 MAX_TOKENS=${1:?$USAGE}
 MAX_COST=${2:?$USAGE}
 PRIVACY=${3:?$USAGE}

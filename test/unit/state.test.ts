@@ -93,6 +93,20 @@ test("budget reservations are idempotent and enforce approved limits", () => {
   state.close();
 });
 
+test("uncapped tokens retain accounting, idempotency, and cost enforcement", () => {
+  const state = new StateDatabase(":memory:");
+  try {
+    assert.equal(state.reserveBudget("op-1", 150_000_000, 1, null, 2), true);
+    assert.equal(state.reserveBudget("op-2", 100_000_000, 1, null, 2), true);
+    assert.equal(state.reserveBudget("op-2", 100_000_000, 1, null, 2), true);
+    assert.deepEqual(state.budget(), { reservedInputTokens: 250_000_000, estimatedCostUsd: 2 });
+    assert.equal(state.reserveBudget("op-3", 1, 1, null, 2), false);
+    assert.deepEqual(state.budget(), { reservedInputTokens: 250_000_000, estimatedCostUsd: 2 });
+    assert.equal(state.reserveBudget("op-4", 1, 0, 150_000_000, 2), false);
+    assert.equal(state.reserveBudget("op-5", 1, 0, null, 2), true);
+  } finally { state.close(); }
+});
+
 test("state blocks and finalizes excluded generations through the cleanup journal", () => {
   const state = new StateDatabase(":memory:");
   const session = { ...sessionRow("excluded"), classification: { kind: "configured-exclusion" as const, reason: "configured", policyVersion: "1", label: "excluded-session" }, status: "cleanup_pending" };
