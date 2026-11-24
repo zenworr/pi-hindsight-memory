@@ -20,6 +20,8 @@ Logs contain source IDs, counts, hashes, and bounded errors. They must not conta
 
 `verify-import` reports `failedHindsightOperations` for diagnostics. This count includes retained terminal history and does not block readiness by itself. Current failed generations, document mismatches, active operations, and failed or pending consolidation still block readiness. Retained failure records are not deleted during recovery.
 
+Use `failureReasons` in `verify-import` to identify current failed updates by reason. If `blocked` is present, follow its action first. Low disk space blocks new imports before they use an attempt. Free space on the state and spool filesystems; the daemon checks again automatically. If updates already used all their attempts, correct the cause and run `retry-failed`. Check Hindsight operations when submissions exceed `importer.overdueSubmissionSeconds`. If the desktop feed is enabled, it must be fresh for complete-source readiness, even if all local scans are recent.
+
 The daemon retries a failed cycle after `importer.retryDelayMs` (30 seconds by default), rather than waiting for the full scan interval. A successful queue recovery clears its cycle error immediately. `importer.maxAttempts` defaults to three; exhausted failures need review before an explicit retry or a higher limit. See [configuration](CONFIGURATION.md).
 
 ## Linux importer rollout

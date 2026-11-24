@@ -1,7 +1,7 @@
 import type { AppConfig } from "../common/types.js";
 import { HindsightClient } from "../hindsight/client.js";
 import { StateDatabase } from "./state-db.js";
-import { importerHealth } from "./health.js";
+import { importerHealth, inspectImportDisk } from "./health.js";
 
 const MAX_DIAGNOSTIC_DOCUMENTS = 100;
 
@@ -22,14 +22,14 @@ export async function verifyFullImport(config: AppConfig, client = new Hindsight
     const actual = new Set(documents.map((document) => document.id));
     const local = new Map(sessions.map((session) => [session.documentId, session]));
     const hashMismatches = documents.filter((document) => local.get(document.id)?.acknowledgedHash !== document.content_hash).map((document) => document.id);
-    const importer = importerHealth(config, state.db);
+    const importer = importerHealth(config, state.db, await inspectImportDisk(config));
     const missing = [...expected].filter((id) => !actual.has(id));
     const excludedPresent = [...excluded].filter((id) => actual.has(id));
     const unexpected = [...actual].filter((id) => !expected.has(id));
     const imported = sessions.filter((session) => session.status === "imported").length;
     const preservedAmbiguous = sessions.filter((session) => session.status === "ambiguous_preserved").length;
     const pending = state.pendingWorkCount(config.importer.maxAttempts);
-    const failed = generations.filter((generation) => generation.state === "failed");
+    const failedGenerations = importer.failureReasons.reduce((total, failure) => total + failure.count, 0);
     const activeOperations = Math.max(count(stats.pending_operations), count(stats.operations_by_status?.pending) + count(stats.operations_by_status?.processing));
     const failedOperations = Math.max(count(stats.failed_operations), count(stats.operations_by_status?.failed));
     const pendingConsolidation = count(stats.pending_consolidation);
@@ -43,8 +43,8 @@ export async function verifyFullImport(config: AppConfig, client = new Hindsight
       bankConfigurationError = error instanceof Error ? error.message : String(error);
     }
     const bankConfigurationReady = bankConfigurationError === undefined;
-    const sourceCoverageReady = importer.scanErrors === 0 && importer.deferred === 0 && importer.unprocessed === 0 && importer.staleSources === 0;
-    const documentAccountingReady = pending === 0 && failed.length === 0 && missing.length === 0 && excludedPresent.length === 0 && unexpected.length === 0 && hashMismatches.length === 0;
+    const sourceCoverageReady = importer.scanErrors === 0 && importer.deferred === 0 && importer.unprocessed === 0 && importer.staleSources === 0 && !importer.desktopFeedStale;
+    const documentAccountingReady = pending === 0 && failedGenerations === 0 && missing.length === 0 && excludedPresent.length === 0 && unexpected.length === 0 && hashMismatches.length === 0;
     // Terminal operation history does not describe current document or consolidation health.
     const hindsightIdle = activeOperations === 0 && pendingConsolidation === 0 && failedConsolidation === 0;
     const idempotencyReady = documentAccountingReady && hindsightIdle && bankConfigurationReady;
@@ -54,7 +54,9 @@ export async function verifyFullImport(config: AppConfig, client = new Hindsight
       importedSessions: imported,
       preservedAmbiguousSessions: preservedAmbiguous,
       pendingWork: pending,
-      failedGenerations: failed.length,
+      failedGenerations,
+      failureReasons: importer.failureReasons,
+      ...(importer.blocked ? { blocked: importer.blocked } : {}),
       missingDocuments: missing.slice(0, MAX_DIAGNOSTIC_DOCUMENTS),
       missingDocumentCount: missing.length,
       excludedDocumentsPresent: excludedPresent.slice(0, MAX_DIAGNOSTIC_DOCUMENTS),
@@ -76,7 +78,7 @@ export async function verifyFullImport(config: AppConfig, client = new Hindsight
       hindsightIdle,
       idempotencyReady,
       activationReady: idempotencyReady && sourceCoverageReady && autoConsolidationEnabled,
-      continuousReady: idempotencyReady && sourceCoverageReady && autoConsolidationEnabled && importer.running && !importer.paused && !importer.lastError,
+      continuousReady: idempotencyReady && sourceCoverageReady && autoConsolidationEnabled && importer.running && !importer.paused && !importer.lastError && !importer.blocked,
       budget: state.budget(),
     };
   } finally { state.close(); }

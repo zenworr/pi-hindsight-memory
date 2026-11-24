@@ -33,6 +33,10 @@ export class HindsightTimeoutError extends Error {
   }
 }
 
+export function hindsightHealthFlags(health: Record<string, unknown>): { healthy: boolean; databaseConnected: boolean } {
+  return { healthy: health?.status === "healthy", databaseConnected: health?.database === "connected" };
+}
+
 export class HindsightOperationError extends Error {
   constructor(readonly status: string, readonly operationId: string) {
     super(`Hindsight operation ${operationId} ended ${status}`);

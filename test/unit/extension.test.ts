@@ -4,11 +4,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { Worker } from "node:worker_threads";
 import { StateDatabase } from "../../src/importer/state-db.js";
 import { defaultConfig } from "../../src/common/config.js";
 import { HindsightClient } from "../../src/hindsight/client.js";
 import piHindsightMemory, { createMemorySearchTool } from "../../src/extension/index.js";
-import { collectHindsightStatus, HINDSIGHT_STATUS_REQUEST_EVENT, registerHindsightStatusProvider, type HindsightStatusSnapshotV1 } from "../../src/extension/status.js";
+import { collectHindsightStatus, HINDSIGHT_STATUS_REQUEST_EVENT, registerHindsightStatusProvider, waitForStatusWorker, type HindsightStatusSnapshotV1 } from "../../src/extension/status.js";
 
 function client(response: unknown): HindsightClient {
   return new HindsightClient({ ...defaultConfig().hindsight, apiUrl: "http://example.test", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: 1000, retainWallTimeoutMs: 1000, recallMaxTokens: 2500, recallChunksMaxTokens: 2500, recallSourceFactsMaxTokens: 1500, operationPollMs: 1, operationPollTimeoutMs: 1000, operationRetentionDays: 14 }, async () => new Response(JSON.stringify(response), { status: 200 }), "token");
@@ -118,7 +119,7 @@ test("status provider exposes queue and service health without secrets", async (
   assert.equal(direct.importer.scanErrors, 0);
   assert.equal(direct.service.documents, 42);
   assert.equal(direct.service.consolidationActive, true);
-  assert.deepEqual(direct.issues, []);
+  assert.deepEqual(direct.issues, ["4 session updates failed (other) — check cause; retries are automatic"]);
   assert.doesNotMatch(JSON.stringify(direct), /token|password/i);
 
   statusClient.listOperations = async () => [{ id: "op-2", status: "processing", task_type: "retain" }];
@@ -159,6 +160,10 @@ test("status provider exposes queue and service health without secrets", async (
   assert.equal(removed, true);
   state.close();
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test("importer status rejects a worker that exits without posting a message", { timeout: 5_000 }, async () => {
+  await assert.rejects(waitForStatusWorker(new Worker("", { eval: true }), 4_000), /exited without a message \(0\)/);
 });
 
 test("importer status workers have a bounded timeout", async () => {

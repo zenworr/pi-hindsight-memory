@@ -1,13 +1,47 @@
 import { Worker } from "node:worker_threads";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { AppConfig, HindsightBankStats, HindsightOperation, ImportBlockReason, ImportFailureReason } from "../common/types.js";
+import type { AppConfig, ImportBlockReason } from "../common/types.js";
 import { errorMessage } from "../common/logging.js";
-import { ERROR_MESSAGE_MAX_CHARS } from "../common/limits.js";
-import { HindsightClient } from "../hindsight/client.js";
+import { HOUR_MS, MS_PER_SECOND } from "../common/limits.js";
+import { HindsightClient, hindsightHealthFlags } from "../hindsight/client.js";
 import type { ImporterHealth } from "../importer/health.js";
 import { redactText } from "../canonical/redact.js";
 
 export const HINDSIGHT_STATUS_REQUEST_EVENT = "pi-hindsight-memory:status:request:v1";
+
+const STATUS_DETAIL_MAX_CHARS = 160;
+const BYTES_PER_GIB = 1_073_741_824;
+const BLOCK_LABELS: Record<ImportBlockReason, string> = {
+  "disk-below-minimum": "free disk below approved minimum",
+  "approval-missing": "import approval missing",
+  "approval-invalid": "import approval invalid",
+  "provider-not-approved": "provider or model not approved",
+  "budget-exceeded": "approved budget exceeded",
+  "extraction-unavailable": "fact extraction unavailable",
+  "hindsight-unreachable": "Hindsight API unreachable",
+};
+
+export interface ImporterStatus extends ImporterHealth {
+  available: true;
+  queued: number;
+  submitted: number;
+  processing: number;
+  failed: number;
+  cleanupPending: number;
+}
+
+interface ServiceStatus {
+  available: boolean;
+  healthy?: boolean;
+  databaseConnected?: boolean;
+  documents?: number;
+  pendingOperations?: number;
+  processingOperations?: number;
+  failedOperations?: number;
+  pendingConsolidation?: number;
+  failedConsolidation?: number;
+  consolidationActive?: boolean;
+}
 
 export interface HindsightStatusSnapshotV1 {
   protocolVersion: 1;
@@ -15,30 +49,8 @@ export interface HindsightStatusSnapshotV1 {
   apiUrl: string;
   uiUrl?: string;
   bankId: string;
-  importer: {
-    queued: number;
-    submitted: number;
-    processing: number;
-    failed: number;
-    cleanupPending: number;
-    available?: boolean;
-    blocked?: { reason: ImportBlockReason; since: string; action: string };
-    overdueSubmissions?: number;
-    oldestSubmittedAt?: string;
-    failureReasons?: { reason: ImportFailureReason; count: number }[];
-  } & ImporterHealth;
-  service: {
-    available?: boolean;
-    healthy: boolean;
-    databaseConnected: boolean;
-    documents: number;
-    pendingOperations: number;
-    processingOperations: number;
-    failedOperations: number;
-    pendingConsolidation: number;
-    failedConsolidation: number;
-    consolidationActive: boolean;
-  };
+  importer: ImporterStatus | ({ available: false } & Partial<Omit<ImporterStatus, "available">>);
+  service: ServiceStatus;
   issues: string[];
 }
 
@@ -47,8 +59,12 @@ export interface HindsightStatusRequestV1 {
   respond(status: Promise<HindsightStatusSnapshotV1>): void;
 }
 
-function count(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+function count(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+}
+
+function issueDetail(value: string): string {
+  return redactText(value).text.replace(/\p{Cc}/gu, " ").slice(0, STATUS_DETAIL_MAX_CHARS);
 }
 
 function isStatusRequest(value: unknown): value is HindsightStatusRequestV1 {
@@ -57,75 +73,87 @@ function isStatusRequest(value: unknown): value is HindsightStatusRequestV1 {
   return request.protocolVersion === 1 && typeof request.respond === "function";
 }
 
-function importerStatus(config: AppConfig): Promise<HindsightStatusSnapshotV1["importer"]> {
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(new URL("./status-worker.js", import.meta.url), { workerData: config });
-    const timer = setTimeout(() => {
+export function waitForStatusWorker(worker: Worker, timeoutMs: number): Promise<ImporterStatus> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return new Promise<ImporterStatus>((resolve, reject) => {
+    timer = setTimeout(() => {
       void worker.terminate();
       reject(new Error("Importer status timed out"));
-    }, config.hindsight.statusTimeoutMs);
+    }, timeoutMs);
     worker.once("message", resolve);
     worker.once("error", reject);
-    worker.once("exit", () => { clearTimeout(timer); });
-  });
+    worker.once("exit", (code) => { reject(new Error(`Importer status worker exited without a message (${code})`)); });
+  }).finally(() => { clearTimeout(timer); });
 }
 
-function serviceStatus(health: Record<string, unknown>, stats: HindsightBankStats, operations: HindsightOperation[]): HindsightStatusSnapshotV1["service"] {
-  const pendingConsolidation = count(stats.pending_consolidation);
-  const processingOperations = operations.length;
-  return {
-    healthy: health.status === "healthy",
-    databaseConnected: health.database === "connected",
-    documents: count(stats.total_documents),
-    pendingOperations: count(stats.pending_operations),
-    processingOperations,
-    failedOperations: count(stats.failed_operations),
-    pendingConsolidation,
-    failedConsolidation: count(stats.failed_consolidation),
-    consolidationActive: operations.some((operation) => operation.task_type === "consolidation"),
-  };
+async function importerStatus(config: AppConfig): Promise<ImporterStatus> {
+  const worker = new Worker(new URL("./status-worker.js", import.meta.url), { workerData: config });
+  return waitForStatusWorker(worker, config.hindsight.statusTimeoutMs);
+}
+
+function importerIssues(importer: ImporterStatus): string[] {
+  const issues: string[] = [];
+  if (importer.paused) issues.push("Importer is paused");
+  else if (!importer.running) issues.push("Importer is not running or its heartbeat is stale");
+  else if (importer.staleSources > 0) issues.push(`${importer.staleSources} sources have no recent successful scan`);
+  if (importer.desktopFeedStale) issues.push("Desktop history feed is stale or unavailable");
+  if (importer.blocked) {
+    const { reason, action } = importer.blocked;
+    const disk = importer.diskBelowMinimum;
+    const measurement = disk && reason === "disk-below-minimum"
+      ? ` (${(disk.availableBytes / BYTES_PER_GIB).toFixed(1)}/${(disk.minimumBytes / BYTES_PER_GIB).toFixed(1)} GiB)` : "";
+    const next = reason === "disk-below-minimum" ? "Free space; imports resume automatically" : action;
+    issues.push(`Imports blocked: ${BLOCK_LABELS[reason]}${measurement} — ${next}`);
+  }
+  if (importer.failureReasons.length) {
+    const reasons = importer.failureReasons.map(({ reason, count: failures }) => importer.failureReasons.length > 1 ? `${reason}: ${failures}` : reason).join("; ");
+    const action = importer.exhaustedFailures > 0 ? "fix cause; run retry-failed" : "check cause; retries are automatic";
+    issues.push(`${importer.failed} session updates failed (${reasons}) — ${action}`);
+  }
+  if (!importer.blocked && importer.lastError) {
+    const detail = importer.lastError.startsWith("Import verification failed:") ? "Import verification failed — run verify-import" : issueDetail(importer.lastError);
+    issues.push(`Importer cycle failed: ${detail}`);
+  }
+  if (importer.scanErrors > 0) issues.push(`${importer.scanErrors} source scan errors require attention`);
+  if (importer.overdueSubmissions > 0 && importer.oldestSubmittedAgeSeconds !== undefined) {
+    const hours = (importer.oldestSubmittedAgeSeconds * MS_PER_SECOND / HOUR_MS).toFixed(1);
+    issues.push(`${importer.overdueSubmissions} overdue submissions (oldest ${hours} h) — check Hindsight operations`);
+  }
+  if (importer.unresolvedSubmissions > 0) issues.push(`${importer.unresolvedSubmissions} unresolved submissions — review before retry-unresolved`);
+  if (importer.quarantinedPayloads > 0) issues.push(`${importer.quarantinedPayloads} payloads use an old redaction policy — reconcile before retry`);
+  const otherUncertain = importer.uncertain - importer.unresolvedSubmissions - importer.quarantinedPayloads;
+  if (otherUncertain > 0) issues.push(`${otherUncertain} remote operations await recovery — check Hindsight operations`);
+  return issues;
 }
 
 export async function collectHindsightStatus(
   config: AppConfig,
   client = new HindsightClient(config.hindsight),
 ): Promise<HindsightStatusSnapshotV1> {
-  const issues: string[] = [];
-  let importer: HindsightStatusSnapshotV1["importer"] = { queued: 0, submitted: 0, processing: 0, failed: 0, cleanupPending: 0, running: false, paused: false, scanErrors: 0, deferred: 0, unprocessed: 0, staleSources: 0, uncertain: 0 };
-  let service: HindsightStatusSnapshotV1["service"] = {
-    healthy: false,
-    databaseConnected: false,
-    documents: 0,
-    pendingOperations: 0,
-    processingOperations: 0,
-    failedOperations: 0,
-    pendingConsolidation: 0,
-    failedConsolidation: 0,
-    consolidationActive: false,
-  };
-
   const signal = AbortSignal.timeout(config.hindsight.statusTimeoutMs);
-  const [importerResult, serviceResult] = await Promise.allSettled([
+  const [local, health, stats, operations] = await Promise.allSettled([
     importerStatus(config),
-    Promise.all([client.health(signal), client.getBankStats(signal), client.listOperations("processing", signal)]),
+    client.health(signal), client.getBankStats(signal), client.listOperations("processing", signal),
   ]);
-  if (importerResult.status === "fulfilled") {
-    importer = importerResult.value;
-    if (importer.paused) issues.push("Importer is paused");
-    else if (!importer.running) issues.push("Importer is not running or its heartbeat is stale");
-    else if (importer.staleSources > 0) issues.push(`${importer.staleSources} sources have no recent successful scan`);
-    if (importer.desktopFeedStale) issues.push("Desktop history feed is stale or unavailable");
-    if (importer.lastError) issues.push(`Importer cycle failed: ${redactText(importer.lastError).text.slice(0, ERROR_MESSAGE_MAX_CHARS)}`);
-    if (importer.scanErrors > 0) issues.push(`${importer.scanErrors} source scan errors require attention`);
-    if (importer.uncertain > 0) issues.push(`${importer.uncertain} remote operations await recovery`);
-  } else issues.push(`Importer state unavailable: ${redactText(errorMessage(importerResult.reason)).text.slice(0, ERROR_MESSAGE_MAX_CHARS)}`);
-  if (serviceResult.status === "fulfilled") {
-    service = serviceStatus(serviceResult.value[0], serviceResult.value[1], serviceResult.value[2]);
+  const importer = local.status === "fulfilled" ? local.value : { available: false as const };
+  const issues = local.status === "fulfilled" ? importerIssues(local.value) : [`Importer state unavailable: ${issueDetail(errorMessage(local.reason))}`];
+  const service: ServiceStatus = { available: health.status === "fulfilled" && stats.status === "fulfilled" && operations.status === "fulfilled" };
+  if (health.status === "fulfilled") {
+    Object.assign(service, hindsightHealthFlags(health.value));
     if (!service.healthy) issues.push("Hindsight API reports an unhealthy state");
     if (!service.databaseConnected) issues.push("Hindsight database is disconnected");
-  } else {
-    issues.push(`Hindsight unavailable: ${redactText(errorMessage(serviceResult.reason)).text.slice(0, ERROR_MESSAGE_MAX_CHARS)}`);
-  }
+  } else issues.push(`Hindsight health unavailable: ${issueDetail(errorMessage(health.reason))}`);
+  if (stats.status === "fulfilled") {
+    service.documents = count(stats.value?.total_documents);
+    service.pendingOperations = count(stats.value?.pending_operations);
+    service.failedOperations = count(stats.value?.failed_operations);
+    service.pendingConsolidation = count(stats.value?.pending_consolidation);
+    service.failedConsolidation = count(stats.value?.failed_consolidation);
+  } else issues.push("Hindsight bank statistics unavailable");
+  if (operations.status === "fulfilled") {
+    service.processingOperations = operations.value.length;
+    service.consolidationActive = operations.value.some((operation) => operation.task_type === "consolidation");
+  } else issues.push("Hindsight operations unavailable");
 
   return {
     protocolVersion: 1,

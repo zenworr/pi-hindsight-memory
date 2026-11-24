@@ -98,6 +98,11 @@ export interface GenerationRecord {
 
 export interface ImportBlock { reason: ImportBlockReason; since: string; action: string; }
 
+export function readImportBlock(db: DatabaseSync): ImportBlock | undefined {
+  const row = db.prepare("SELECT blocked_json FROM daemon_status WHERE id=1").get();
+  return typeof row?.blocked_json === "string" ? JSON.parse(row.blocked_json) as ImportBlock : undefined;
+}
+
 export interface OperationRecord {
   operationId: string;
   documentId: string;
@@ -396,8 +401,7 @@ export class StateDatabase {
   }
 
   getImportBlock(): ImportBlock | undefined {
-    const row = this.db.prepare("SELECT * FROM daemon_status WHERE id=1").get();
-    return typeof row?.blocked_json === "string" ? JSON.parse(row.blocked_json) as ImportBlock : undefined;
+    return readImportBlock(this.db);
   }
 
   setImportBlock(block?: Omit<ImportBlock, "since">): void {

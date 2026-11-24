@@ -41,46 +41,56 @@ interface StatusSnapshot {
   uiUrl?: string;
   bankId: string;
   importer: {
-    queued: number;
-    submitted: number;
-    processing: number;
-    failed: number;
-    cleanupPending: number;
-    running: boolean;
-    paused: boolean;
+    available: boolean;
+    queued?: number;
+    submitted?: number;
+    processing?: number;
+    failed?: number;
+    cleanupPending?: number;
+    running?: boolean;
+    paused?: boolean;
     heartbeatAt?: string;
     phase?: string;
     lastError?: string;
-    scanErrors: number;
-    deferred: number;
-    unprocessed: number;
-    staleSources: number;
-    uncertain: number;
-    available?: boolean;
+    scanErrors?: number;
+    deferred?: number;
+    unprocessed?: number;
+    staleSources?: number;
+    desktopFeedAgeSeconds?: number;
+    desktopFeedStale?: boolean;
+    uncertain?: number;
+    unresolvedSubmissions?: number;
+    quarantinedPayloads?: number;
     blocked?: { reason: ImportBlockReason; since: string; action: string };
     overdueSubmissions?: number;
     oldestSubmittedAt?: string;
+    oldestSubmittedAgeSeconds?: number;
     failureReasons?: { reason: ImportFailureReason; count: number }[];
+    exhaustedFailures?: number;
+    diskBelowMinimum?: { availableBytes: number; minimumBytes: number };
   };
   service: {
-    available?: boolean;
-    healthy: boolean;
-    databaseConnected: boolean;
-    documents: number;
-    pendingOperations: number;
-    processingOperations: number;
-    failedOperations: number;
-    pendingConsolidation: number;
-    failedConsolidation: number;
-    consolidationActive: boolean;
+    available: boolean;
+    healthy?: boolean;
+    databaseConnected?: boolean;
+    documents?: number;
+    pendingOperations?: number;
+    processingOperations?: number;
+    failedOperations?: number;
+    pendingConsolidation?: number;
+    failedConsolidation?: number;
+    consolidationActive?: boolean;
   };
   issues: string[];
 }
 
 type ImportBlockReason = "disk-below-minimum" | "approval-missing" | "approval-invalid"
   | "provider-not-approved" | "budget-exceeded" | "extraction-unavailable" | "hindsight-unreachable";
-type ImportFailureReason = "operation-failed" | "document-rejected" | "unresolved-submission" | "other";
+type ImportFailureReason = "operation-failed" | "document-rejected" | "disk-below-minimum"
+  | "unresolved-submission" | "other";
 ```
+
+An unavailable importer has no measurements. An unavailable service can still include measurements from requests that succeeded. Do not display a missing measurement as zero or as an unhealthy result. Show the applicable entry in `issues` instead. Overdue submissions use the local submission time; the status request does not poll individual operations.
 
 The new fields are optional so older providers and consumers can continue to use protocol version 1. When `available` is false, do not show the associated counts as current. An absent `available` flag does not assert availability. If present, `blocked` identifies the current import block, its start time, and a suggested action. `overdueSubmissions` uses the configured submission age threshold. `oldestSubmittedAt` and `blocked.since` are timestamps in ISO format. `failureReasons` groups current importer failures by reason code.
 

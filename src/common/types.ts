@@ -281,7 +281,7 @@ export interface HindsightVersionResponse {
 }
 
 export type ImportBlockReason = "disk-below-minimum" | "approval-missing" | "approval-invalid" | "provider-not-approved" | "budget-exceeded" | "extraction-unavailable" | "hindsight-unreachable";
-export type ImportFailureReason = "operation-failed" | "document-rejected" | "unresolved-submission" | "other";
+export type ImportFailureReason = "operation-failed" | "document-rejected" | "disk-below-minimum" | "unresolved-submission" | "other";
 
 type ImportPrivacyMode = "remote-redacted" | "local";
 

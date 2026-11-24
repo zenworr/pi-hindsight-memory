@@ -1,5 +1,4 @@
-import fs from "node:fs/promises";
-import path from "node:path";
+import { BLOCK_ACTIONS, importFreeBytes } from "./admission.js";
 import { SpanKind } from "@opentelemetry/api";
 import { inSpan, telemetryCount, telemetryQueueWait } from "../common/telemetry.js";
 import { HTTP_STATUS, isRetryableStatus } from "../hindsight/http.js";
@@ -32,16 +31,6 @@ export class ImportFailureRateError extends Error {
   }
 }
 
-const BLOCK_ACTIONS: Record<ImportBlockReason, string> = {
-  "disk-below-minimum": "Free disk space on the importer state and spool filesystems, and check that both are accessible.",
-  "approval-missing": "Create a reviewed import approval.",
-  "approval-invalid": "Correct the import approval file.",
-  "provider-not-approved": "Review the active provider and model, then update the import approval.",
-  "budget-exceeded": "Review the cumulative budget and approve a new limit if appropriate.",
-  "extraction-unavailable": "Check the Hindsight extraction provider and bank policy.",
-  "hindsight-unreachable": "Check access to the Hindsight API.",
-};
-
 class AdmissionError extends Error {
   constructor(readonly reason: ImportBlockReason, message: string, cause?: unknown) { super(message, { cause }); }
 }
@@ -49,17 +38,6 @@ class AdmissionError extends Error {
 function importBlock(reason: ImportBlockReason): Block { return { reason, action: BLOCK_ACTIONS[reason] }; }
 const OPERATION_POLL_SLICE_MS = 30_000;
 const BLOCKED_QUEUE_RETRY_MS = 250;
-
-async function availableBytes(directory: string): Promise<number> {
-  try {
-    const filesystem = await fs.statfs(directory);
-    return Number(filesystem.bavail) * Number(filesystem.bsize);
-  } catch (error) {
-    const parent = path.dirname(directory);
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === directory) throw error;
-    return availableBytes(parent);
-  }
-}
 
 export class ImportWorker {
   private readonly limiter: Semaphore;
@@ -74,11 +52,10 @@ export class ImportWorker {
     try { if (this.config.requireImportApproval) approval = assertImportApproval(this.config); }
     catch (error) { throw new AdmissionError(error instanceof ImportApprovalError ? error.reason : "approval-invalid", errorMessage(error), error); }
     if (approval?.minFreeBytes !== undefined) {
-      const stateDirectory = this.state.databasePath === ":memory:" ? this.config.stateDirectory : path.dirname(this.state.databasePath);
-      let available: number[];
-      try { available = await Promise.all([...new Set([stateDirectory, this.config.spoolDirectory])].map(availableBytes)); }
+      let available: number;
+      try { available = await importFreeBytes(this.config, this.state.databasePath); }
       catch (error) { throw new AdmissionError("disk-below-minimum", "Cannot check free disk space", error); }
-      if (Math.min(...available) < approval.minFreeBytes) throw new AdmissionError("disk-below-minimum", "Free disk space is below the approved minimum");
+      if (available < approval.minFreeBytes) throw new AdmissionError("disk-below-minimum", "Free disk space is below the approved minimum");
     }
     return approval;
   }

@@ -9,7 +9,7 @@ import { startTelemetry } from "../common/telemetry.js";
 
 import { activeProvider, assertImportApproval, readApproval } from "../common/approval.js";
 import { errorMessage, Logger } from "../common/logging.js";
-import { HindsightClient } from "../hindsight/client.js";
+import { HindsightClient, hindsightHealthFlags } from "../hindsight/client.js";
 import { runInventory } from "./inventory.js";
 import { withStateLock as withLock } from "./lock.js";
 import { drainImporter, runDaemon, setPaused, status } from "./daemon.js";
@@ -83,8 +83,8 @@ async function doctor(config: ReturnType<typeof loadConfig>): Promise<Record<str
   }
   const client = new HindsightClient(config.hindsight);
   try {
-    await client.requestJson("GET", `${config.hindsight.apiUrl.replace(/\/$/, "")}/health`);
-    result.hindsight = "healthy";
+    const { healthy, databaseConnected } = hindsightHealthFlags(await client.health());
+    result.hindsight = !databaseConnected ? "unhealthy: database is disconnected" : healthy ? "healthy" : "unhealthy: API reports an unhealthy state";
   } catch (error) { result.hindsight = `unavailable: ${errorMessage(error)}`; }
   return result;
 }
