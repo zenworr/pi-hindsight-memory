@@ -863,6 +863,13 @@ export class StateDatabase {
     return { operationId: String(row.operation_id), documentId: String(row.document_id), canonicalHash: String(row.canonical_hash), hindsightStatus: nullableString(row.hindsight_status), submittedAt: nullableString(row.submitted_at), lastPolledAt: nullableString(row.last_polled_at), lastObservedStatus: nullableString(row.last_observed_status), lastProgressAt: nullableString(row.last_progress_at), retryCount: Number(row.retry_count), responseSummary: nullableString(row.response_summary) };
   }
 
+  restoreUnsentOperation(generation: GenerationRecord): void {
+    this.durableTransaction(() => {
+      const restored = this.db.prepare("UPDATE operations SET hindsight_status='ready', submitted_at=NULL WHERE operation_id=? AND hindsight_status='submitting'").run(generation.operationId);
+      if (restored.changes) this.db.prepare("UPDATE generations SET state='processing', submitted_at=NULL, error=NULL WHERE operation_id=? AND state='submitted'").run(generation.operationId);
+    });
+  }
+
   recordOperationPoll(operationId: string, status: string, progressKey?: string): void {
     const now = new Date().toISOString();
     this.db.prepare(`UPDATE operations SET last_polled_at=?1, last_observed_status=?2,

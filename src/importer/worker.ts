@@ -7,7 +7,7 @@ import type { AppConfig, CanonicalSession, CanonicalSessionMetadata, ImportAppro
 import { CANONICAL_SCHEMA, ADAPTER_VERSION, REDACTION_POLICY_VERSION } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
 import type { HindsightClient} from "../hindsight/client.js";
-import { HindsightBankPolicyError, HindsightHttpError, HindsightOperationError, HindsightOperationNotFoundError, HindsightPollTimeoutError, HindsightUnresolvedOperationError } from "../hindsight/client.js";
+import { HindsightBankPolicyError, HindsightHttpError, HindsightOperationError, HindsightOperationNotFoundError, HindsightPollTimeoutError, HindsightRequestNotSentError, HindsightUnresolvedOperationError } from "../hindsight/client.js";
 import { errorMessage, Logger } from "../common/logging.js";
 import { assertImportApproval, estimateCostUsd, estimateInputTokens, ImportApprovalError } from "../common/approval.js";
 import { redactText } from "../canonical/redact.js";
@@ -171,7 +171,7 @@ export class ImportWorker {
     const operation = this.state.getOperation(generation.operationId) ?? { ...generation, documentId: session.documentId, retryCount: 0 };
     this.state.durableTransaction(() => {
       this.state.upsertOperation({ ...operation, hindsightStatus: UNRESOLVED_SUBMISSION });
-      this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { error: `${UNRESOLVED_SUBMISSION}: ${reason}` });
+      this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { error: `${UNRESOLVED_SUBMISSION}: ${reason}. Review the outcome before running retry-unresolved` });
     });
     this.logger.error("Submission requires review", { source: generation.source, session: generation.nativeSessionId, operation: generation.operationId });
     return "deferred";
@@ -311,6 +311,10 @@ export class ImportWorker {
       this.state.upsertOperation({ ...persisted, hindsightStatus: "pending" });
       return await this.pollSubmission(generation, sessionState, operationSignal);
     } catch (error) {
+      if (error instanceof HindsightRequestNotSentError) {
+        this.state.restoreUnsentOperation(generation);
+        return "deferred";
+      }
       if (error instanceof HindsightUnresolvedOperationError) return this.holdSubmission(generation, sessionState, error.message);
       if (shutdownSignal?.aborted) {
         this.logger.info("Session import interrupted by shutdown", { source: generation.source, session: generation.nativeSessionId });

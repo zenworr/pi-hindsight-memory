@@ -6,8 +6,13 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { once } from "node:events";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { defaultConfig } from "../../src/common/config.js";
 import { HindsightClient } from "../../src/hindsight/client.js";
+import type { FetchLike } from "../../src/hindsight/client.js";
+import { withWriterLock } from "../../src/importer/lock.js";
+import { nextOperationId } from "../../src/importer/queue.js";
 import { scan } from "../../src/importer/scanner.js";
 import { StateDatabase, UNRESOLVED_SUBMISSION } from "../../src/importer/state-db.js";
 import { ImportWorker } from "../../src/importer/worker.js";
@@ -63,11 +68,11 @@ async function fixture(t: TestContext) {
     await fs.rm(root, { recursive: true, force: true });
   });
   return {
-    add, config, calls, posts, remote,
+    root, add, config, calls, posts, remote,
     get state() { return state; },
     restart() { state.close(); state = new StateDatabase(config.stateDatabase); },
-    run(limit = 1, signal?: AbortSignal, repair = false) {
-      return new ImportWorker(config, state, new HindsightClient(config.hindsight, undefined, "fixture-token"), undefined, false, repair).runOnce(limit, signal, { admission: {} });
+    run(limit = 1, signal?: AbortSignal, repair = false, fetcher?: FetchLike) {
+      return new ImportWorker(config, state, new HindsightClient(config.hindsight, fetcher, "fixture-token"), undefined, false, repair).runOnce(limit, signal, { admission: {} });
     },
   };
 }
@@ -113,6 +118,84 @@ test("a lost POST receipt polls the original ID after restart without replaying 
   assert.deepEqual(f.calls, ["POST /memories", `GET /operations/${g.operationId}`]);
   assert.equal(f.state.getOperation(g.operationId)?.submittedAt, submitted.submittedAt);
   assert.equal(f.state.getOperation(g.operationId)?.lastObservedStatus, "completed");
+});
+
+test("a connection refusal restores the same retain ID for a safe retry", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("refused");
+  const attempts: string[] = [];
+  const fetcher: FetchLike = async (url, init) => {
+    if (init?.method === "POST") {
+      attempts.push(JSON.parse(init.body as string).operation_id as string);
+      if (attempts.length === 1) throw new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } });
+    }
+    return fetch(url, init);
+  };
+  assert.equal((await f.run(1, undefined, false, fetcher)).deferred, 1);
+  assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, "ready");
+  assert.equal(f.state.getOperation(g.operationId)?.submittedAt, undefined);
+  assert.equal(f.state.getLatestGeneration("pi", "refused")?.submittedAt, undefined);
+  assert.deepEqual(f.calls, []);
+  f.restart();
+  assert.equal((await f.run(1, undefined, false, fetcher)).completed, 1);
+  assert.equal(f.state.getLatestGeneration("pi", "refused")?.attemptCount, 1);
+  assert.deepEqual(attempts, [g.operationId, g.operationId]);
+  assert.deepEqual(f.calls, ["POST /memories", `GET /operations/${g.operationId}`]);
+});
+
+test("a connection reset after POST polls and holds when the operation is absent", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("reset");
+  f.remote.poll = (_id, res) => { reply(res, 200, { status: "not_found" }); };
+  const fetcher: FetchLike = async (url, init) => {
+    const response = await fetch(url, init);
+    if (init?.method === "POST") {
+      await response.body?.cancel();
+      throw new TypeError("fetch failed", { cause: { code: "ECONNRESET" } });
+    }
+    return response;
+  };
+  assert.equal((await f.run(1, undefined, false, fetcher)).deferred, 1);
+  assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, "submitting");
+  assert.equal((await f.run()).deferred, 1);
+  assert.equal(f.state.unresolvedOperationCount(), 1);
+  assert.match(f.state.getLatestGeneration("pi", "reset")?.error ?? "", /retry-unresolved/);
+  assert.equal((await f.run()).selected, 0);
+  assert.deepEqual(f.posts, [g.operationId]);
+  assert.ok(f.calls.includes(`GET /operations/${g.operationId}`));
+});
+
+test("retry-unresolved uses the writer lock and preserves the original payload under a new ID", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("reviewed");
+  f.remote.receipt = () => ({});
+  assert.equal((await f.run()).deferred, 1);
+  const cli = fileURLToPath(new URL("../../src/importer/cli.js", import.meta.url));
+  const configFile = path.join(f.root, "config.json");
+  await fs.writeFile(configFile, JSON.stringify({ stateDatabase: f.config.stateDatabase, spoolDirectory: f.config.spoolDirectory }));
+  const run = () => spawnSync(process.execPath, [cli, "retry-unresolved", "--config", configFile], { encoding: "utf8", env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: f.root, XDG_STATE_HOME: f.root }, timeout: 10_000 });
+  const old = f.state.getOperation(g.operationId)!;
+  const id = nextOperationId(f.state, f.config.hindsight.bankId, old.documentId, g.canonicalHash, old.operationId);
+  const payloadPath = (id: string, suffix = "jsonl") => path.join(f.config.spoolDirectory, "pending", `${id}.${suffix}`);
+  const original = await fs.readFile(payloadPath(g.operationId), "utf8");
+  await withWriterLock(f.config.stateDatabase, () => {
+    const result = run();
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /writer lock is busy/);
+  });
+  assert.equal(f.state.unresolvedOperationCount(), 1);
+  const result = run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { requeued: 1 });
+  assert.deepEqual(JSON.parse(run().stdout), { requeued: 0 });
+  assert.equal(f.state.getLatestGeneration("pi", "reviewed")?.operationId, id);
+  assert.equal(f.state.unresolvedOperationCount(), 0);
+  assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, UNRESOLVED_SUBMISSION);
+  assert.equal(await fs.readFile(payloadPath(id), "utf8"), original);
+  for (const suffix of ["jsonl", "json"]) await assert.rejects(fs.access(payloadPath(g.operationId, suffix)), { code: "ENOENT" });
+  f.remote.receipt = (id) => ({ operation_id: id });
+  assert.equal((await f.run()).completed, 1);
+  assert.deepEqual(f.posts, [g.operationId, id]);
 });
 
 for (const [outcome, status] of [["matching hash", 200], ["mismatching hash", 200], ["no document", 404]] as const) test(`operation ${status} not_found with ${outcome} never replays`, async (t) => {

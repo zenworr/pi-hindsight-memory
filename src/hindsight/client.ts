@@ -47,7 +47,19 @@ export class HindsightOperationNotFoundError extends Error {
 
 export class HindsightUnresolvedOperationError extends Error {}
 
+export class HindsightRequestNotSentError extends Error {
+  constructor() { super("Hindsight request was not sent"); }
+}
+
 class HindsightJsonError extends Error {}
+
+const CONNECT_FAILURE_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "EHOSTUNREACH", "ENETUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+
+function isConnectFailure(error: unknown): boolean {
+  if (!(error instanceof TypeError) || error.message !== "fetch failed") return false;
+  const isConnectCause = (cause: unknown): boolean => Boolean(cause && typeof cause === "object" && "code" in cause && typeof cause.code === "string" && CONNECT_FAILURE_CODES.has(cause.code));
+  return error.cause instanceof AggregateError ? error.cause.errors.length > 0 && error.cause.errors.every(isConnectCause) : isConnectCause(error.cause);
+}
 
 const KNOWN_OPERATION_STATUSES = ["pending", "processing", "completed", "failed", "cancelled"] as const;
 type KnownOperationStatus = typeof KNOWN_OPERATION_STATUSES[number];
@@ -154,20 +166,30 @@ export class HindsightClient {
   }
 
   private async sendJson<T>(method: string, url: string, body: unknown, signal: AbortSignal | undefined, timeoutMs: number, retry: boolean): Promise<T> {
-    signal?.throwIfAborted();
+    const classifyNotSent = method === "POST" && !retry;
+    const checkBeforeSend = (): void => {
+      if (classifyNotSent && signal?.aborted) throw new HindsightRequestNotSentError();
+      signal?.throwIfAborted();
+    };
+    checkBeforeSend();
     const deadline = Date.now() + timeoutMs;
     const checkTimeout = (timeout: AbortSignal): void => {
       signal?.throwIfAborted();
       if (timeout.aborted || Date.now() >= deadline) throw new HindsightTimeoutError(timeoutMs);
     };
     const payload = body === undefined ? undefined : JSON.stringify(body);
-    let token = await this.token();
+    let token: string;
+    try { token = await this.token(); }
+    catch (error) { checkBeforeSend(); throw error; }
     let authRetry = false;
     const maxAttempts = retry ? this.config.httpMaxAttempts : 1;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      signal?.throwIfAborted();
+      checkBeforeSend();
       const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new HindsightTimeoutError(timeoutMs);
+      if (remaining <= 0) {
+        if (classifyNotSent) throw new HindsightRequestNotSentError();
+        throw new HindsightTimeoutError(timeoutMs);
+      }
       const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${token}` };
       const request: RequestInit = { method, headers, ...(!retry ? { redirect: "error" as const } : {}) };
       if (payload !== undefined) { headers["Content-Type"] = "application/json"; request.body = payload; }
@@ -177,12 +199,16 @@ export class HindsightClient {
       try {
         response = await inSpan("hindsight.http.attempt", { "http.request.method": method, "http.route": this.route(url), "retry.attempt": attempt + 1 }, async (span) => {
           Object.assign(headers, traceHeaders());
+          checkBeforeSend();
+          if (classifyNotSent && timeout.aborted) throw new HindsightRequestNotSentError();
           const result = await this.fetcher(url, request);
           span?.setAttribute("http.response.status_code", result.status);
           telemetryCount("hindsight.http.responses", 1, { method, route: this.route(url), status: result.status });
           return result;
         }, SpanKind.CLIENT, (result) => result.ok ? "ok" : "error");
       } catch (error) {
+        if (error instanceof HindsightRequestNotSentError) throw error;
+        if (classifyNotSent && isConnectFailure(error)) throw new HindsightRequestNotSentError();
         checkTimeout(timeout);
         if (attempt + 1 < maxAttempts) {
           telemetryCount("hindsight.http.retries", 1, { reason: "transport" });
@@ -279,7 +305,10 @@ export class HindsightClient {
   }
 
   async retainWithOperationId(session: CanonicalSession, operationId: string, signal?: AbortSignal): Promise<RetainResponse> {
-    const content = await session.readContent();
+    if (signal?.aborted) throw new HindsightRequestNotSentError();
+    let content: string;
+    try { content = await session.readContent(); }
+    catch (error) { if (signal?.aborted) throw new HindsightRequestNotSentError(); throw error; }
     const metadata = Object.fromEntries(Object.entries({
       source: session.metadata.source,
       native_session_id: session.metadata.native_session_id,

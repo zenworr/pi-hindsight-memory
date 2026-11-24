@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { defaultConfig } from "../../src/common/config.js";
-import { HindsightClient, HindsightOperationNotFoundError, HindsightTimeoutError } from "../../src/hindsight/client.js";
+import { HindsightClient, HindsightOperationNotFoundError, HindsightRequestNotSentError, HindsightTimeoutError } from "../../src/hindsight/client.js";
 import { formatRecallResponse, boundOutput } from "../../src/hindsight/response-format.js";
 import { expectedRetainMission } from "../../src/common/retention-policy.js";
 import type { HindsightConfig } from "../../src/common/types.js";
@@ -149,6 +149,11 @@ test("retain sends the canonical document with a caller-owned stable operation I
   session.metadata.project_id = 'API_KEY="[REDACTED:SECRET]CANARY"';
   await client.retainWithOperationId(session, "stable-op");
   assert.doesNotMatch(JSON.stringify(body), /CANARY/);
+  const controller = new AbortController();
+  const unsent = new HindsightClient(config(), async () => { assert.fail("must not send the retain after abort"); }, "token");
+  const abortWhileReading = { ...session, readContent: async () => { controller.abort(new Error("abort details")); return "fixture content"; } };
+  await assert.rejects(() => unsent.retainWithOperationId(abortWhileReading, "stable-op", controller.signal), { name: "Error", message: "Hindsight request was not sent" });
+  await assert.rejects(() => unsent.retainWithOperationId(session, "stable-op", controller.signal), HindsightRequestNotSentError);
   await fs.rm(contentPath, { force: true });
 });
 

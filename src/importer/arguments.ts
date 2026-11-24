@@ -26,6 +26,7 @@ const COMMANDS: Record<string, { flags: string[]; positionals: number }> = {
   consolidate: { flags: [], positionals: 0 },
   "enable-auto-consolidation": { flags: [], positionals: 0 },
   "retry-failed": { flags: [], positionals: 0 },
+  "retry-unresolved": { flags: [], positionals: 0 },
   "cancel-queued": { flags: [], positionals: 0 },
   "dry-run-extract": { flags: ["mode"], positionals: 1 },
   "select-pilot": { flags: ["count", "max-bytes", "include-largest"], positionals: 1 },
