@@ -357,7 +357,7 @@ test("worker loads exact local and pinned desktop locators without enumerating s
     if (reference.nativeSessionId !== "local-session") {
       await fs.symlink("next", path.join(feed, "next-link"));
       await fs.rename(path.join(feed, "next-link"), f.config.desktopFeed.directory);
-      assert.equal(reference.locator, path.join(feed, "first/claude/primary.jsonl"));
+      assert.equal(reference.locator, path.join(await fs.realpath(feed), "first/claude/primary.jsonl"));
     }
     return classify(reference);
   });

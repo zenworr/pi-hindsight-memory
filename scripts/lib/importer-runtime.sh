@@ -10,19 +10,20 @@ select_importer_node() {
 prepare_importer_runtime() (
   set -euo pipefail
   umask 077
-  local root=$1 revision=$2 snapshots=$3 config=$4 stage='' npm
-  local runtime="$snapshots/$revision"
+  # The subshell isolates these variables; macOS bash 3.2 cannot read function locals from the EXIT trap.
+  root=$1 revision=$2 snapshots=$3 config=$4 stage=''
+  runtime="$snapshots/$revision"
   mkdir -p -- "$snapshots"
   if [[ ! -e "$runtime" && ! -L "$runtime" ]]; then
     npm=$(command -v npm)
     stage=$(mktemp -d "$snapshots/.build-$revision.XXXXXX")
-    trap 'if [[ -n "$stage" ]]; then chmod -R u+w -- "$stage"; rm -rf -- "$stage"; fi' EXIT
+    trap 'if [[ -n "${stage:-}" ]]; then chmod -R u+w "$stage"; rm -rf -- "$stage"; fi' EXIT
     git -C "$root" archive "$revision" | tar -x -C "$stage"
     # The package's prepare script builds dist. Keep build tools even when NODE_ENV is production.
     (cd -- "$stage"; PATH="$(dirname -- "$NODE"):$PATH" "$npm" ci --include=dev) >&2
     "$NODE" "$stage/dist/src/importer/cli.js" config --check --config "$config" >&2
     printf '%s\n' "$revision" > "$stage/.snapshot-revision"
-    chmod -R a-w -- "$stage"
+    chmod -R a-w "$stage"
     # Do not replace an existing runtime, including one published by another builder.
     "$NODE" -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$stage" "$runtime"
     stage=''
