@@ -76,7 +76,7 @@ For a single-host deployment, application/provider settings and PostgreSQL crede
 ~/.config/pi-hindsight-memory/postgres.env
 ```
 
-In a split-host deployment, the full file stays on the service host. The workstation needs only matching `HINDSIGHT_API_LLM_PROVIDER` and `HINDSIGHT_API_LLM_MODEL` metadata for its approval gate.
+In a split-host deployment, keep the full file on the service host. The importer host needs matching provider and model metadata for the primary route and [each configured failover route](docs/PROVIDER-GATE.md#migrate-an-approval-for-failover). It does not need the provider credentials.
 
 Use `scripts/configure-provider.sh --model MODEL_ID` to set an OpenAI or OpenAI-compatible API key without placing the key in the repository or shell history. The provider defaults to `openai-responses`; the model and optional reasoning effort are explicit operator choices and must be supported by the selected endpoint.
 
@@ -100,7 +100,7 @@ Activate the Pi extension after readiness checks
 Continuous scanner and automatic consolidation on
 ```
 
-A stopped or interrupted import is resumable. Caller-owned operation IDs and the local state database prevent duplicate processing.
+A stopped import is resumable. The importer polls the original operation after a lost reply rather than sending another retain. If it cannot prove the outcome, it holds the submission for review. Admission blocks clear automatically after the cause is fixed; exhausted failures and held submissions require separate [recovery commands](docs/OPERATIONS.md#retry-failures).
 
 ## Safety properties
 
@@ -117,7 +117,7 @@ A stopped or interrupted import is resumable. Caller-owned operation IDs and the
 - Unknown child-session shapes fail closed as ambiguous.
 - Hindsight and its UI bind only to loopback by default.
 - PostgreSQL has no host port.
-- Import requires an approved provider, privacy mode, token budget, cost budget, disk floor, and failure-rate limit.
+- Import requires approved provider routes and privacy, cost, disk-space, and failure-rate checks. The approval can set a cumulative token ceiling.
 - Pi installation backs up settings and automatically restores them if installation fails.
 
 ## Development
@@ -136,7 +136,8 @@ See also:
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Canonical format](docs/CANONICAL-FORMAT.md)
-- [Operations](docs/OPERATIONS.md)
+- [Operations: rollout, recovery, and coordinated backups](docs/OPERATIONS.md)
+- [Hindsight upgrade gate](docs/DEPLOYMENT.md#hindsight-upgrade-gate)
 - [Memory retrieval and source evidence](docs/MEMORY-RETRIEVAL.md)
 - [Historical repair](docs/HISTORICAL-REPAIR.md)
 - [Remote deployment](docs/REMOTE-DEPLOYMENT.md)

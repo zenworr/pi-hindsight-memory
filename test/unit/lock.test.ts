@@ -6,7 +6,7 @@ import path from "node:path";
 import { defaultConfig } from "../../src/common/config.js";
 import { withStateLock, withWriterLock } from "../../src/importer/lock.js";
 
-const writerBusy = /Importer writer lock is busy .*; stop pi-hindsight-importer first/;
+const writerBusy = /Importer writer lock is busy .*; run scripts\/importer-service\.sh stop/;
 
 test("state locks release on database setup and command failures without replacing the sidecar", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-lock-"));

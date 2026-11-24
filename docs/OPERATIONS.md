@@ -20,7 +20,9 @@ Logs contain source IDs, counts, hashes, and bounded errors. They must not conta
 
 `verify-import` reports `failedHindsightOperations` for diagnostics. This count includes retained terminal history and does not block readiness by itself. Current failed generations, document mismatches, active operations, and failed or pending consolidation still block readiness. Retained failure records are not deleted during recovery.
 
-Use `failureReasons` in `verify-import` to identify current failed updates by reason. If `blocked` is present, follow its action first. Low disk space blocks new imports before they use an attempt. Free space on the state and spool filesystems; the daemon checks again automatically. If updates already used all their attempts, correct the cause and run `retry-failed`. Check Hindsight operations when submissions exceed `importer.overdueSubmissionSeconds`. If the desktop feed is enabled, it must be fresh for complete-source readiness, even if all local scans are recent.
+Use `failureReasons` and `exhaustedFailures` in `verify-import` to identify current failed updates. If `blocked` is present, follow its action first. An admission block stops new imports without using attempts. The running, unpaused daemon still tries to poll submitted operations and checks the block again automatically. For low disk space, free space on the state and spool filesystems. For an approval block after a provider change, check the [declared routes and approval](PROVIDER-GATE.md#migrate-an-approval-for-failover). No `retry-failed` is necessary to clear a block.
+
+An overdue submission is a warning, not an expired operation. At `importer.overdueSubmissionSeconds`, check the original operation and any child operations in Hindsight. Do not requeue a pending operation just because it is overdue. If the desktop feed is enabled, it must be fresh for complete-source readiness, even if all local scans are recent.
 
 The daemon retries a failed cycle after `importer.retryDelayMs` (30 seconds by default), rather than waiting for the full scan interval. A successful queue recovery clears its cycle error immediately. `importer.maxAttempts` defaults to three; exhausted failures need review before an explicit retry or a higher limit. See [configuration](CONFIGURATION.md).
 
@@ -38,6 +40,8 @@ Use the same configuration and settings as the running service. Set `PI_HINDSIGH
 
 The rollout replaces only the `90-runtime.conf` user-unit drop-in. The new importer has 600 seconds by default to report a fresh idle heartbeat and pass document accounting. Set `PI_HINDSIGHT_ROLLOUT_TIMEOUT_SECONDS` to a positive whole number of seconds (up to nine digits) to change this limit. The rollout checks again while queued or submitted work finishes. Settling sessions alone do not block deployment. A failed update, a missing or unexpected document, a hash mismatch, or a change to the importer's main process ends the rollout without another check.
 
+This rollout does not change the Hindsight image. For an image change, use the [Hindsight upgrade gate](DEPLOYMENT.md#hindsight-upgrade-gate).
+
 If the rollout fails, it restores the previous runtime configuration and does not restore SQLite or PostgreSQL. If a SQLite schema changed or cannot be read, it leaves the importer stopped. Check compatibility before restarting it. Check the journal after a rollback.
 
 The inventory lists local unit, Pi settings, and user script references that the rollout can find. It does not delete snapshots. Check other hosts and external scripts before removing a snapshot manually. On macOS, installation still uses the LaunchAgent; the rollout script is Linux-only.
@@ -53,20 +57,17 @@ Pause prevents daemon scans and submissions. It does not cancel active Hindsight
 
 ## Retry failures
 
-Inspect the error first. Retry only failures caused by a temporary provider, network, database, or container outage:
-
-Stop the importer service before these commands; they need its exclusive lock:
+Find and correct the cause before resetting attempts on failed updates. Stop the importer service before you reset them; the command needs the writer lock. Start the service again so the daemon can process the queue:
 
 ```bash
 scripts/importer-service.sh stop
 node dist/src/importer/cli.js retry-failed
-node dist/src/importer/cli.js process-queued --max-ms 86400000
 scripts/importer-service.sh start
 ```
 
 `daemon --no-scan` processes only existing queued work and does not discover source sessions, including in continuous mode. Use the normal daemon for scheduled source scanning.
 
-`process-queued` supports continuous-mode auto-consolidation. Known terminal failures can receive a new operation ID. `retry-failed` does not reset unresolved submissions.
+If you are running a one-off import instead of a service, wait for the previous command to stop, reset the failures, then resume that import. To process just the existing queue while the service is stopped, use `process-queued`. This supports continuous-mode auto-consolidation. Known terminal failures can receive a new operation ID. `retry-failed` does not reset unresolved submissions.
 
 Use `retry-unresolved` only after you review **all** held submissions and confirm it is safe to send each retain again. Check the original operation and any conflicting receipt ID in Hindsight. Check the remote document and its expected hash. If a prior write can still run or its outcome makes a repeat unsafe, leave the holds in place.
 

@@ -71,7 +71,7 @@ A small file is sufficient. Omitted settings retain their defaults.
 
 The approval file can set `maxEstimatedInputTokens: null` to disable its cumulative token ceiling without disabling other checks. If you set `continuousMinFailureSample`, the continuous daemon applies `maxFailureRate` only when the batch selects at least that many generations. By default, the check applies to every nonempty batch. Manual and bulk runs do not use the sample size. See [provider approval](PROVIDER-GATE.md#approval).
 
-Increasing `maxAttempts` can make exhausted failures eligible again. Review the root cause and budget first. The same limit applies to queue counts, candidate selection, and execution. `retry-failed` remains an explicit reset command.
+The attempt limit applies to queue counts, candidate selection, and execution. An admission block does not use attempts. After correcting the cause of exhausted failures, use the [retry procedure](OPERATIONS.md#retry-failures) to reset them. If the server has indexed failover routes, [update the approval](PROVIDER-GATE.md#migrate-an-approval-for-failover) before rollout.
 
 Counters, sizes, and time values must be safe positive integers, except documented zero values. Internal file-format offsets, HTTP codes, redaction policy, identity rules, and output safety bounds are named constants, not user settings.
 
@@ -99,8 +99,6 @@ All keys below are inside `hindsight`.
 | `recallSourceFactsMaxTokens` | 1500 | Supporting fact token budget. Zero is allowed. |
 | `minRelevanceScore` | 0.01 | Minimum finite final score for a recall match. Results with no final score do not match, even at zero. This is not a confidence score. |
 | `operationRetentionDays` | 14 | Retention policy metadata; zero is allowed. Changing this value alone does not change the server's environment. |
-
-The config loader accepts `overdueSubmissionSeconds` even when overdue-submission reporting is not available.
 
 URLs must be valid HTTP or HTTPS URLs without embedded credentials, queries, or fragments. Use the token file for API authentication. Millisecond timeouts must not exceed Node's timer limit (2147483647 ms). The maximum retry delay must be at least the initial retry delay.
 

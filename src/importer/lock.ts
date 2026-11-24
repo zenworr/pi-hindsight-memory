@@ -32,7 +32,7 @@ export async function withWriterLock<T>(databasePath: string, fn: () => T | Prom
     try { lock.exec("BEGIN EXCLUSIVE"); }
     catch (error) {
       if (error instanceof Error && "errcode" in error && error.errcode === SQLITE_BUSY) {
-        throw new Error(`Importer writer lock is busy (${lockPath}); stop pi-hindsight-importer first or wait for the other writer to finish`, { cause: error });
+        throw new Error(`Importer writer lock is busy (${lockPath}); run scripts/importer-service.sh stop if the importer service is running, or wait for the other writer to finish`, { cause: error });
       }
       throw error;
     }

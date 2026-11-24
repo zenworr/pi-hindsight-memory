@@ -185,7 +185,7 @@ The importer estimates one input token per four canonical bytes. Real provider u
 
 ## 6. Create the local approval gate
 
-The importer refuses paid retention without this file. The last two values are provider prices per million input and output tokens:
+The importer requires this approval file for normal retention. The last two values are provider prices per million input and output tokens:
 
 ```bash
 MAX_INPUT_TOKENS=YOUR_LIMIT
@@ -201,7 +201,7 @@ scripts/create-import-approval.sh \
   "$OUTPUT_PRICE"
 ```
 
-Use approved values. A zero price disables useful cost estimation; use it only when the provider account has no billed cost. The token ceiling remains active either way.
+Use approved values. Zero prices do not enforce actual spending; use them only when the provider account has no billed cost. Use `null` for the token ceiling only if you intend to remove that limit. If the service has failover routes, [declare and approve them](PROVIDER-GATE.md#migrate-an-approval-for-failover) before importing.
 
 ## 7. Run a small extraction pilot
 
@@ -275,14 +275,7 @@ scripts/configure-concurrency.sh 2
 
 Then rerun the import command. Do not change concurrency while active retain operations are running.
 
-If failures came from a temporary provider or Docker outage:
-
-```bash
-node dist/src/importer/cli.js retry-failed
-scripts/import-all.sh
-```
-
-Review the errors before retrying. Parser, classification, budget, and redaction failures are not temporary failures.
+If an update has exhausted its attempts, correct the cause first. For this one-off import, stop the running command, run `node dist/src/importer/cli.js retry-failed`, then resume with `scripts/import-all.sh`. After you install the continuous service, use the [stop → retry-failed → start procedure](OPERATIONS.md#retry-failures) instead. A disk, budget, or provider approval block does not use attempts. Correct the block and resume the one-off import; the continuous daemon rechecks it automatically.
 
 ## 9. Final catch-up and verification
 
@@ -366,7 +359,7 @@ scripts/importer-service.sh status
 node dist/src/importer/cli.js status
 ```
 
-On macOS, Docker Desktop must start at login for `restart: unless-stopped` to take effect. The LaunchAgent keeps the importer alive; the importer retries Hindsight on its normal scan interval.
+On macOS, Docker Desktop must start at login for `restart: unless-stopped` to take effect. The LaunchAgent keeps the importer alive; the importer retries failed and blocked cycles on its retry schedule.
 
 ## Rollback
 

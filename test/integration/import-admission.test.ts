@@ -46,7 +46,7 @@ async function fixture(t: TestContext) {
   const documents = new Map<string, string>();
   const operations = new Map<string, string>();
   const polls: string[] = [];
-  const remote = { reject: false, unexpected: false, observations: true, documentReads: 0 };
+  const remote = { reject: false, unexpected: false, observations: true, documentReads: 0, loseReceipt: false, holdPoll: false };
   const bank = `/v1/default/banks/${config.hindsight.bankId}`;
   const server = http.createServer((req, res) => {
     const url = new URL(req.url!, "http://127.0.0.1").pathname;
@@ -62,6 +62,7 @@ async function fixture(t: TestContext) {
     } else if (url.startsWith(`${bank}/operations/`)) {
       const id = url.split("/").at(-1)!;
       polls.push(id);
+      if (remote.holdPoll) return;
       const status = operations.get(id);
       reply(status ? 200 : 404, { status });
     } else if (url === `${bank}/memories` && req.method === "POST") {
@@ -74,7 +75,8 @@ async function fixture(t: TestContext) {
         if (remote.reject) { reply(400, {}); return; }
         for (const item of retain.items) documents.set(item.document_id, item.metadata.canonical_hash!);
         operations.set(retain.operation_id, "completed");
-        reply(200, { operation_id: retain.operation_id });
+        if (remote.loseReceipt) res.destroy();
+        else reply(200, { operation_id: retain.operation_id });
       });
     } else reply(404, {});
   });
@@ -179,6 +181,50 @@ test("budget refusal preserves the queued generation and resumes automatically a
     assert.equal(f.state.getLatestGeneration("pi", "budget")?.attemptCount, 1);
     assert.deepEqual(f.retains.map((item) => item.operation_id), [queued.operationId]);
   } finally { process.emit("SIGTERM"); await daemon; }
+});
+
+test("an admission block and shutdown during lost-receipt recovery do not duplicate a retain", async (t) => {
+  const f = await fixture(t);
+  await f.addPi("interrupted-retain");
+  await scan(f.config, f.state);
+  const queued = f.state.getLatestGeneration("pi", "interrupted-retain")!;
+  await f.writeApproval({ maxEstimatedInputTokens: 1 });
+  f.remote.loseReceipt = true;
+  f.remote.holdPoll = true;
+
+  let daemon = runDaemon(f.config, { scanFirst: false });
+  const stop = async () => { process.emit("SIGTERM"); await daemon; };
+  try {
+    await until(() => phase(f.state) === "blocked");
+    assert.equal(f.state.getImportBlock()?.reason, "budget-exceeded");
+    assert.deepEqual(f.state.getLatestGeneration("pi", queued.nativeSessionId), queued);
+    assert.equal(f.state.budget().reservedInputTokens, 0);
+    assert.equal(f.retains.length, 0);
+    await f.writeApproval();
+    await until(() => f.polls.length > 0);
+  } finally { await stop(); }
+
+  assert.equal(phase(f.state), "stopped");
+  const interrupted = f.state.getOperation(queued.operationId);
+  assert.equal(interrupted?.hindsightStatus, "submitting");
+  assert.ok(interrupted.submittedAt);
+  assert.equal(f.state.getLatestGeneration("pi", queued.nativeSessionId)?.state, "submitted");
+  assert.deepEqual(f.polls, [queued.operationId]);
+  const reserved = f.state.budget().reservedInputTokens;
+  assert.ok(reserved > 0);
+
+  f.remote.holdPoll = false;
+  daemon = runDaemon(f.config, { scanFirst: false });
+  try {
+    await until(() => phase(f.state) === "idle" && f.state.getLatestGeneration("pi", queued.nativeSessionId)?.state === "completed");
+    assert.equal(f.state.getImportBlock(), undefined);
+    assert.equal(f.state.getLatestGeneration("pi", queued.nativeSessionId)?.attemptCount, 1);
+    assert.equal(f.state.getOperation(queued.operationId)?.submittedAt, interrupted.submittedAt);
+    assert.equal(f.state.getOperation(queued.operationId)?.hindsightStatus, "completed");
+    assert.equal(f.state.budget().reservedInputTokens, reserved);
+    assert.deepEqual(f.retains.map((item) => item.operation_id), [queued.operationId]);
+    assert.deepEqual(f.polls, [queued.operationId, queued.operationId]);
+  } finally { await stop(); }
 });
 
 test("one remaining budget reservation admits only one parallel generation", async (t) => {

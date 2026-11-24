@@ -55,7 +55,7 @@ async function writeJson(outputPath: string | undefined, valueToWrite: unknown):
 
 function usage(): void {
   process.stdout.write(`pi-hindsight-memory\n\nUsage:\n  config [--defaults | --check]\n  inventory [--output FILE] [--source SOURCE] [--limit N] [--summary-only]\n  scan [--source SOURCE] [--session-id ID] [--limit N] [--force]\n  index-evidence [--source SOURCE] [--session-id ID] [--limit N] [--force]\n  plan-repair [--output FILE]\n  repair --plan FILE [--max-ms N]\n  daemon [--once] [--no-scan]\n  drain [--max-ms N] [--no-scan]\n  process-queued [--max-ms N]\n  import-all [--cohort N] [--max-ms N]\n  verify-import\n  verify-ready\n  plan-cleanup [--output FILE] [--include-ambiguous]
-  cleanup-subagents --apply --plan FILE\n  spool-cleanup [--apply]\n  status\n  pause | resume\n  configure-bank [--file FILE]\n  consolidate\n  enable-auto-consolidation\n  retry-failed\n  retry-unresolved\n  cancel-queued\n  dry-run-extract CANONICAL_FILE [--mode concise|verbose]\n  select-pilot INVENTORY_JSON [--count N] [--max-bytes N] [--include-largest]\n  queue-pilot PILOT_JSON\n  run-pilot PILOT_JSON OUTPUT_JSON\n  export-canonical SOURCE SESSION_ID OUTPUT_FILE\n  doctor\n\nAll commands accept --config FILE and --help. Numeric limits must be positive integers.\n`);
+  cleanup-subagents --apply --plan FILE\n  spool-cleanup [--apply]  Preview eligible payload removal unless --apply is set.\n  status\n  pause | resume\n  configure-bank [--file FILE]\n  consolidate\n  enable-auto-consolidation\n  retry-failed            Reset failed updates after fixing the cause.\n  retry-unresolved        Requeue all held submissions only after reviewing them.\n  cancel-queued\n  dry-run-extract CANONICAL_FILE [--mode concise|verbose]\n  select-pilot INVENTORY_JSON [--count N] [--max-bytes N] [--include-largest]\n  queue-pilot PILOT_JSON\n  run-pilot PILOT_JSON OUTPUT_JSON\n  export-canonical SOURCE SESSION_ID OUTPUT_FILE\n  doctor\n\nAll commands accept --config FILE and --help. Numeric limits must be positive integers.\nStop the importer before retry-failed, retry-unresolved, or spool-cleanup.\n`);
 }
 
 async function doctor(config: ReturnType<typeof loadConfig>): Promise<Record<string, unknown>> {
@@ -221,8 +221,7 @@ async function main(): Promise<void> {
     await writeJson(value(args, "--output"), await buildRepairPlan(config)); return;
   }
   if (command === "repair") {
-    const planFile = value(args, "--plan");
-    if (!planFile) throw new Error("repair requires --plan FILE");
+    const planFile = value(args, "--plan")!;
     const plan = JSON.parse(await fs.readFile(planFile, "utf8")) as RepairPlan;
     const controller = new AbortController();
     const stop = () => { controller.abort(); };
@@ -237,9 +236,7 @@ async function main(): Promise<void> {
     await writeJson(value(args, "--output"), await buildCleanupPlan(config, new HindsightClient(config.hindsight), { includeAmbiguous: has(args, "--include-ambiguous") })); return;
   }
   if (command === "cleanup-subagents") {
-    if (!has(args, "--apply")) throw new Error("cleanup-subagents requires --apply");
-    const planPath = value(args, "--plan");
-    if (!planPath) throw new Error("cleanup-subagents requires --plan FILE");
+    const planPath = value(args, "--plan")!;
     const expected = JSON.parse(await fs.readFile(planPath, "utf8")) as CleanupPlan | null;
     if (!expected?.planHash) throw new Error("cleanup plan has no planHash");
     const result = await cleanupSubagents(config, new HindsightClient(config.hindsight), expected);

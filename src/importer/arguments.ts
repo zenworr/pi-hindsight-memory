@@ -57,7 +57,11 @@ export function parseArguments(input: string[]): CommandArguments {
     if (seen.has(token.name)) throw new Error(`Duplicate option: --${token.name}`);
     seen.add(token.name);
   }
-  if (!values.help && positionals.length !== spec.positionals) throw new Error(`${command} requires ${spec.positionals} positional argument(s); run ${command} --help`);
+  if (!values.help) {
+    if (positionals.length !== spec.positionals) throw new Error(`${command} requires ${spec.positionals} positional argument(s); run ${command} --help`);
+    if (command === "cleanup-subagents" && !values.apply) throw new Error("cleanup-subagents requires --apply");
+    if ((command === "repair" || command === "cleanup-subagents") && !values.plan) throw new Error(`${command} requires --plan FILE`);
+  }
   if (values.source !== undefined && !SOURCES.some(source => source === values.source)) throw new Error(`Invalid source: ${String(values.source)}`);
   if (values.mode !== undefined && values.mode !== "concise" && values.mode !== "verbose") throw new Error("--mode must be concise or verbose");
   for (const flag of INTEGER_FLAGS) if (values[flag] !== undefined) positiveInteger(Number(values[flag]), `--${flag}`);
