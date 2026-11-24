@@ -41,6 +41,8 @@ The importer reserves estimated input tokens and cost before each retain. Set `m
 
 The estimate is a guardrail, not a provider invoice. Prompt overhead and consolidation can increase actual use. Configure a provider-side budget or rate limit as well.
 
+The importer checks `minFreeBytes` on the state database and spool filesystems. A disk, approval, extraction, or budget block does not use an import attempt. The daemon still polls submitted operations. It retries blocked work automatically after the check passes. It does not reset exhausted document failures.
+
 ### Migrate an approval for failover
 
 An existing single-route approval needs no change unless the local metadata declares indexed routes.

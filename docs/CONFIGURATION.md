@@ -58,18 +58,18 @@ A small file is sufficient. Omitted settings retain their defaults.
 
 | Key | Default | Purpose |
 | --- | --- | --- |
-| `scanIntervalSeconds` | 900 | Interval between successful full scans. |
+| `scanIntervalSeconds` | 900 | Interval after a full scan completes. A later worker or verification error does not reset the scan schedule. |
 | `sessionSettleSeconds` | 3600 | Time a source fingerprint must remain stable before import. Zero disables settling. A scan clears a missing session's settling record only after a complete, error-free scan of its source and origin. |
 | `maxInflightDocuments` | 4 | Maximum concurrent document workers. This does not set server-side LLM concurrency. |
 | `maxCanonicalBytes` | 104857600 | Maximum normalized document size in bytes (100 MiB). |
 | `requireImportApproval` | true | Require provider, privacy, and budget approval before import. Keep enabled for normal use. |
 | `sessionExclusions.exactLabels` | `[]` | Exact normalized session labels to exclude. See [setup](SETUP-GUIDE.md). |
-| `importer.retryDelayMs` | 30000 | Delay after a failed daemon cycle. |
+| `importer.retryDelayMs` | 30000 | Delay before retrying a failed or blocked daemon cycle. |
 | `importer.maxAttempts` | 3 | Maximum attempts for a failed generation. Submitted operations remain recoverable. |
 | `importer.workBatchSize` | 1000 | Maximum candidates selected per worker pass. The concurrency limit still applies. |
 | `importer.overdueSubmissionSeconds` | 7200 | Age threshold in seconds for reporting an overdue submission. This is not a retry deadline. |
 
-The approval file can set `maxEstimatedInputTokens: null` to disable its cumulative token ceiling without disabling other checks. The optional `continuousMinFailureSample` sets a minimum sample size for continuous failure-rate checks when supported by the importer. Omit it to keep the existing check. See [provider approval](PROVIDER-GATE.md#approval).
+The approval file can set `maxEstimatedInputTokens: null` to disable its cumulative token ceiling without disabling other checks. If you set `continuousMinFailureSample`, the continuous daemon applies `maxFailureRate` only when the batch selects at least that many generations. By default, the check applies to every nonempty batch. Manual and bulk runs do not use the sample size. See [provider approval](PROVIDER-GATE.md#approval).
 
 Increasing `maxAttempts` can make exhausted failures eligible again. Review the root cause and budget first. The same limit applies to queue counts, candidate selection, and execution. `retry-failed` remains an explicit reset command.
 

@@ -41,6 +41,8 @@ export class HindsightOperationError extends Error {
 
 export class HindsightPollTimeoutError extends Error {}
 
+export class HindsightBankPolicyError extends Error {}
+
 export interface HindsightDocument {
   id: string;
   content_hash?: string;
@@ -82,7 +84,6 @@ function estimateTokens(text: string): number { return Math.ceil([...text].lengt
 export class HindsightClient {
   private bankEnsured = false;
   private bankConfigurationVerified = false;
-  private extractionAvailabilityVerified = false;
   constructor(
     private readonly config: HindsightConfig,
     private readonly fetcher: FetchLike = globalThis.fetch.bind(globalThis),
@@ -204,10 +205,8 @@ export class HindsightClient {
   }
 
   async assertExtractionAvailable(signal?: AbortSignal): Promise<void> {
-    if (this.extractionAvailabilityVerified) return;
     const version = await this.requestJson<HindsightVersionResponse>("GET", `${this.config.apiUrl.replace(/\/$/, "")}/version`, undefined, signal);
-    if (version.features?.observations === false) throw new Error("Hindsight is running without an extraction/consolidation LLM; configure an approved provider before importing durable memory");
-    this.extractionAvailabilityVerified = true;
+    if (version.features?.observations === false) throw new HindsightBankPolicyError("Hindsight is running without an extraction/consolidation LLM; configure an approved provider before importing durable memory");
   }
 
   async assertBankConfiguration(options: { requireExtraction?: boolean; bulk?: boolean; signal?: AbortSignal } = {}): Promise<HindsightBankConfigResponse> {
@@ -216,17 +215,17 @@ export class HindsightClient {
     const config = response.config ?? {};
     const strategies = config.retain_strategies;
     const conversation = strategies && typeof strategies === "object" ? (strategies as Record<string, unknown>).conversation : undefined;
-    if (!conversation || typeof conversation !== "object") throw new Error(`Hindsight bank ${this.config.bankId} has no named conversation retain strategy`);
-    if (config.store_document_text !== true) throw new Error("Hindsight bank must have store_document_text=true; mutable source documents require stored text");
+    if (!conversation || typeof conversation !== "object") throw new HindsightBankPolicyError(`Hindsight bank ${this.config.bankId} has no named conversation retain strategy`);
+    if (config.store_document_text !== true) throw new HindsightBankPolicyError("Hindsight bank must have store_document_text=true; mutable source documents require stored text");
     if (options.requireExtraction) {
       const extractionMode = (conversation as Record<string, unknown>).retain_extraction_mode ?? config.retain_extraction_mode;
-      if (extractionMode === "chunks" || extractionMode !== "concise" && extractionMode !== "verbose") throw new Error(`Hindsight conversation strategy has invalid extraction mode: ${String(extractionMode)}`);
-      if (config.enable_observations !== true) throw new Error("Hindsight observations are disabled for the production bank");
-      if (typeof config.observations_mission !== "string" || !config.observations_mission.trim()) throw new Error("Hindsight observations mission is missing");
+      if (extractionMode === "chunks" || extractionMode !== "concise" && extractionMode !== "verbose") throw new HindsightBankPolicyError(`Hindsight conversation strategy has invalid extraction mode: ${String(extractionMode)}`);
+      if (config.enable_observations !== true) throw new HindsightBankPolicyError("Hindsight observations are disabled for the production bank");
+      if (typeof config.observations_mission !== "string" || !config.observations_mission.trim()) throw new HindsightBankPolicyError("Hindsight observations mission is missing");
       const effectiveMission = (conversation as Record<string, unknown>).retain_mission ?? config.retain_mission;
-      if (effectiveMission !== await expectedRetainMission()) throw new Error("Hindsight effective conversation mission does not match the required evidence policy");
-      if (config.retain_default_strategy !== "conversation") throw new Error("Hindsight default retain strategy is not conversation");
-      if (options.bulk && config.enable_auto_consolidation !== false) throw new Error("Hindsight auto-consolidation must be disabled during bulk import");
+      if (effectiveMission !== await expectedRetainMission()) throw new HindsightBankPolicyError("Hindsight effective conversation mission does not match the required evidence policy");
+      if (config.retain_default_strategy !== "conversation") throw new HindsightBankPolicyError("Hindsight default retain strategy is not conversation");
+      if (options.bulk && config.enable_auto_consolidation !== false) throw new HindsightBankPolicyError("Hindsight auto-consolidation must be disabled during bulk import");
     }
     this.bankConfigurationVerified = true;
     return response;
@@ -386,7 +385,6 @@ export class HindsightClient {
     await this.requestJson("DELETE", this.bankUrl(), undefined, signal);
     this.bankEnsured = false;
     this.bankConfigurationVerified = false;
-    this.extractionAvailabilityVerified = false;
   }
 
   async health(signal?: AbortSignal): Promise<Record<string, unknown>> {

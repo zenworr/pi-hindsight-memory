@@ -1,29 +1,65 @@
-import { statfs } from "node:fs/promises";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { SpanKind } from "@opentelemetry/api";
 import { inSpan, telemetryCount, telemetryQueueWait } from "../common/telemetry.js";
 import { HTTP_STATUS, isRetryableStatus } from "../hindsight/http.js";
-import type { AppConfig, CanonicalSession, CanonicalSessionMetadata, HindsightOperation, ImportApproval, SessionReference } from "../common/types.js";
+import type { AppConfig, CanonicalSession, CanonicalSessionMetadata, HindsightOperation, ImportApproval, ImportBlockReason, SessionReference } from "../common/types.js";
 import { CANONICAL_SCHEMA, ADAPTER_VERSION, REDACTION_POLICY_VERSION } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
 import type { HindsightClient} from "../hindsight/client.js";
-import { HindsightHttpError, HindsightOperationError, HindsightPollTimeoutError } from "../hindsight/client.js";
+import { HindsightBankPolicyError, HindsightHttpError, HindsightOperationError, HindsightPollTimeoutError } from "../hindsight/client.js";
 import { errorMessage, Logger } from "../common/logging.js";
-import { assertImportApproval, estimateCostUsd, estimateInputTokens, readApproval } from "../common/approval.js";
+import { assertImportApproval, estimateCostUsd, estimateInputTokens, ImportApprovalError } from "../common/approval.js";
 import { redactText } from "../canonical/redact.js";
 import { Semaphore } from "./scheduler.js";
 import { sleep } from "../common/async.js";
 import { ERROR_MESSAGE_MAX_CHARS, MS_PER_SECOND } from "../common/limits.js";
-import type { GenerationRecord, SessionStateRecord } from "./state-db.js";
-import type { StateDatabase } from "./state-db.js";
+import type { GenerationRecord, ImportBlock, SessionStateRecord, StateDatabase } from "./state-db.js";
+import { canPollOperation, TERMINAL_OPERATION_FAILURES } from "./state-db.js";
 import { configuredExclusion } from "./exclusions.js";
 import { nextOperationId } from "./queue.js";
 import { removeEvidence } from "./evidence.js";
 import { loadPendingPayload, removePendingPayload, savePendingPayload, StaleRedactionPayloadError } from "./pending-payload.js";
 
-export interface WorkerSummary { selected: number; completed: number; failed: number; deferred: number; }
+type Block = Omit<ImportBlock, "since">;
+type Admission = { approval?: ImportApproval; blocked?: never } | { blocked: Block; approval?: never };
+type WorkOutcome = "completed" | "failed" | "deferred" | Block;
+export interface WorkerSummary { selected: number; completed: number; failed: number; deferred: number; blocked?: Block; }
+
+export class ImportFailureRateError extends Error {
+  constructor(readonly summary: WorkerSummary, maxFailureRate: number) {
+    super(`Import failure rate ${summary.failed}/${summary.selected} exceeded approved maximum ${maxFailureRate}`);
+  }
+}
+
+const BLOCK_ACTIONS: Record<ImportBlockReason, string> = {
+  "disk-below-minimum": "Free disk space on the importer state and spool filesystems, and check that both are accessible.",
+  "approval-missing": "Create a reviewed import approval.",
+  "approval-invalid": "Correct the import approval file.",
+  "provider-not-approved": "Review the active provider and model, then update the import approval.",
+  "budget-exceeded": "Review the cumulative budget and approve a new limit if appropriate.",
+  "extraction-unavailable": "Check the Hindsight extraction provider and bank policy.",
+  "hindsight-unreachable": "Check access to the Hindsight API.",
+};
+
+class AdmissionError extends Error {
+  constructor(readonly reason: ImportBlockReason, message: string, cause?: unknown) { super(message, { cause }); }
+}
+
+function importBlock(reason: ImportBlockReason): Block { return { reason, action: BLOCK_ACTIONS[reason] }; }
 const OPERATION_POLL_SLICE_MS = 30_000;
 const BLOCKED_QUEUE_RETRY_MS = 250;
-const TERMINAL_FAILURES = ["failed", "cancelled", "error", "rejected"];
+
+async function availableBytes(directory: string): Promise<number> {
+  try {
+    const filesystem = await fs.statfs(directory);
+    return Number(filesystem.bavail) * Number(filesystem.bsize);
+  } catch (error) {
+    const parent = path.dirname(directory);
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT" || parent === directory) throw error;
+    return availableBytes(parent);
+  }
+}
 
 export class ImportWorker {
   private readonly limiter: Semaphore;
@@ -33,24 +69,58 @@ export class ImportWorker {
     this.logger = logger ?? new Logger("import-worker");
   }
 
-  async preflight(signal?: AbortSignal): Promise<ImportApproval | undefined> {
-    const approval = this.config.requireImportApproval ? assertImportApproval(this.config) : undefined;
-    await this.client.ensureBank(signal);
-    await this.client.assertBankConfiguration({ requireExtraction: true, bulk: this.bulkMode, signal });
-    await this.client.assertExtractionAvailable(signal);
+  private async localApproval(): Promise<ImportApproval | undefined> {
+    let approval: ImportApproval | undefined;
+    try { if (this.config.requireImportApproval) approval = assertImportApproval(this.config); }
+    catch (error) { throw new AdmissionError(error instanceof ImportApprovalError ? error.reason : "approval-invalid", errorMessage(error), error); }
+    if (approval?.minFreeBytes !== undefined) {
+      const stateDirectory = this.state.databasePath === ":memory:" ? this.config.stateDirectory : path.dirname(this.state.databasePath);
+      let available: number[];
+      try { available = await Promise.all([...new Set([stateDirectory, this.config.spoolDirectory])].map(availableBytes)); }
+      catch (error) { throw new AdmissionError("disk-below-minimum", "Cannot check free disk space", error); }
+      if (Math.min(...available) < approval.minFreeBytes) throw new AdmissionError("disk-below-minimum", "Free disk space is below the approved minimum");
+    }
     return approval;
   }
 
-  async runOnce(limit = this.config.importer.workBatchSize, signal?: AbortSignal): Promise<WorkerSummary> {
+  async preflight(signal?: AbortSignal): Promise<ImportApproval | undefined> {
+    const approval = await this.localApproval();
+    try {
+      await this.client.ensureBank(signal);
+      await this.client.assertBankConfiguration({ requireExtraction: true, bulk: this.bulkMode, signal });
+      await this.client.assertExtractionAvailable(signal);
+    } catch (error) { throw new AdmissionError(error instanceof HindsightBankPolicyError ? "extraction-unavailable" : "hindsight-unreachable", errorMessage(error), error); }
+    return approval;
+  }
+
+  async checkAdmission(signal?: AbortSignal): Promise<Admission> {
+    try { return { approval: await inSpan("hindsight.import.preflight", {}, () => this.preflight(signal)) }; }
+    catch (error) {
+      signal?.throwIfAborted();
+      if (!(error instanceof AdmissionError)) throw error;
+      return { blocked: importBlock(error.reason) };
+    }
+  }
+
+  async runOnce(limit = this.config.importer.workBatchSize, signal?: AbortSignal, options: { continuous?: boolean; admission?: Admission } = {}): Promise<WorkerSummary> {
     const candidates = this.state.listWorkCandidates(limit, this.config.importer.maxAttempts);
     const summary: WorkerSummary = { selected: candidates.length, completed: 0, failed: 0, deferred: 0 };
+    const admission = options.admission ?? (candidates.length && !signal?.aborted ? await this.checkAdmission(signal) : {});
+    if (admission.blocked) summary.blocked = admission.blocked;
     await Promise.all(candidates.map((generation) => this.limiter.run(async () => {
       if (signal?.aborted) { summary.deferred += 1; return; }
-      const result = await this.process(generation, signal);
-      summary[result] += 1;
+      const result = await this.process(generation, admission, signal);
+      if (typeof result !== "string") {
+        summary.blocked ??= result;
+        summary.deferred += 1;
+      } else summary[result] += 1;
     })));
-    const approval = this.config.requireImportApproval ? readApproval(this.config.approvalFile) : undefined;
-    if (approval?.maxFailureRate !== undefined && summary.selected > 0 && summary.failed / summary.selected > approval.maxFailureRate) throw new Error(`Import failure rate ${summary.failed}/${summary.selected} exceeded approved maximum ${approval.maxFailureRate}`);
+    const approval = admission.approval;
+    const minimum = options.continuous ? approval?.continuousMinFailureSample ?? 1 : 1;
+    if (approval?.maxFailureRate !== undefined && summary.selected >= minimum && summary.failed / summary.selected > approval.maxFailureRate) {
+      this.logger.error("Import failure rate exceeded approved maximum", { ...summary, maxFailureRate: approval.maxFailureRate });
+      throw new ImportFailureRateError(summary, approval.maxFailureRate);
+    }
     return summary;
   }
 
@@ -61,6 +131,7 @@ export class ImportWorker {
       if (Date.now() - started >= maxMs) throw new Error(`Importer still has pending work after ${maxMs} ms`);
       const batch = await this.runOnce(this.config.importer.workBatchSize, signal);
       total.selected += batch.selected; total.completed += batch.completed; total.failed += batch.failed; total.deferred += batch.deferred;
+      if (batch.blocked) throw new Error(`Import blocked (${batch.blocked.reason}): ${batch.blocked.action}`);
       if (batch.selected === 0 && !signal?.aborted && this.state.pendingWorkCount(this.config.importer.maxAttempts) > 0) throw new Error("Importer has unresolved generations; inspect status before retrying");
       if (batch.completed === 0 && batch.failed === 0 && this.state.pendingWorkCount(this.config.importer.maxAttempts) > 0) {
         if (!this.state.hasActiveOperations()) throw new Error("Queued work is blocked; inspect session classification and cleanup state");
@@ -85,40 +156,52 @@ export class ImportWorker {
     });
   }
 
-  private async process(generation: GenerationRecord, shutdownSignal?: AbortSignal): Promise<"completed" | "failed" | "deferred"> {
+  private async process(generation: GenerationRecord, admission: Admission, shutdownSignal?: AbortSignal): Promise<WorkOutcome> {
     return inSpan("hindsight.import.generation", { source: generation.source, "retry.attempt": generation.attemptCount + 1 }, async (span) => {
-      const result = await this.processGeneration(generation, shutdownSignal);
-      span?.setAttribute("hindsight.result", result);
-      telemetryCount("hindsight.import.generations", 1, { source: generation.source, outcome: result });
+      const result = await this.processGeneration(generation, admission, shutdownSignal);
+      const outcome = typeof result === "string" ? result : "deferred";
+      span?.setAttribute("hindsight.result", outcome);
+      telemetryCount("hindsight.import.generations", 1, { source: generation.source, outcome });
       return result;
-    }, SpanKind.INTERNAL, (result) => result === "failed" ? "error" : result === "deferred" ? shutdownSignal?.aborted ? "cancelled" : "incomplete" : "ok");
+    }, SpanKind.INTERNAL, (result) => result === "failed" ? "error" : result === "completed" ? "ok" : shutdownSignal?.aborted ? "cancelled" : "incomplete");
   }
 
-  private async processGeneration(generation: GenerationRecord, shutdownSignal?: AbortSignal): Promise<"completed" | "failed" | "deferred"> {
+  private async processGeneration(generation: GenerationRecord, admission: Admission, shutdownSignal?: AbortSignal): Promise<WorkOutcome> {
     if (generation.state === "failed" && generation.attemptCount >= this.config.importer.maxAttempts) return "deferred";
+    let persisted = this.state.getOperation(generation.operationId);
+    const polling = canPollOperation(persisted);
+    const sessionState = this.state.getSession(generation.source, generation.nativeSessionId);
+    if (!sessionState) return "deferred";
+    if (!polling) {
+      if (admission.blocked) return "deferred";
+      let approval: ImportApproval | undefined;
+      try { approval = await this.localApproval(); }
+      catch (error) { if (error instanceof AdmissionError) return importBlock(error.reason); throw error; }
+      if (approval && !persisted && sessionState.canonicalHash === generation.canonicalHash && sessionState.canonicalBytes !== undefined) {
+        const inputTokens = estimateInputTokens(sessionState.canonicalBytes);
+        if (!this.state.canReserveBudget(generation.operationId, inputTokens, estimateCostUsd(inputTokens, approval), approval.maxEstimatedInputTokens, approval.maxEstimatedCostUsd)) return importBlock("budget-exceeded");
+      }
+    }
+    if (shutdownSignal?.aborted) return "deferred";
+    const unclaimed = generation;
     if (!this.state.claimGeneration(generation)) return "deferred";
-    if (generation.state === "queued" && generation.attemptCount === 0) telemetryQueueWait((Date.now() - Date.parse(generation.queuedAt)) / MS_PER_SECOND, generation.source);
+    const claimedAt = Date.now();
     generation = this.state.getGeneration(generation.source, generation.nativeSessionId, generation.canonicalHash)!;
-    const sessionState = this.state.getSession(generation.source, generation.nativeSessionId)!;
     let session: CanonicalSession | undefined;
     let previousPayloadId: string | undefined;
-    let persisted = this.state.getOperation(generation.operationId);
-    if (generation.repair && !persisted && sessionState.acknowledgedPolicy === generation.retainPolicyVersion) {
-      generation = { ...generation, repair: false };
-      this.state.upsertGeneration(generation);
-    }
+    if (generation.repair && !persisted && sessionState.acknowledgedPolicy === generation.retainPolicyVersion) generation = { ...generation, repair: false };
     const deadlineSignal = AbortSignal.timeout(this.config.hindsight.retainWallTimeoutMs);
     const operationSignal = shutdownSignal ? AbortSignal.any([shutdownSignal, deadlineSignal]) : deadlineSignal;
     try {
       operationSignal.throwIfAborted();
-      if (persisted && TERMINAL_FAILURES.includes(persisted.hindsightStatus ?? "")) {
+      if (persisted && TERMINAL_OPERATION_FAILURES.includes(persisted.hindsightStatus ?? "")) {
         session = await loadPendingPayload(this.config.spoolDirectory, generation.operationId, generation.canonicalHash);
         previousPayloadId = session ? generation.operationId : undefined;
         generation = { ...generation, operationId: nextOperationId(this.state, this.config.hindsight.bankId, sessionState.documentId, generation.canonicalHash, generation.operationId), submittedAt: undefined, completedAt: undefined };
         persisted = undefined;
       }
       // A submitted payload belongs to the operation, not to the source file's current contents.
-      if (persisted && !["prepared", "ready"].includes(persisted.hindsightStatus ?? "")) {
+      if (polling) {
         try {
           const operation = await this.client.waitForOperation(generation.operationId, operationSignal, Math.min(OPERATION_POLL_SLICE_MS, this.config.hindsight.retainWallTimeoutMs));
           this.complete(generation, operation);
@@ -127,23 +210,24 @@ export class ImportWorker {
         } catch (error) {
           if (!(error instanceof HindsightHttpError) || error.status !== HTTP_STATUS.NOT_FOUND) throw error;
         }
+        if (admission.blocked) return "deferred";
+        await this.localApproval();
       }
       if (persisted) session = await loadPendingPayload(this.config.spoolDirectory, generation.operationId, generation.canonicalHash);
-      const adapter = createAdapters(this.config).find((item) => item.source === generation.source && (item.origin ?? this.config.localOrigin) === (sessionState.sourceOrigin ?? this.config.localOrigin));
-      if (!adapter) throw new Error(`No adapter for ${generation.source} on ${sessionState.sourceOrigin}`);
-      let reference = referenceFromState(sessionState);
-      if (this.config.desktopFeed.enabled) {
-        for await (const current of adapter.discover()) {
-          if (current.nativeSessionId === sessionState.nativeSessionId) { reference = current; break; }
-        }
-      }
+      const origin = sessionState.sourceOrigin ?? this.config.localOrigin;
+      const adapter = createAdapters(this.config, origin).find((item) => item.source === generation.source);
+      if (!adapter) throw new Error(`No adapter for ${generation.source} on ${origin}`);
+      const reference = referenceFromState(sessionState);
+      const immutable = session?.classification;
+      session ??= await inSpan("hindsight.source.normalize", { source: generation.source }, () => adapter.load(reference, { spoolDirectory: this.config.spoolDirectory, maxCanonicalBytes: this.config.maxCanonicalBytes, signal: operationSignal }));
+      operationSignal.throwIfAborted();
       let structuralClassification;
       try { structuralClassification = await adapter.classify(reference); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT" || session?.classification?.kind !== "primary") throw error;
-        structuralClassification = session.classification;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT" || immutable?.kind !== "primary") throw error;
+        structuralClassification = immutable;
       }
-      if (structuralClassification.reason === "opencode-session-disappeared-during-classification" && session?.classification?.kind === "primary") structuralClassification = session.classification;
+      if (structuralClassification.reason === "opencode-session-disappeared-during-classification" && immutable?.kind === "primary") structuralClassification = immutable;
       const tombstone = this.state.getExclusionTombstone(generation.source, generation.nativeSessionId, sessionState.documentId);
       const currentClassification = configuredExclusion(structuralClassification.label, this.config.sessionExclusions) ?? (tombstone ? { kind: "configured-exclusion" as const, reason: "persisted-configured-exclusion", policyVersion: structuralClassification.policyVersion, label: tombstone.label } : structuralClassification);
       if (currentClassification.kind !== "primary") {
@@ -159,27 +243,23 @@ export class ImportWorker {
         }
         return "deferred";
       }
-      if (!session) {
-        session = await inSpan("hindsight.source.normalize", { source: generation.source }, () => adapter.load(reference, { spoolDirectory: this.config.spoolDirectory, maxCanonicalBytes: this.config.maxCanonicalBytes, signal: operationSignal }));
-        operationSignal.throwIfAborted();
-        if (session.canonicalHash !== generation.canonicalHash) {
-          if (persisted) throw new Error("Submitted source changed and its immutable payload is unavailable; remote reconciliation is required");
-          this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "superseded", { error: "Source changed before submission" });
-          return "deferred";
-        }
+      if (session.canonicalHash !== generation.canonicalHash) {
+        if (persisted) throw new Error("Submitted source changed and its immutable payload is unavailable; remote reconciliation is required");
+        this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "superseded", { error: "Source changed before submission" });
+        return "deferred";
       }
       if (session.emptyAfterNormalization) throw new Error("Refusing to retain an empty generation");
       if (session.metadata.redaction_policy_version !== REDACTION_POLICY_VERSION) throw new StaleRedactionPayloadError();
-      const approval = await this.preflight(operationSignal);
-      if (approval) {
-        if (approval.minFreeBytes !== undefined) {
-          const filesystem = await statfs(this.config.stateDirectory);
-          if (Number(filesystem.bavail) * Number(filesystem.bsize) < approval.minFreeBytes) throw new Error("Free disk space is below the approved minimum");
-        }
-        const inputTokens = estimateInputTokens(session.canonicalBytes);
-        if (!this.state.reserveBudget(generation.operationId, inputTokens, estimateCostUsd(inputTokens, approval), approval.maxEstimatedInputTokens, approval.maxEstimatedCostUsd)) throw new Error("Approved import budget exceeded; review the approval before retrying");
-      }
       if (generation.repair && !this.repairMode) throw new Error("Historical evidence-policy repair requires a reviewed plan-repair/repair command");
+      const approval = await this.localApproval();
+      if (approval) {
+        const inputTokens = estimateInputTokens(session.canonicalBytes);
+        if (!this.state.reserveBudget(generation.operationId, inputTokens, estimateCostUsd(inputTokens, approval), approval.maxEstimatedInputTokens, approval.maxEstimatedCostUsd)) {
+          this.state.upsertGeneration(unclaimed);
+          return importBlock("budget-exceeded");
+        }
+      }
+      if (unclaimed.state === "queued" && unclaimed.attemptCount === 0) telemetryQueueWait((claimedAt - Date.parse(unclaimed.queuedAt)) / MS_PER_SECOND, generation.source);
       if (!persisted) {
         await inSpan("hindsight.payload.persist", { source: generation.source, "hindsight.canonical.bytes": session.canonicalBytes }, () => savePendingPayload(this.config.spoolDirectory, generation.operationId, session!));
         this.state.durableTransaction(() => {
@@ -225,6 +305,10 @@ export class ImportWorker {
           this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { error: error.message });
         });
         return "deferred";
+      }
+      if (error instanceof AdmissionError) {
+        this.state.upsertGeneration(unclaimed);
+        return importBlock(error.reason);
       }
       const operation = this.state.getOperation(generation.operationId);
       const message = redactText(errorMessage(error)).text.slice(0, ERROR_MESSAGE_MAX_CHARS);

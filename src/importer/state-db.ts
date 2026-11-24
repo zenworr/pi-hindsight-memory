@@ -4,10 +4,12 @@ import { PRIVATE_FILE_MODE, ERROR_MESSAGE_MAX_CHARS } from "../common/limits.js"
 import fs from "node:fs";
 import path from "node:path";
 import { CLASSIFICATION_POLICY_VERSION, RETAIN_POLICY_VERSION } from "../common/types.js";
-import type { GenerationState, SessionClassification, Source, SourceFingerprint } from "../common/types.js";
+import type { GenerationState, ImportBlockReason, SessionClassification, Source, SourceFingerprint } from "../common/types.js";
 import { STALE_REDACTION_PAYLOAD } from "./pending-payload.js";
 
 const SOURCE_ERROR_MAX_CHARS = 2_000;
+export const TERMINAL_OPERATION_FAILURES = ["failed", "cancelled", "error", "rejected"];
+const NON_POLLABLE_OPERATIONS = ["prepared", "ready", ...TERMINAL_OPERATION_FAILURES];
 const RUNNABLE_GENERATIONS = `(state IN ('queued','submitted','processing') OR state='failed' AND attempt_count<?)
   AND NOT EXISTS (SELECT 1 FROM generations AS held
     WHERE held.source=generations.source AND held.native_session_id=generations.native_session_id AND held.state='submitted' AND held.error=?)`;
@@ -88,6 +90,8 @@ export interface GenerationRecord {
   repair?: boolean;
 }
 
+export interface ImportBlock { reason: ImportBlockReason; since: string; action: string; }
+
 export interface OperationRecord {
   operationId: string;
   documentId: string;
@@ -97,6 +101,10 @@ export interface OperationRecord {
   lastPolledAt?: string;
   retryCount: number;
   responseSummary?: string;
+}
+
+export function canPollOperation(operation?: OperationRecord): boolean {
+  return Boolean(operation && !NON_POLLABLE_OPERATIONS.includes(operation.hindsightStatus ?? ""));
 }
 
 function nullableString(value: unknown): string | undefined {
@@ -318,6 +326,12 @@ export class StateDatabase {
         this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (6,?)").run(new Date().toISOString());
       });
     }
+    if (!this.db.prepare("SELECT version FROM schema_migrations WHERE version=7").get()) {
+      this.transaction(() => {
+        this.db.exec("ALTER TABLE daemon_status ADD COLUMN blocked_json TEXT");
+        this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (7,?)").run(new Date().toISOString());
+      });
+    }
   }
 
   close(): void { this.db.close(); }
@@ -361,6 +375,18 @@ export class StateDatabase {
 
   heartbeat(phase: string, error?: string): void {
     this.db.prepare("INSERT INTO daemon_status(id,pid,heartbeat_at,phase,last_error) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET pid=excluded.pid,heartbeat_at=excluded.heartbeat_at,phase=excluded.phase,last_error=excluded.last_error").run(process.pid, new Date().toISOString(), phase, error?.slice(0, ERROR_MESSAGE_MAX_CHARS) ?? null);
+  }
+
+  getImportBlock(): ImportBlock | undefined {
+    const row = this.db.prepare("SELECT * FROM daemon_status WHERE id=1").get();
+    return typeof row?.blocked_json === "string" ? JSON.parse(row.blocked_json) as ImportBlock : undefined;
+  }
+
+  setImportBlock(block?: Omit<ImportBlock, "since">): void {
+    const current = this.getImportBlock();
+    if (current?.reason === block?.reason && current?.action === block?.action) return;
+    const since = block && current?.reason === block.reason ? current.since : new Date().toISOString();
+    this.db.prepare("UPDATE daemon_status SET blocked_json=? WHERE id=1").run(block ? JSON.stringify({ ...block, since }) : null);
   }
 
   acknowledgeGeneration(generation: GenerationRecord): void {
@@ -521,15 +547,25 @@ export class StateDatabase {
     return Number(row.count ?? 0);
   }
 
+  private budgetAfterReservation(operationId: string, inputTokens: number, estimatedCostUsd: number, maxInputTokens: number | null, maxCostUsd: number): "reserved" | { tokens: number; cost: number } | undefined {
+    if (this.db.prepare("SELECT 1 FROM budget_reservations WHERE operation_id=?").get(operationId)) return "reserved";
+    const budget = this.budget();
+    const tokens = budget.reservedInputTokens + inputTokens;
+    const cost = budget.estimatedCostUsd + estimatedCostUsd;
+    if ((maxInputTokens !== null && tokens > maxInputTokens) || cost > maxCostUsd) return undefined;
+    return { tokens, cost };
+  }
+
+  canReserveBudget(operationId: string, inputTokens: number, estimatedCostUsd: number, maxInputTokens: number | null, maxCostUsd: number): boolean {
+    return this.budgetAfterReservation(operationId, inputTokens, estimatedCostUsd, maxInputTokens, maxCostUsd) !== undefined;
+  }
+
   reserveBudget(operationId: string, inputTokens: number, estimatedCostUsd: number, maxInputTokens: number | null, maxCostUsd: number): boolean {
     return this.transaction(() => {
-      const existing = this.db.prepare("SELECT operation_id FROM budget_reservations WHERE operation_id=?").get(operationId);
-      if (existing) return true;
-      const row = this.db.prepare("SELECT reserved_input_tokens, estimated_cost_usd FROM import_budget WHERE id=1").get() as Record<string, unknown>;
-      const tokens = Number(row.reserved_input_tokens ?? 0);
-      const cost = Number(row.estimated_cost_usd ?? 0);
-      if ((maxInputTokens !== null && tokens + inputTokens > maxInputTokens) || cost + estimatedCostUsd > maxCostUsd) return false;
-      this.db.prepare("UPDATE import_budget SET reserved_input_tokens=?, estimated_cost_usd=?, updated_at=? WHERE id=1").run(tokens + inputTokens, cost + estimatedCostUsd, new Date().toISOString());
+      const next = this.budgetAfterReservation(operationId, inputTokens, estimatedCostUsd, maxInputTokens, maxCostUsd);
+      if (!next) return false;
+      if (next === "reserved") return true;
+      this.db.prepare("UPDATE import_budget SET reserved_input_tokens=?, estimated_cost_usd=?, updated_at=? WHERE id=1").run(next.tokens, next.cost, new Date().toISOString());
       this.db.prepare("INSERT INTO budget_reservations(operation_id,input_tokens,estimated_cost_usd,reserved_at) VALUES (?, ?, ?, ?)").run(operationId, inputTokens, estimatedCostUsd, new Date().toISOString());
       return true;
     });
@@ -712,8 +748,10 @@ export class StateDatabase {
 
   listWorkCandidates(limit: number, maxAttempts: number): GenerationRecord[] {
     const rows = this.db.prepare(`SELECT * FROM generations WHERE ${RUNNABLE_GENERATIONS}
-      ORDER BY CASE state WHEN 'processing' THEN 0 WHEN 'submitted' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, queued_at
-      LIMIT ?`).all(maxAttempts, STALE_REDACTION_PAYLOAD, limit) as Record<string, unknown>[];
+      ORDER BY CASE
+        WHEN EXISTS (SELECT 1 FROM operations o WHERE o.operation_id=generations.operation_id AND COALESCE(o.hindsight_status,'') NOT IN (${NON_POLLABLE_OPERATIONS.map(() => "?").join(",")})) THEN 0
+        WHEN state IN ('submitted','processing') THEN 1 WHEN state='queued' THEN 2 ELSE 3 END, queued_at
+      LIMIT ?`).all(maxAttempts, STALE_REDACTION_PAYLOAD, ...NON_POLLABLE_OPERATIONS, limit) as Record<string, unknown>[];
     return rows.map((row) => this.toGeneration(row));
   }
 

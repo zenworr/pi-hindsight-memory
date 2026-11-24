@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { defaultConfig } from "../../src/common/config.js";
 import { operationIdFor, sha256 } from "../../src/common/hashing.js";
+import { expectedRetainMission } from "../../src/common/retention-policy.js";
 import { CLASSIFICATION_POLICY_VERSION, REDACTION_POLICY_VERSION } from "../../src/common/types.js";
 import { PiAdapter } from "../../src/adapters/pi.js";
 import { HindsightClient } from "../../src/hindsight/client.js";
@@ -129,12 +130,18 @@ test("stale pending payloads stay unresolved without submission, while already c
   }
 
   const requests: string[] = [];
+  const mission = await expectedRetainMission();
   const server = createServer((request, response) => {
     const url = request.url ?? "";
-    requests.push(`${request.method} ${url.split("/").at(-1)}`);
     response.setHeader("Content-Type", "application/json");
-    if (url.endsWith(`/operations/${completedId}`)) response.end(JSON.stringify({ status: "completed" }));
-    else { response.statusCode = 404; response.end("{}"); }
+    if (request.method === "GET" && url.endsWith("/config")) {
+      response.end(JSON.stringify({ config: { store_document_text: true, retain_strategies: { conversation: { retain_mission: mission, retain_extraction_mode: "concise" } }, enable_observations: true, observations_mission: "test", retain_default_strategy: "conversation" } }));
+    } else if (request.method === "GET" && url === "/version") response.end("{}");
+    else {
+      requests.push(`${request.method} ${url.split("/").at(-1)}`);
+      if (url.endsWith(`/operations/${completedId}`)) response.end(JSON.stringify({ status: "completed" }));
+      else { response.statusCode = 404; response.end("{}"); }
+    }
   });
   t.after(() => { server.closeAllConnections(); server.close(); });
   server.listen(0, "127.0.0.1");

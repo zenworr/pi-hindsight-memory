@@ -105,7 +105,12 @@ export class OpenCodeAdapter implements SessionAdapter {
     }
   }
 
+  private assertLocator(reference: SessionReference): void {
+    if (reference.locator !== this.databasePath && reference.locator !== `${this.databasePath}#${reference.nativeSessionId}`) throw new Error("OpenCode session locator does not match the configured database and session");
+  }
+
   async classify(reference: SessionReference): Promise<SessionClassification> {
+    this.assertLocator(reference);
     const db = openReadOnly(this.databasePath);
     try {
       const row = db.prepare(`${sessionSelect(db)} WHERE id = ?`).get(reference.nativeSessionId) as DbRow | undefined;
@@ -135,6 +140,7 @@ export class OpenCodeAdapter implements SessionAdapter {
   }
 
   async load(reference: SessionReference, options: AdapterLoadOptions): Promise<CanonicalSession> {
+    this.assertLocator(reference);
     const db = openReadOnly(this.databasePath);
     const sessionId = reference.nativeSessionId;
     let spool: Awaited<ReturnType<typeof createSpool>> | undefined;

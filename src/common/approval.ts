@@ -3,12 +3,16 @@ import { parseEnv } from "node:util";
 import { positiveInteger } from "./config-validation.js";
 import { CHARS_PER_ESTIMATED_TOKEN } from "./limits.js";
 
-import type { AppConfig, ImportApproval } from "./types.js";
+import type { AppConfig, ImportApproval, ImportBlockReason } from "./types.js";
 
 const TOKENS_PER_PRICING_UNIT = 1_000_000;
 const DEFAULT_OUTPUT_TOKEN_MULTIPLIER = 0.25;
 
 export interface ActiveProvider { provider: string; model: string; }
+
+export class ImportApprovalError extends Error {
+  constructor(readonly reason: ImportBlockReason, message: string) { super(message); }
+}
 
 const APPROVAL_KEYS: Record<keyof ImportApproval, true> = {
   approvedAt: true, provider: true, model: true, privacy: true, alternateRoutes: true,
@@ -79,12 +83,12 @@ export function readApproval(pathname: string): ImportApproval | undefined {
 
 export function assertImportApproval(config: AppConfig): ImportApproval {
   const approval = readApproval(config.approvalFile);
-  if (!approval) throw new Error(`No import approval exists at ${config.approvalFile}; durable import is paused`);
+  if (!approval) throw new ImportApprovalError("approval-missing", `No import approval exists at ${config.approvalFile}; durable import is paused`);
   const environment = readEnvironmentFile(config.hindsight.environmentFile);
   const primary = primaryRoute(environment);
-  if (!providerIdentity(primary.provider)) throw new Error("Hindsight has no fact-extraction provider; durable import is paused");
-  if (approval.provider !== primary.provider) throw new Error("Import approval provider does not match active provider");
-  if (!identity(primary.model) || primary.model === "*" || (approval.model !== primary.model && approval.model !== "*")) throw new Error("Import approval model does not match active model");
+  if (!providerIdentity(primary.provider)) throw new ImportApprovalError("extraction-unavailable", "Hindsight has no fact-extraction provider; durable import is paused");
+  if (approval.provider !== primary.provider) throw new ImportApprovalError("provider-not-approved", "Import approval provider does not match active provider");
+  if (!identity(primary.model) || primary.model === "*" || (approval.model !== primary.model && approval.model !== "*")) throw new ImportApprovalError("provider-not-approved", "Import approval model does not match active model");
   const indexes = new Set<string>();
   for (const key of Object.keys(environment)) {
     const index = /^HINDSIGHT_API_LLM_(\d+)_(?:PROVIDER|MODEL)$/.exec(key)?.[1];
@@ -94,7 +98,7 @@ export function assertImportApproval(config: AppConfig): ImportApproval {
     const provider = environment[`HINDSIGHT_API_LLM_${index}_PROVIDER`];
     const model = environment[`HINDSIGHT_API_LLM_${index}_MODEL`];
     if (!approval.alternateRoutes?.some((route) => route.provider === provider && route.model === model)) {
-      throw new Error(`Import approval does not match active alternate route ${index}; both provider and model must be declared and approved`);
+      throw new ImportApprovalError("provider-not-approved", `Import approval does not match active alternate route ${index}; both provider and model must be declared and approved`);
     }
   }
   return approval;

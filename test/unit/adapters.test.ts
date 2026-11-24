@@ -189,6 +189,9 @@ test("OpenCode adapter reads a consistent read-only database and preserves per-s
   assert.equal(refs.find((ref) => ref.nativeSessionId === "ses-root-word")?.classification?.kind, "primary");
   assert.equal(refs.find((ref) => ref.nativeSessionId === "ses-orphan-generated")?.classification?.kind, "ambiguous");
   const directory2 = path.join(directory, "spool");
+  const rootRef = refs.find((ref) => ref.nativeSessionId === "ses-1")!;
+  await assert.rejects(adapter.classify({ ...rootRef, locator: path.join(directory, "other.db") }), /locator does not match/);
+  await assert.rejects(adapter.load({ ...rootRef, nativeSessionId: "ses-child" }, { spoolDirectory: directory2, maxCanonicalBytes: 1000 }), /locator does not match/);
   const session = await loadOne(adapter, "opencode", "ses-1", directory2);
   try {
     const output = await fs.readFile(session.contentPath, "utf8");

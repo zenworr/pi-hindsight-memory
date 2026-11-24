@@ -8,14 +8,15 @@ import { OpenCodeAdapter } from "./opencode.js";
 import { OriginAdapter } from "./origin.js";
 import { PiAdapter } from "./pi.js";
 
-export function createAdapters(config: AppConfig): SessionAdapter[] {
+export function createAdapters(config: AppConfig, origin?: string): SessionAdapter[] {
   const native: SessionAdapter[] = [
     new PiAdapter(config.sourceRoots.pi),
     new CodexAdapter(config.sourceRoots.codex, config.codexStateDatabase),
     new ClaudeAdapter(config.sourceRoots.claude),
     new OpenCodeAdapter(config.opencodeDatabase),
   ];
-  if (!config.desktopFeed.enabled) return native;
+  if (origin === config.localOrigin || !config.desktopFeed.enabled) return origin === undefined || origin === config.localOrigin ? native : [];
+  if (origin !== undefined && origin !== "desktop") return [];
 
   const directory = fs.realpathSync(config.desktopFeed.directory);
   const manifest = JSON.parse(fs.readFileSync(path.join(directory, "manifest.json"), "utf8")) as Record<string, unknown>;
@@ -33,7 +34,7 @@ export function createAdapters(config: AppConfig): SessionAdapter[] {
   const physicalRoots = [path.join(directory, "pi"), path.join(directory, "codex"), path.join(directory, "claude"), path.join(directory, "opencode", "opencode.db")];
   const logicalRoots = [path.join(home, ".pi/agent/sessions"), path.join(home, ".codex/sessions"), path.join(home, ".claude/projects"), path.join(home, ".local/share/opencode/opencode.db")];
   return [
-    ...native.map((adapter, index) => new OriginAdapter(adapter, config.localOrigin, nativeRoots[index]!, nativeRoots[index]!)),
+    ...(origin === undefined ? native.map((adapter, index) => new OriginAdapter(adapter, config.localOrigin, nativeRoots[index]!, nativeRoots[index]!)) : []),
     ...feed.map((adapter, index) => new OriginAdapter(adapter, "desktop", physicalRoots[index]!, logicalRoots[index]!, path.join(config.desktopFeed.directory, path.relative(directory, physicalRoots[index]!)))),
   ];
 }

@@ -97,6 +97,7 @@ export async function repairHistory(config: AppConfig, state: StateDatabase, cli
     }
     const batch = await worker.runOnce(limit, signal);
     await progress("retaining");
+    if (batch.blocked) throw new Error(`Import blocked (${batch.blocked.reason}): ${batch.blocked.action}`);
     if (batch.failed || state.listGenerations().some((generation) => ["submitted", "processing"].includes(generation.state) && generation.error)) throw new Error("Historical repair stopped after an unresolved operation error");
     if (!batch.selected) throw new Error("Historical repair has no claimable work");
   }
