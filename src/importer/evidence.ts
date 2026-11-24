@@ -50,31 +50,36 @@ function* passageTexts(content: string): Iterable<string> {
   }
 }
 
+function hasSourceSnapshot(db: DatabaseSync): boolean {
+  return db.prepare("PRAGMA table_info(documents)").all().some((column) => column.name === "source_snapshot");
+}
+
 function writableIndex(file: string): DatabaseSync {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(file);
   db.exec("PRAGMA busy_timeout=1000; PRAGMA journal_mode=WAL;");
   db.exec(`
-    CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY,source TEXT NOT NULL,session_id TEXT NOT NULL,source_path TEXT NOT NULL,canonical_hash TEXT NOT NULL,indexed_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY,source TEXT NOT NULL,session_id TEXT NOT NULL,source_path TEXT NOT NULL,canonical_hash TEXT NOT NULL,indexed_at TEXT NOT NULL,source_snapshot TEXT);
     CREATE VIRTUAL TABLE IF NOT EXISTS passages USING fts5(text,document_id UNINDEXED,entry_id UNINDEXED,parent_entry_id UNINDEXED,role UNINDEXED,provenance UNINDEXED,timestamp UNINDEXED,tokenize='unicode61');
   `);
+  if (!hasSourceSnapshot(db)) db.exec("ALTER TABLE documents ADD COLUMN source_snapshot TEXT");
   for (const name of [file, `${file}-wal`, `${file}-shm`]) { if (fs.existsSync(name)) fs.chmodSync(name, PRIVATE_FILE_MODE); }
   return db;
 }
 
-export async function indexEvidence(config: AppConfig, session: CanonicalSession, force = false): Promise<void> {
+export async function indexEvidence(config: AppConfig, session: CanonicalSession, sourceSnapshot: string, force = false): Promise<void> {
   if (session.classification?.kind !== "primary") return;
   if (session.emptyAfterNormalization) { removeEvidence(config, session.documentId); return; }
   const db = writableIndex(config.evidenceDatabase);
   try {
     const prior = db.prepare("SELECT canonical_hash FROM documents WHERE id=?").get(session.documentId) as { canonical_hash: string } | undefined;
     if (prior?.canonical_hash === session.canonicalHash && !force) {
-      db.prepare("UPDATE documents SET source_path=? WHERE id=?").run(redactText(session.metadata.source_path).text, session.documentId);
+      db.prepare("UPDATE documents SET source_path=?,source_snapshot=? WHERE id=?").run(redactText(session.metadata.source_path).text, sourceSnapshot, session.documentId);
       return;
     }
     db.exec("BEGIN IMMEDIATE");
     if (prior) db.prepare("DELETE FROM passages WHERE document_id=?").run(session.documentId);
-    db.prepare("INSERT INTO documents(id,source,session_id,source_path,canonical_hash,indexed_at) VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_path=excluded.source_path,canonical_hash=excluded.canonical_hash,indexed_at=excluded.indexed_at").run(session.documentId, session.source, session.nativeSessionId, redactText(session.metadata.source_path).text, session.canonicalHash, new Date().toISOString());
+    db.prepare("INSERT INTO documents(id,source,session_id,source_path,canonical_hash,indexed_at,source_snapshot) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_path=excluded.source_path,canonical_hash=excluded.canonical_hash,indexed_at=excluded.indexed_at,source_snapshot=excluded.source_snapshot").run(session.documentId, session.source, session.nativeSessionId, redactText(session.metadata.source_path).text, session.canonicalHash, new Date().toISOString(), sourceSnapshot);
     const insert = db.prepare("INSERT INTO passages(text,document_id,entry_id,parent_entry_id,role,provenance,timestamp) VALUES (?,?,?,?,?,?,?)");
     await forEachJsonLine(session.contentPath, (raw) => {
       const turn = raw as CanonicalTurn;
@@ -86,11 +91,14 @@ export async function indexEvidence(config: AppConfig, session: CanonicalSession
   finally { db.close(); }
 }
 
-export function indexedDocumentHashes(config: AppConfig): Map<string, string> {
+export function indexedDocuments(config: AppConfig): Map<string, { canonicalHash: string; sourceSnapshot: string | null }> {
   if (!fs.existsSync(config.evidenceDatabase)) return new Map();
   const db = new DatabaseSync(config.evidenceDatabase, { readOnly: true, timeout: 500 });
-  try { return new Map((db.prepare("SELECT id,canonical_hash FROM documents").all() as Array<{ id: string; canonical_hash: string }>).map((row) => [row.id, row.canonical_hash])); }
-  finally { db.close(); }
+  try {
+    const snapshot = hasSourceSnapshot(db) ? "source_snapshot" : "NULL";
+    const rows = db.prepare(`SELECT id,canonical_hash AS canonicalHash,${snapshot} AS sourceSnapshot FROM documents`).all() as Array<{ id: string; canonicalHash: string; sourceSnapshot: string | null }>;
+    return new Map(rows.map(({ id, ...entry }) => [id, entry]));
+  } finally { db.close(); }
 }
 
 export function removeEvidence(config: AppConfig, documentId: string): void {

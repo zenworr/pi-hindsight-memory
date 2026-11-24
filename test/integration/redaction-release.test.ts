@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
 import { once } from "node:events";
+import { DatabaseSync } from "node:sqlite";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import os from "node:os";
@@ -19,6 +20,7 @@ import { ImportWorker } from "../../src/importer/worker.js";
 import { savePendingPayload, STALE_REDACTION_PAYLOAD } from "../../src/importer/pending-payload.js";
 import { scan } from "../../src/importer/scanner.js";
 import { importerHealth } from "../../src/importer/health.js";
+import { indexedDocuments } from "../../src/importer/evidence.js";
 
 const exec = promisify(execFile);
 const timestamp = "2026-01-01T00:00:00.000Z";
@@ -45,10 +47,11 @@ test("redaction rollout preserves acknowledged snapshots and the frozen set; the
   await session("needs-redaction", legacyCredential);
   await session("stable", "ordinary text");
   await session("protected", legacyCredential);
+  await session("already-missing", "previously available text");
   const legacyHashes = new Map<string, string>();
   const adapter = new PiAdapter(config.sourceRoots.pi);
   for await (const reference of adapter.discover()) {
-    if (reference.nativeSessionId === "stable") continue;
+    if (!["protected", "needs-redaction"].includes(reference.nativeSessionId)) continue;
     const payload = await adapter.load(reference, { spoolDirectory: config.spoolDirectory, maxCanonicalBytes: config.maxCanonicalBytes });
     try {
       const old = (await payload.readContent()).replace(JSON.stringify('TOKEN="[REDACTED:SECRET]"'), JSON.stringify(legacyCredential));
@@ -58,7 +61,7 @@ test("redaction rollout preserves acknowledged snapshots and the frozen set; the
   }
   const state = new StateDatabase(config.stateDatabase);
   try {
-    assert.equal((await scan(config, state, { source: "pi" })).queued, 3);
+    assert.equal((await scan(config, state, { source: "pi" })).queued, 4);
     for (const generation of state.listGenerations()) {
       const id = generation.nativeSessionId;
       const hash = legacyHashes.get(id) ?? generation.canonicalHash;
@@ -69,6 +72,8 @@ test("redaction rollout preserves acknowledged snapshots and the frozen set; the
       if (hash !== generation.canonicalHash) state.setGenerationState("pi", id, generation.canonicalHash, "superseded");
       if (id === "protected") state.setSessionClassification("pi", id, { kind: "ambiguous", reason: "fixture", policyVersion: CLASSIFICATION_POLICY_VERSION }, "ambiguous_preserved");
     }
+    await fs.rm(sessionFile("already-missing"));
+    state.markSourceMissing("pi", "already-missing", timestamp);
   } finally { state.close(); }
 
   const stateCopy = path.join(root, "state-copy.sqlite3");
@@ -79,15 +84,26 @@ test("redaction rollout preserves acknowledged snapshots and the frozen set; the
   const before = await fs.readFile(stateCopy);
   const args = ["scripts/checks/redaction-impact.mjs", "--state-copy", stateCopy, "--sources-copy", sourcesCopy];
   const { stdout } = await exec(process.execPath, args, { env: { ...process.env, PI_HINDSIGHT_CONFIG: path.join(root, "not-a-config.json") } });
-  const counts = { acknowledged: 3, unchanged: 1, changed: 1, preservedAmbiguous: 1, unavailable: 0, errors: 0 };
+  const counts = { acknowledged: 4, unchanged: 1, changed: 1, preservedAmbiguous: 1, sourceMissing: 1, unavailable: 0, errors: 0 };
   assert.deepEqual(JSON.parse(stdout), counts);
   assert.deepEqual(await fs.readFile(stateCopy), before);
-  await fs.rm(path.join(sourcesCopy, config.localOrigin, "pi", "stable.jsonl"));
-  await assert.rejects(exec(process.execPath, args), (error: { stdout: string; code: number }) => {
+  const copiedPi = path.join(sourcesCopy, config.localOrigin, "pi");
+  const stable = path.join(copiedPi, "stable.jsonl");
+  const stableText = await fs.readFile(stable, "utf8");
+  const incomplete = (expected: typeof counts) => assert.rejects(exec(process.execPath, args), (error: { stdout: string; code: number }) => {
     assert.equal(error.code, 1);
-    assert.deepEqual(JSON.parse(error.stdout), { ...counts, unchanged: 0, unavailable: 1 });
+    assert.deepEqual(JSON.parse(error.stdout), expected);
     return true;
   });
+  await fs.rm(stable);
+  await incomplete({ ...counts, unchanged: 0, unavailable: 1 });
+  await fs.writeFile(stable, stableText);
+  const duplicate = path.join(copiedPi, "duplicate.jsonl");
+  await fs.writeFile(duplicate, stableText);
+  await incomplete({ ...counts, unchanged: 0, unavailable: 1 });
+  await fs.rm(duplicate);
+  await fs.appendFile(stable, "{malformed-message}\n");
+  await incomplete({ ...counts, unchanged: 0, errors: 1 });
 
   const restarted = new StateDatabase(config.stateDatabase);
   try {
@@ -102,6 +118,40 @@ test("redaction rollout preserves acknowledged snapshots and the frozen set; the
     assert.equal((await scan(config, restarted, { source: "pi" })).queued, 1);
     assert.equal(restarted.getSession("pi", "protected")?.canonicalHash, legacyHashes.get("protected"));
   } finally { restarted.close(); }
+});
+
+test("an unrelated legacy evidence hash is rebuilt once without requeueing the acknowledged snapshot", async (t) => {
+  const { config, session } = await fixture(t);
+  const id = "indexed";
+  await session(id, legacyCredential);
+  const state = new StateDatabase(config.stateDatabase);
+  t.after(() => { state.close(); });
+  assert.equal((await scan(config, state)).queued, 1);
+  const afterRedaction = state.getSession("pi", id)!;
+  const generation = state.getLatestGeneration("pi", id)!;
+  const priorHash = sha256("legacy remote canonical bytes");
+  state.upsertSession({ ...afterRedaction, canonicalHash: priorHash });
+  state.setGenerationState("pi", id, generation.canonicalHash, "superseded");
+  const prior = { ...generation, canonicalHash: priorHash, operationId: operationIdFor(config.hindsight.bankId, afterRedaction.documentId, priorHash), state: "completed" as const };
+  state.upsertGeneration(prior);
+  const evidence = new DatabaseSync(config.evidenceDatabase);
+  try {
+    evidence.exec("ALTER TABLE documents DROP COLUMN source_snapshot");
+    evidence.prepare("UPDATE documents SET canonical_hash=?").run("unrelated");
+  } finally { evidence.close(); }
+
+  const load = t.mock.method(PiAdapter.prototype, "load");
+  const refreshed = await scan(config, state);
+  assert.equal(refreshed.queued, 0);
+  assert.equal(refreshed.unchanged, 0);
+  assert.equal(load.mock.callCount(), 1);
+  assert.equal(indexedDocuments(config).get(afterRedaction.documentId)?.canonicalHash, afterRedaction.canonicalHash);
+  assert.equal((await scan(config, state)).unchanged, 1);
+  assert.equal(load.mock.callCount(), 1);
+  assert.equal(state.getSession("pi", id)?.acknowledgedHash, priorHash);
+  assert.equal(state.getSession("pi", id)?.canonicalHash, priorHash);
+  assert.equal(state.getGeneration("pi", id, priorHash)?.operationId, prior.operationId);
+  assert.equal(state.pendingWorkCount(config.importer.maxAttempts), 0);
 });
 
 test("stale pending payloads stay unresolved without submission, while already completed remote work reconciles", async (t) => {

@@ -8,7 +8,7 @@ import { OpenCodeAdapter } from "./opencode.js";
 import { OriginAdapter } from "./origin.js";
 import { PiAdapter } from "./pi.js";
 
-export function createAdapters(config: AppConfig, origin?: string): SessionAdapter[] {
+export function createAdapters(config: AppConfig, origin?: string, onFeedUnavailable?: () => void): SessionAdapter[] {
   const native: SessionAdapter[] = [
     new PiAdapter(config.sourceRoots.pi),
     new CodexAdapter(config.sourceRoots.codex, config.codexStateDatabase),
@@ -18,23 +18,31 @@ export function createAdapters(config: AppConfig, origin?: string): SessionAdapt
   if (origin === config.localOrigin || !config.desktopFeed.enabled) return origin === undefined || origin === config.localOrigin ? native : [];
   if (origin !== undefined && origin !== "desktop") return [];
 
-  const directory = fs.realpathSync(config.desktopFeed.directory);
-  const manifest = JSON.parse(fs.readFileSync(path.join(directory, "manifest.json"), "utf8")) as Record<string, unknown>;
-  if (manifest.version !== 1 || manifest.origin !== "desktop" || manifest.sourceHome !== config.desktopFeed.sourceHome || manifest.generation !== path.basename(directory)) {
-    throw new Error("The desktop feed has no valid completed generation");
-  }
+  const nativeRoots = [config.sourceRoots.pi, config.sourceRoots.codex, config.sourceRoots.claude, config.opencodeDatabase];
+  const local = origin === undefined ? native.map((adapter, index) => new OriginAdapter(adapter, config.localOrigin, nativeRoots[index]!, nativeRoots[index]!)) : [];
   const home = config.desktopFeed.sourceHome;
+  let directory;
+  try {
+    directory = fs.realpathSync(config.desktopFeed.directory);
+    const manifest = JSON.parse(fs.readFileSync(path.join(directory, "manifest.json"), "utf8")) as Record<string, unknown>;
+    if (manifest.version !== 1 || manifest.origin !== "desktop" || manifest.sourceHome !== home || manifest.generation !== path.basename(directory)) {
+      throw new Error("The desktop feed has no valid completed generation");
+    }
+  } catch (error) {
+    if (!onFeedUnavailable) throw error;
+    onFeedUnavailable();
+    return local;
+  }
   const feed = [
     new PiAdapter(path.join(directory, "pi")),
     new CodexAdapter(path.join(directory, "codex"), path.join(directory, "codex-state", "state_5.sqlite")),
     new ClaudeAdapter(path.join(directory, "claude")),
     new OpenCodeAdapter(path.join(directory, "opencode", "opencode.db")),
   ];
-  const nativeRoots = [config.sourceRoots.pi, config.sourceRoots.codex, config.sourceRoots.claude, config.opencodeDatabase];
   const physicalRoots = [path.join(directory, "pi"), path.join(directory, "codex"), path.join(directory, "claude"), path.join(directory, "opencode", "opencode.db")];
   const logicalRoots = [path.join(home, ".pi/agent/sessions"), path.join(home, ".codex/sessions"), path.join(home, ".claude/projects"), path.join(home, ".local/share/opencode/opencode.db")];
   return [
-    ...(origin === undefined ? native.map((adapter, index) => new OriginAdapter(adapter, config.localOrigin, nativeRoots[index]!, nativeRoots[index]!)) : []),
+    ...local,
     ...feed.map((adapter, index) => new OriginAdapter(adapter, "desktop", physicalRoots[index]!, logicalRoots[index]!, path.join(config.desktopFeed.directory, path.relative(directory, physicalRoots[index]!)))),
   ];
 }

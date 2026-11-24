@@ -24,8 +24,8 @@ export async function importAll(config: AppConfig, state: StateDatabase, client:
   for (;;) {
     if (Date.now() - started >= maxMs) throw new Error(`historical import exceeded ${maxMs} ms`);
     const scanResult = await scan(config, state, { offset, limit: cohortSize, force: true });
-    if (scanResult.discovered === 0) break;
-    summary.scanned += scanResult.discovered;
+    if (scanResult.referencesConsumed === 0) break;
+    summary.scanned += scanResult.referencesConsumed;
     summary.queued += scanResult.queued;
     const cohort = await worker.drain(Math.max(1, maxMs - (Date.now() - started)));
     if (cohort.failed > 0) throw new Error(`historical import stopped after ${cohort.failed} failed generation(s)`);
@@ -36,8 +36,8 @@ export async function importAll(config: AppConfig, state: StateDatabase, client:
       if (consolidation.operation_id) await client.waitForOperation(consolidation.operation_id, undefined, Math.max(1, maxMs - (Date.now() - started)));
       logger.info("Historical cohort complete", { cohort: summary.cohorts, imported: summary.imported, remaining: state.pendingWorkCount(config.importer.maxAttempts) });
     }
-    offset += scanResult.discovered;
-    if (scanResult.discovered < cohortSize) break;
+    offset += scanResult.referencesConsumed;
+    if (scanResult.referencesConsumed < cohortSize) break;
   }
   return summary;
 }

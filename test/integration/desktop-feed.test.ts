@@ -167,8 +167,9 @@ test("a healthy dev inventory clears only its own vanished Pi candidates when th
     fs.rmSync(sourceFile);
     fs.rmSync(mirrored, { recursive: true });
     fs.writeFileSync(manifest, JSON.stringify({ version: 0 }));
-    await assert.rejects(scan(config, state, { source: "pi" }), /no valid completed generation/);
-    assert.deepEqual(candidates(), ["desktop", "dev"]);
+    assert.equal((await scan(config, state, { source: "pi" })).errors, 1);
+    assert.deepEqual(candidates(), ["desktop"]);
+    assert.ok(state.db.prepare("SELECT 1 FROM scan_errors WHERE locator=?").get(desktopLocator));
     fs.writeFileSync(manifest, completed);
     assert.equal((await scan(config, state, { source: "pi" })).errors, 1);
     assert.deepEqual(candidates(), ["desktop"]);

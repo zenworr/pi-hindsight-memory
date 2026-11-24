@@ -4,8 +4,8 @@ import { inSpan, telemetryCount } from "../common/telemetry.js";
 import { MS_PER_SECOND } from "../common/limits.js";
 
 import type { AppConfig, Source, SourceFingerprint, SessionReference, InventorySessionResult, CanonicalSession } from "../common/types.js";
-import { ADAPTER_VERSION, CANONICAL_SCHEMA, CLASSIFICATION_POLICY_VERSION, RETAIN_POLICY_VERSION, SOURCES } from "../common/types.js";
-import { documentIdFor } from "../common/hashing.js";
+import { ADAPTER_VERSION, CANONICAL_SCHEMA, CLASSIFICATION_POLICY_VERSION, REDACTION_POLICY_VERSION, RETAIN_POLICY_VERSION, SOURCES } from "../common/types.js";
+import { documentIdFor, sha256 } from "../common/hashing.js";
 import { createAdapters } from "../adapters/index.js";
 import type { SessionAdapter } from "../adapters/adapter.js";
 import { queueGeneration } from "./queue.js";
@@ -13,7 +13,7 @@ import type { StateDatabase } from "./state-db.js";
 import { errorMessage } from "../common/logging.js";
 import { redactText } from "../canonical/redact.js";
 import { configuredExclusion, normalizeSessionLabel } from "./exclusions.js";
-import { indexedDocumentHashes, indexEvidence, removeEvidence } from "./evidence.js";
+import { indexedDocuments, indexEvidence, removeEvidence } from "./evidence.js";
 
 const SOURCE_READ_ATTEMPTS = 2;
 // Redaction changes apply to new normalization, not to the identity of a source snapshot.
@@ -35,6 +35,7 @@ export interface ScanOptions {
 
 export interface ScanSummary {
   discovered: number;
+  referencesConsumed: number;
   queued: number;
   unchanged: number;
   active: number;
@@ -54,6 +55,9 @@ function processingSignature(config: AppConfig): string {
 
 export interface Discovered { adapter: SessionAdapter; reference: SessionReference; }
 function fingerprintSignature(value: unknown): string { return JSON.stringify(value); }
+function evidenceSnapshot(origin: string, fingerprint: SourceFingerprint, canonicalHash: string): string {
+  return sha256(JSON.stringify([origin, fingerprint, canonicalHash, REDACTION_POLICY_VERSION]));
+}
 async function exists(value: string): Promise<boolean> { try { await fs.access(value); return true; } catch { return false; } }
 export function sourceRoot(adapter: SessionAdapter, config: AppConfig): string {
   if (adapter.discoveryRoot) return adapter.discoveryRoot;
@@ -110,10 +114,11 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
 }
 
 async function scanSources(config: AppConfig, state: StateDatabase, options: ScanOptions): Promise<ScanSummary> {
-  const adapters = createAdapters(config).filter((adapter) => !options.source || adapter.source === options.source);
+  let desktopUnavailable = false;
+  const adapters = createAdapters(config, undefined, () => { desktopUnavailable = true; }).filter((adapter) => !options.source || adapter.source === options.source);
   const signature = processingSignature(config);
-  const indexed = options.inventoryOnly ? new Map<string, string>() : indexedDocumentHashes(config);
-  const summary: ScanSummary = { discovered: 0, queued: 0, unchanged: 0, active: 0, empty: 0, errors: 0, sourceMissing: 0, excluded: 0, configured: 0, ambiguous: 0, results: [] };
+  const indexed = options.inventoryOnly ? new Map<string, never>() : indexedDocuments(config);
+  const summary: ScanSummary = { discovered: 0, referencesConsumed: 0, queued: 0, unchanged: 0, active: 0, empty: 0, errors: 0, sourceMissing: 0, excluded: 0, configured: 0, ambiguous: 0, results: [] };
   let discovered: Discovered[] = [];
   const unhealthy = new Set<SessionAdapter>();
   const enumerated = new Set<SessionAdapter>();
@@ -161,6 +166,12 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     state.upsertSource(adapter.source, sourceRoot(adapter, config));
     state.markScanStarted(adapter.source, new Date().toISOString());
   }
+  if (desktopUnavailable) {
+    for (const { source } of adapters) {
+      summary.errors += 1;
+      if (!options.inventoryOnly) state.recordScanError(source, "<discovery:desktop>", "The desktop feed is unavailable; existing evidence was retained");
+    }
+  }
   for (const { adapter, locator, message } of discoveryErrors) {
     if (!options.inventoryOnly) state.recordScanError(adapter.source, locator, message);
     summary.errors += 1;
@@ -174,6 +185,8 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
   const offset = options.offset ?? 0;
   const matching = options.sessionIds ? discovered.filter(({ reference }) => options.sessionIds!.includes(effectiveReference(state, reference).nativeSessionId)) : discovered;
   const selected = options.limit === undefined ? matching.slice(offset) : matching.slice(offset, offset + options.limit);
+  summary.referencesConsumed = selected.length;
+  summary.discovered += selected.length;
   const review = options.review;
   if (review) {
     const ids = new Set<string>();
@@ -190,10 +203,11 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     const { adapter, reference: discoveredReference } = item;
     const origin = adapter.origin ?? config.localOrigin;
     const effective = effectiveReference(state, discoveredReference);
+    const frozen = state.getSession(adapter.source, effective.nativeSessionId);
+    if (desktopUnavailable && frozen?.sourceOrigin === "desktop" && !config.promotedSessions[adapter.source].includes(discoveredReference.nativeSessionId)) continue;
     const observed = seen.get(adapter) ?? new Set<string>();
     observed.add(effective.nativeSessionId);
     seen.set(adapter, observed);
-    summary.discovered += 1;
     let structuralClassification;
     try { structuralClassification = discoveredReference.classification ?? await adapter.classify(discoveredReference); }
     catch (error) { reportArtifactError(adapter, discoveredReference.locator, discoveredReference.nativeSessionId, error); continue; }
@@ -203,7 +217,6 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     const tombstone = state.getExclusionTombstone(adapter.source, discoveredReference.nativeSessionId, documentId);
     const classification = configured ?? (tombstone ? { kind: "configured-exclusion" as const, reason: `persisted-configured-exclusion:${tombstone.label}`, policyVersion: structuralClassification.policyVersion } : structuralClassification);
     const reference = { ...effective, classification, ...(label ? { sessionLabel: label } : {}) };
-    const frozen = state.getSession(adapter.source, reference.nativeSessionId);
     if (review && (classification.kind !== "primary" || frozen?.status === "ambiguous_preserved")) throw new Error(review.error);
     if (!options.inventoryOnly && configured && label) {
       state.recordExclusionTombstone({ source: adapter.source, nativeSessionId: reference.nativeSessionId, documentId, locator: discoveredReference.locator, label, normalizedLabel: label.normalize("NFKC").trim().toLowerCase(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
@@ -251,12 +264,15 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     let fingerprint: SourceFingerprint;
     try { fingerprint = withProcessingSignature(await adapter.fingerprint(reference), signature); }
     catch (error) { reportArtifactError(adapter, reference.locator, reference.nativeSessionId, error); continue; }
-    const previous = state.getSession(adapter.source, reference.nativeSessionId);
+    const previous = frozen;
     const tracked = previous?.canonicalHash ? state.getGeneration(adapter.source, reference.nativeSessionId, previous.canonicalHash) : undefined;
     const acknowledged = previous?.canonicalHash && previous.acknowledgedHash === previous.canonicalHash && previous.acknowledgedPolicy === RETAIN_POLICY_VERSION;
     const knownEmpty = previous?.status === "empty_after_normalization";
     const sameFingerprint = previous && fingerprintSignature(previous.sourceFingerprint) === fingerprintSignature(fingerprint);
-    const unchanged = previous && !options.inventoryOnly && !review && !options.force && sameFingerprint && previous.canonicalHash && (knownEmpty || acknowledged && indexed.has(previous.documentId) || indexed.get(previous.documentId) === previous.canonicalHash && tracked && ["queued", "submitted", "processing", "failed"].includes(tracked.state));
+    const entry = previous && indexed.get(previous.documentId);
+    const exactIndex = entry?.canonicalHash === previous?.canonicalHash;
+    const rebuiltIndex = acknowledged && !exactIndex && entry?.sourceSnapshot && entry.sourceSnapshot === evidenceSnapshot(origin, fingerprint, entry.canonicalHash);
+    const unchanged = previous && !options.inventoryOnly && !review && !options.force && sameFingerprint && previous.canonicalHash && (knownEmpty || acknowledged && (exactIndex || rebuiltIndex) || exactIndex && tracked && ["queued", "submitted", "processing", "failed"].includes(tracked.state));
     if (unchanged) {
       state.clearScanError(adapter.source, reference.locator);
       state.clearScanCandidate(adapter.source, reference.nativeSessionId);
@@ -316,7 +332,8 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       summary.results.push({ source: adapter.source, nativeSessionId: session.nativeSessionId, locator: reference.locator, origin, canonicalHash: session.canonicalHash, status: tooLarge ? "too_large" : session.emptyAfterNormalization ? "empty_after_normalization" : "eligible", canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, redactionCount: session.redactionCount, startedAt: session.sessionStartedAt, updatedAt: session.sessionUpdatedAt });
       if (tooLarge) { unhealthy.add(adapter); summary.errors += 1; if (!options.inventoryOnly) state.recordScanError(adapter.source, reference.locator, "Canonical document is too large"); continue; }
       if (!options.inventoryOnly) {
-        try { await inSpan("hindsight.evidence.index", { source: session.source, "hindsight.canonical.bytes": session.canonicalBytes }, () => indexEvidence(config, session, options.indexOnly && options.force)); }
+        const sourceSnapshot = evidenceSnapshot(origin, fingerprint, session.canonicalHash);
+        try { await inSpan("hindsight.evidence.index", { source: session.source, "hindsight.canonical.bytes": session.canonicalBytes }, () => indexEvidence(config, session, sourceSnapshot, options.indexOnly && options.force)); }
         catch (error) {
           unhealthy.add(adapter); summary.errors += 1;
           const message = `Evidence index failed: ${redactText(errorMessage(error)).text}`;
@@ -368,7 +385,7 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       }
     }
   }
-  if (!options.inventoryOnly && unrestricted) {
+  if (!options.inventoryOnly && unrestricted && !desktopUnavailable) {
     for (const source of new Set(adapters.map((adapter) => adapter.source))) {
       if (![...unhealthy].some((adapter) => adapter.source === source)) state.markScanCompleted(source, new Date().toISOString());
     }

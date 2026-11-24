@@ -14,7 +14,9 @@ import { estimateInputTokens } from "../../src/common/approval.js";
 import type { ImportApproval } from "../../src/common/types.js";
 import { expectedRetainMission } from "../../src/common/retention-policy.js";
 import { HindsightClient } from "../../src/hindsight/client.js";
-import { runDaemon } from "../../src/importer/daemon.js";
+import { runDaemon, runImportCycle } from "../../src/importer/daemon.js";
+import { searchEvidence } from "../../src/importer/evidence.js";
+import { importAll } from "../../src/importer/historical.js";
 import { scan } from "../../src/importer/scanner.js";
 import { StateDatabase } from "../../src/importer/state-db.js";
 import { ImportWorker } from "../../src/importer/worker.js";
@@ -46,13 +48,13 @@ async function fixture(t: TestContext) {
   const documents = new Map<string, string>();
   const operations = new Map<string, string>();
   const polls: string[] = [];
-  const remote = { reject: false, unexpected: false, observations: true, documentReads: 0, loseReceipt: false, holdPoll: false };
+  const remote = { reject: false, unexpected: false, observations: true, autoConsolidation: true, documentReads: 0, loseReceipt: false, holdPoll: false };
   const bank = `/v1/default/banks/${config.hindsight.bankId}`;
   const server = http.createServer((req, res) => {
     const url = new URL(req.url!, "http://127.0.0.1").pathname;
     const reply = (status: number, body: unknown) => res.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(body));
     if (url === "/version") reply(200, { features: { observations: remote.observations } });
-    else if (url === `${bank}/config`) reply(200, { config: { store_document_text: true, retain_strategies: { conversation: { retain_mission: mission.trim(), retain_extraction_mode: "concise" } }, enable_observations: true, observations_mission: "test", retain_default_strategy: "conversation", enable_auto_consolidation: true } });
+    else if (url === `${bank}/config`) reply(200, { config: { store_document_text: true, retain_strategies: { conversation: { retain_mission: mission.trim(), retain_extraction_mode: "concise" } }, enable_observations: true, observations_mission: "test", retain_default_strategy: "conversation", enable_auto_consolidation: remote.autoConsolidation } });
     else if (url === `${bank}/stats`) reply(200, {});
     else if (url === `${bank}/documents`) {
       remote.documentReads += 1;
@@ -65,7 +67,8 @@ async function fixture(t: TestContext) {
       if (remote.holdPoll) return;
       const status = operations.get(id);
       reply(status ? 200 : 404, { status });
-    } else if (url === `${bank}/memories` && req.method === "POST") {
+    } else if (url === `${bank}/consolidate` && req.method === "POST") reply(200, {});
+    else if (url === `${bank}/memories` && req.method === "POST") {
       let body = "";
       req.setEncoding("utf8");
       req.on("data", (chunk: string) => { body += chunk; });
@@ -260,6 +263,71 @@ test("a retry after failed document verification does not repeat a completed ful
     await until(() => f.remote.documentReads > firstReads && phase(f.state) === "idle");
     assert.equal(discover.mock.callCount(), 1);
   } finally { process.emit("SIGTERM"); await daemon; }
+});
+
+test("historical pagination consumes two full cohorts without skipping a reference after a malformed header", async (t) => {
+  const f = await fixture(t);
+  await f.addPi("cohort-a");
+  await f.addPi("cohort-b");
+  f.remote.autoConsolidation = false;
+  const malformed = path.join(f.config.sourceRoots.pi, "malformed.jsonl");
+  await fs.writeFile(malformed, "{bad-json}\n");
+  const result = await importAll(f.config, f.state, new HindsightClient(f.config.hindsight), { cohortSize: 1 });
+  assert.deepEqual(result, { scanned: 2, queued: 2, imported: 2, cohorts: 2 });
+  assert.deepEqual(f.state.listGenerations().map(({ nativeSessionId, state }) => [nativeSessionId, state]), [["cohort-a", "completed"], ["cohort-b", "completed"]]);
+  assert.deepEqual(f.state.db.prepare("SELECT locator FROM scan_errors").all().map(({ locator }) => locator), [malformed]);
+});
+
+test("a broken desktop feed leaves its evidence intact while dev scans and submitted imports are polled", async (t) => {
+  const f = await fixture(t);
+  f.config.localOrigin = "dev";
+  const sourceHome = path.join(f.root, "desktop");
+  const feed = path.join(f.root, "feed");
+  const generationPath = path.join(feed, "first");
+  f.config.desktopFeed = { enabled: true, directory: path.join(feed, "current"), sourceHome };
+  const manifest = path.join(generationPath, "manifest.json");
+  const validManifest = JSON.stringify({ version: 1, origin: "desktop", sourceHome, generation: "first" });
+  await fs.mkdir(path.join(generationPath, "pi"), { recursive: true });
+  await fs.writeFile(manifest, validManifest);
+  await fs.symlink("first", f.config.desktopFeed.directory);
+  const desktopFixture = (await fs.readFile(path.join(fixtureFiles, "pi/session.jsonl"), "utf8")).replaceAll("pi-fixture-001", "desktop-owner").replace("Use PostgreSQL for", "Desktop critical token");
+  await fs.writeFile(path.join(generationPath, "pi", "desktop-owner.jsonl"), desktopFixture);
+  await f.addPi("submitted");
+  assert.equal((await scan(f.config, f.state, { source: "pi" })).queued, 2);
+  const desktop = f.state.getSession("pi", "desktop-owner")!;
+  const desktopGeneration = f.state.getLatestGeneration("pi", "desktop-owner")!;
+  f.state.setGenerationState("pi", "desktop-owner", desktopGeneration.canonicalHash, "completed");
+  const hits = searchEvidence(f.config, "Desktop critical token").hits;
+  assert.ok(hits.some((hit) => hit.documentId === desktop.documentId));
+  f.documents.set(desktop.documentId, desktopGeneration.canonicalHash);
+  const submitted = f.state.getLatestGeneration("pi", "submitted")!;
+  const documentId = f.state.getSession("pi", "submitted")!.documentId;
+  f.state.upsertGeneration({ ...submitted, state: "submitted", attemptCount: 1 });
+  f.state.upsertOperation({ ...submitted, documentId, hindsightStatus: "pending", retryCount: 0 });
+  f.documents.set(documentId, submitted.canonicalHash);
+  f.operations.set(submitted.operationId, "completed");
+
+  await fs.rm(f.config.desktopFeed.directory);
+  await f.addPi("desktop-owner");
+  await f.addPi("dev-new");
+  const client = new HindsightClient(f.config.hindsight);
+  const cycle = await runImportCycle(f.config, f.state, client);
+  assert.equal(cycle.scan?.errors, 4);
+  assert.deepEqual(f.state.db.prepare("SELECT locator FROM scan_errors").all().map(({ locator }) => locator), Array<string>(4).fill("<discovery:desktop>"));
+  assert.equal(f.state.getSession("pi", "desktop-owner")?.sourceOrigin, "desktop");
+  assert.equal(f.state.getSession("pi", "desktop-owner")?.status, "imported");
+  assert.equal(f.state.getSession("pi", "dev-new")?.status, "imported");
+  assert.ok(f.polls.includes(submitted.operationId));
+  assert.equal(f.state.getLatestGeneration("pi", "submitted")?.state, "completed");
+  assert.deepEqual(searchEvidence(f.config, "Desktop critical token").hits, hits);
+
+  await fs.rm(path.join(f.config.sourceRoots.pi, "desktop-owner.jsonl"));
+  await fs.symlink("first", f.config.desktopFeed.directory);
+  await fs.writeFile(manifest, "{bad-json");
+  assert.equal((await runImportCycle(f.config, f.state, client)).scan?.errors, 4);
+  await fs.writeFile(manifest, validManifest);
+  assert.equal((await scan(f.config, f.state, { source: "pi" })).errors, 0);
+  assert.equal(f.state.db.prepare("SELECT locator FROM scan_errors WHERE source='pi'").get(), undefined);
 });
 
 test("worker loads exact local and pinned desktop locators without enumerating same-ID Claude sidechains", async (t) => {

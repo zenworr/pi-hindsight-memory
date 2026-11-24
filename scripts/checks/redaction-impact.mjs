@@ -37,7 +37,7 @@ async function adapterFor(source, root, scratch) {
 
 async function report(statePath, sourcesPath, scratch) {
   const state = new StateDatabase(await copyDatabase(statePath, scratch), { readOnly: true });
-  const counts = { acknowledged: 0, unchanged: 0, changed: 0, preservedAmbiguous: 0, unavailable: 0, errors: 0 };
+  const counts = { acknowledged: 0, unchanged: 0, changed: 0, preservedAmbiguous: 0, sourceMissing: 0, unavailable: 0, errors: 0 };
   try {
     const groups = new Map();
     for (const session of state.listSessions()) {
@@ -74,7 +74,7 @@ async function report(statePath, sourcesPath, scratch) {
             } catch { counts.errors++; }
           }
         }
-        counts.unavailable += sessions.size;
+        for (const previous of sessions.values()) counts[previous.status === "source_missing" ? "sourceMissing" : "unavailable"]++;
       } catch { counts.errors += sessions.size; }
     }
     return counts;
