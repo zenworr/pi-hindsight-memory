@@ -20,7 +20,7 @@ npm run deps:audit
 | `npm run deps:check` | Installed dependency integrity; unused files, exports, and dependencies; unresolved imports; dependency cycles. |
 | `npm run check:docs` | Local Markdown links and code fences. |
 | `npm test` | Build and run all unit and integration tests. |
-| `npm run check:package` | Version/lockfile agreement, exact direct dependency pins, required package files, and a package allowlist. Run after a build. |
+| `npm run check:package` | Version and lockfile agreement, exact dependency pins, Pi host peer declarations, required package files, and a package allowlist. Run after a build. |
 | `npm run deps:audit` | Current npm security advisories. Requires network access. |
 
 Use `npm run lint:fix` for safe lint fixes, then review the diff. Do not disable a failing rule without a specific reason. Production code has no `any` or unsafe-value exceptions. Tests permit partial SDK/HTTP mocks; Node's test registration is a known safe promise call. Synchronous SQLite adapter methods keep the shared async contract. Sanitized tool errors deliberately omit potentially secret-bearing causes.
@@ -40,7 +40,7 @@ The suite covers:
 - OpenCode read-only transactions and schema drift;
 - mutable-document ordering across shutdown, lost responses, source removal, and content reversion;
 - immutable pending payloads, terminal-failure retry IDs, and repair checkpoints;
-- live Pi SDK startup and repeated reloads without automatic retrieval;
+- package startup and repeated reloads in the pinned Pi 1.6 SDK, with one memory tool, clean status, no package warnings, and no automatic retrieval;
 - approval and budget enforcement;
 - Hindsight request shapes, retries, deadlines, and recall formatting;
 - configurable weak-result filtering;

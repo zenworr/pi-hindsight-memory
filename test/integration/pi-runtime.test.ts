@@ -10,10 +10,8 @@ import { defaultConfig } from "../../src/common/config.js";
 import { StateDatabase } from "../../src/importer/state-db.js";
 import { HINDSIGHT_STATUS_REQUEST_EVENT, type HindsightStatusSnapshotV1 } from "../../src/extension/status.js";
 
-test("installed Pi runtime registers one tool and restores the status provider across reloads", async () => {
+test("Pi loads the package without warnings and restores one memory_search tool and clean status across reloads", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-sdk-"));
-  const previousConfig = process.env.PI_HINDSIGHT_CONFIG;
-  const previousOffline = process.env.PI_OFFLINE;
   let recalls = 0;
   const server = http.createServer((request, response) => {
     assert.equal(request.headers.authorization, "Bearer test-only-token");
@@ -24,6 +22,10 @@ test("installed Pi runtime registers one tool and restores the status provider a
     else if (request.url?.endsWith("/memories/recall")) { recalls += 1; response.end(JSON.stringify({ results: [{ id: "test", text: "Synthetic memory result", scores: { final: 0.5 } }] })); }
     else { response.statusCode = 404; response.end("{}"); }
   });
+  t.after(async () => {
+    server.closeAllConnections(); server.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const config = defaultConfig(root);
@@ -33,11 +35,20 @@ test("installed Pi runtime registers one tool and restores the status provider a
   await fs.mkdir(path.dirname(config.configPath), { recursive: true });
   await fs.writeFile(config.configPath, JSON.stringify(config), { mode: 0o600 });
   await fs.writeFile(config.hindsight.apiTokenFile, "test-only-token", { mode: 0o600 });
-  process.env.PI_HINDSIGHT_CONFIG = config.configPath;
-  process.env.PI_OFFLINE = "1";
+  const environment = {
+    PI_HINDSIGHT_CONFIG: config.configPath,
+    PI_HINDSIGHT_API_URL: config.hindsight.apiUrl,
+    PI_HINDSIGHT_API_TOKEN_FILE: config.hindsight.apiTokenFile,
+    PI_OFFLINE: "1",
+  };
+  for (const [key, value] of Object.entries(environment)) {
+    const previous = process.env[key];
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+    process.env[key] = value;
+  }
   const bus = createEventBus();
-  const settings = SettingsManager.inMemory({ packages: [], extensions: [] });
-  const loader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager: settings, eventBus: bus, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, agentsFilesOverride: () => ({ agentsFiles: [] }), additionalExtensionPaths: [path.resolve("dist/src/extension/index.js")] });
+  const settings = SettingsManager.inMemory({ packages: [path.resolve(".")], extensions: [] });
+  const loader = new DefaultResourceLoader({ cwd: root, agentDir: root, settingsManager: settings, eventBus: bus, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true });
   const modelRuntime = await ModelRuntime.create({ authPath: path.join(root, "auth.json"), modelsPath: path.join(root, "models.json"), modelsStorePath: path.join(root, "models-store.json"), allowModelNetwork: false });
   await loader.reload();
   const { session } = await createAgentSession({ cwd: root, agentDir: root, resourceLoader: loader, settingsManager: settings, sessionManager: SessionManager.inMemory(root), modelRuntime });
@@ -46,6 +57,10 @@ test("installed Pi runtime registers one tool and restores the status provider a
     await session.bindExtensions({ mode: "print", onError: (error) => errors.push(error) });
     for (let round = 0; round < 4; round += 1) {
       if (round > 0) await session.reload();
+      const loaded = loader.getExtensions();
+      assert.deepEqual(loaded.errors, []);
+      assert.deepEqual(loaded.warnings, []);
+      assert.equal(loaded.extensions[0]?.sourceInfo.origin, "package");
       assert.equal(session.agent.state.tools.filter((tool) => tool.name === "memory_search").length, 1);
       let result: Promise<HindsightStatusSnapshotV1> | undefined;
       bus.emit(HINDSIGHT_STATUS_REQUEST_EVENT, { protocolVersion: 1, respond(value: Promise<HindsightStatusSnapshotV1>) { result = value; } });
@@ -63,9 +78,5 @@ test("installed Pi runtime registers one tool and restores the status provider a
   } finally {
     await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
     session.dispose();
-    if (previousConfig === undefined) delete process.env.PI_HINDSIGHT_CONFIG; else process.env.PI_HINDSIGHT_CONFIG = previousConfig;
-    if (previousOffline === undefined) delete process.env.PI_OFFLINE; else process.env.PI_OFFLINE = previousOffline;
-    server.closeAllConnections(); server.close();
-    await fs.rm(root, { recursive: true, force: true });
   }
 });
