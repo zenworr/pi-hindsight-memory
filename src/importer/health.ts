@@ -34,6 +34,7 @@ export interface ImporterHealth {
   overdueSubmissions: number;
   oldestSubmittedAt?: string;
   oldestSubmittedAgeSeconds?: number;
+  earliestOverdueRetryAt?: string;
   failureReasons: { reason: ImportFailureReason; count: number }[];
   exhaustedFailures: number;
 }
@@ -59,18 +60,23 @@ export function importerHealth(config: AppConfig, database?: DatabaseSync, disk?
       ? { reason, since: recordedBlock?.reason === reason ? recordedBlock.since : new Date(now).toISOString(), action: BLOCK_ACTIONS[reason] }
       : undefined;
     const deadline = new Date(Math.max(0, now - config.importer.overdueSubmissionSeconds * MS_PER_SECOND)).toISOString();
-    const submissions = db.prepare(`SELECT MIN(g.submitted_at) AS oldest,
+    const hasRetryColumn = db.prepare("SELECT 1 FROM pragma_table_info('operations') WHERE name='next_retry_at'").get();
+    const scheduledRetry = hasRetryColumn
+      ? "MIN(CASE WHEN g.submitted_at < :deadline AND o.hindsight_status IS NOT :unresolved AND o.next_retry_at > :now THEN o.next_retry_at END)"
+      : "NULL";
+    const submissions = db.prepare(`SELECT MIN(g.submitted_at) AS oldest, ${scheduledRetry} AS earliest_retry,
       COUNT(CASE WHEN g.submitted_at < :deadline THEN 1 END) AS overdue,
       COUNT(CASE WHEN o.hindsight_status = :unresolved THEN 1 END) AS unresolved,
       COUNT(CASE WHEN g.error = :quarantined AND o.hindsight_status IS NOT :unresolved THEN 1 END) AS quarantined,
       COUNT(CASE WHEN g.error IS NOT NULL OR o.hindsight_status = :unresolved THEN 1 END) AS uncertain
       FROM generations g LEFT JOIN operations o USING (operation_id)
-      WHERE g.state IN ('submitted','processing')`).get({ deadline, unresolved: UNRESOLVED_SUBMISSION, quarantined: STALE_REDACTION_PAYLOAD }) as {
-        oldest: string | null; overdue: number; unresolved: number; quarantined: number; uncertain: number;
+      WHERE g.state IN ('submitted','processing')`).get({ deadline, unresolved: UNRESOLVED_SUBMISSION, quarantined: STALE_REDACTION_PAYLOAD, ...(hasRetryColumn ? { now: new Date(now).toISOString() } : {}) }) as {
+        oldest: string | null; earliest_retry: string | null; overdue: number; unresolved: number; quarantined: number; uncertain: number;
       };
     const oldestAge = submissions.oldest ? now - Date.parse(submissions.oldest) : NaN;
     const failures = db.prepare(`SELECT CASE
       WHEN o.hindsight_status = ? THEN 'unresolved-submission'
+      WHEN g.error LIKE 'Local payload integrity failure:%' THEN 'payload-integrity'
       WHEN o.hindsight_status = 'rejected' THEN 'document-rejected'
       WHEN o.hindsight_status IN ('failed','cancelled','error') THEN 'operation-failed'
       WHEN g.error = 'Free disk space is below the approved minimum' OR g.error LIKE 'Free disk space is below the approved minimum:%' THEN 'disk-below-minimum'
@@ -112,6 +118,7 @@ export function importerHealth(config: AppConfig, database?: DatabaseSync, disk?
       overdueSubmissions: submissions.overdue,
       oldestSubmittedAt: submissions.oldest ?? undefined,
       oldestSubmittedAgeSeconds: oldestAge >= 0 ? Math.floor(oldestAge / MS_PER_SECOND) : undefined,
+      earliestOverdueRetryAt: submissions.earliest_retry ?? undefined,
       failureReasons: failures.map(({ reason, count }) => ({ reason, count })),
       exhaustedFailures: failures.reduce((total, row) => total + row.exhausted, 0),
     };

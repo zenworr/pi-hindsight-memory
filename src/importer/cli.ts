@@ -15,6 +15,7 @@ import { withStateLock as withLock } from "./lock.js";
 import { drainImporter, runDaemon, setPaused, status } from "./daemon.js";
 import { scan } from "./scanner.js";
 import { requeueUnresolved } from "./queue.js";
+import { StateDatabase } from "./state-db.js";
 import { createAdapters } from "../adapters/index.js";
 import type { Source } from "../common/types.js";
 import { readInventory, selectPilot, type PilotEntry } from "./pilot.js";
@@ -55,7 +56,7 @@ async function writeJson(outputPath: string | undefined, valueToWrite: unknown):
 
 function usage(): void {
   process.stdout.write(`pi-hindsight-memory\n\nUsage:\n  config [--defaults | --check]\n  inventory [--output FILE] [--source SOURCE] [--limit N] [--summary-only]\n  scan [--source SOURCE] [--session-id ID] [--limit N] [--force]\n  index-evidence [--source SOURCE] [--session-id ID] [--limit N] [--force]\n  plan-repair [--output FILE]\n  repair --plan FILE [--max-ms N]\n  daemon [--once] [--no-scan]\n  drain [--max-ms N] [--no-scan]\n  process-queued [--max-ms N]\n  import-all [--cohort N] [--max-ms N]\n  verify-import\n  verify-ready\n  plan-cleanup [--output FILE] [--include-ambiguous]
-  cleanup-subagents --apply --plan FILE\n  spool-cleanup [--apply]  Preview eligible payload removal unless --apply is set.\n  status\n  pause | resume\n  configure-bank [--file FILE]\n  consolidate\n  enable-auto-consolidation\n  retry-failed            Reset failed updates after fixing the cause.\n  retry-unresolved        Requeue all held submissions only after reviewing them.\n  cancel-queued\n  dry-run-extract CANONICAL_FILE [--mode concise|verbose]\n  select-pilot INVENTORY_JSON [--count N] [--max-bytes N] [--include-largest]\n  queue-pilot PILOT_JSON\n  run-pilot PILOT_JSON OUTPUT_JSON\n  export-canonical SOURCE SESSION_ID OUTPUT_FILE\n  doctor\n\nAll commands accept --config FILE and --help. Numeric limits must be positive integers.\nStop the importer before retry-failed, retry-unresolved, or spool-cleanup.\n`);
+  cleanup-subagents --apply --plan FILE\n  spool-cleanup [--apply]  Preview eligible payload removal unless --apply is set.\n  status\n  pause | resume\n  configure-bank [--file FILE]\n  consolidate\n  enable-auto-consolidation\n  retry-failed            Reset failed updates after fixing the cause.\n  retry-unresolved [--operation ID ...]  List held submissions or requeue selected holds only after reviewing them.\n  cancel-queued\n  dry-run-extract CANONICAL_FILE [--mode concise|verbose]\n  select-pilot INVENTORY_JSON [--count N] [--max-bytes N] [--include-largest]\n  queue-pilot PILOT_JSON\n  run-pilot PILOT_JSON OUTPUT_JSON\n  export-canonical SOURCE SESSION_ID OUTPUT_FILE\n  doctor\n\nAll commands accept --config FILE and --help. Numeric limits must be positive integers.\nStop the importer before retry-failed, retry-unresolved, or spool-cleanup.\n`);
 }
 
 async function doctor(config: ReturnType<typeof loadConfig>): Promise<Record<string, unknown>> {
@@ -258,8 +259,15 @@ async function main(): Promise<void> {
     return;
   }
   if (command === "retry-unresolved") {
-    const requeued = await withLock(config, (state) => requeueUnresolved(config, state));
-    process.stdout.write(`${JSON.stringify({ requeued })}\n`);
+    const ids = args.operationIds;
+    if (ids.length) {
+      const requeued = await withLock(config, (state) => requeueUnresolved(config, state, ids));
+      process.stdout.write(`${JSON.stringify({ requeued })}\n`);
+    } else {
+      const state = new StateDatabase(config.stateDatabase, { readOnly: true });
+      try { process.stdout.write(`${JSON.stringify({ held: state.listHeldSubmissions() })}\n`); }
+      finally { state.close(); }
+    }
     return;
   }
   if (command === "cancel-queued") {

@@ -52,7 +52,7 @@ export class HindsightOperationNotFoundError extends Error {
 export class HindsightUnresolvedOperationError extends Error {}
 
 export class HindsightRequestNotSentError extends Error {
-  constructor() { super("Hindsight request was not sent"); }
+  constructor(options?: ErrorOptions) { super("Hindsight request was not sent", options); }
 }
 
 class HindsightJsonError extends Error {}
@@ -68,11 +68,21 @@ function isConnectFailure(error: unknown): boolean {
 const KNOWN_OPERATION_STATUSES = ["pending", "processing", "completed", "failed", "cancelled"] as const;
 type KnownOperationStatus = typeof KNOWN_OPERATION_STATUSES[number];
 type OperationPollStatus = KnownOperationStatus | "not_found" | "unknown";
-export interface OperationPoll { status: OperationPollStatus; progressKey?: string; }
+export interface OperationPoll { status: OperationPollStatus; progressKey?: string; nextRetryAt?: string; }
 
 function operationStatus(status: unknown): OperationPollStatus {
   if (status === "not_found") return status;
   return KNOWN_OPERATION_STATUSES.find((known) => known === status) ?? "unknown";
+}
+
+function retryTimestamp(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const date = /^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-]\d{2}:[0-5]\d)$/.exec(value)?.[1];
+  const timestamp = Date.parse(value);
+  if (!date || !Number.isFinite(timestamp)) return undefined;
+  const calendarDay = new Date(`${date}T00:00:00Z`);
+  if (!Number.isFinite(calendarDay.getTime()) || !calendarDay.toISOString().startsWith(date)) return undefined;
+  return new Date(timestamp).toISOString();
 }
 
 function describeOperationPoll(operation: HindsightOperation | undefined, operationId: string): OperationPoll {
@@ -80,9 +90,21 @@ function describeOperationPoll(operation: HindsightOperation | undefined, operat
   if (id !== undefined && id !== operationId) return { status: "unknown" };
   const status = operationStatus(operation?.status);
   if (status === "not_found" || status === "unknown") return { status };
-  const children = Array.isArray(operation?.child_operations) ? operation.child_operations.map((child: unknown) =>
-    child && typeof child === "object" && "status" in child ? operationStatus(child.status) : "unknown").sort() : [];
-  return { status, progressKey: JSON.stringify([status, ...children]) };
+  const children = Array.isArray(operation?.child_operations) ? operation.child_operations : [];
+  const childStatuses = children.map((child: unknown) =>
+    child && typeof child === "object" && "status" in child ? operationStatus(child.status) : "unknown").sort();
+  const retries: string[] = [];
+  if (id === operationId && (status === "pending" || status === "processing")) {
+    const retry = status === "pending" ? retryTimestamp(operation?.next_retry_at) : undefined;
+    if (retry) retries.push(retry);
+    for (const child of children) {
+      if (!child || typeof child !== "object" || !("status" in child) || child.status !== "pending" || !("next_retry_at" in child)) continue;
+      if ("parent_operation_id" in child && child.parent_operation_id != null && child.parent_operation_id !== operationId) continue;
+      const childRetry = retryTimestamp(child.next_retry_at);
+      if (childRetry) retries.push(childRetry);
+    }
+  }
+  return { status, progressKey: JSON.stringify([status, ...childStatuses]), nextRetryAt: retries.sort()[0] };
 }
 
 export class HindsightBankPolicyError extends Error {}
@@ -156,8 +178,8 @@ export class HindsightClient {
     } catch { return false; }
   }
 
-  async requestJson<T>(method: string, url: string, body?: unknown, signal?: AbortSignal, timeoutMs = this.config.requestTimeoutMs, retry = true): Promise<T> {
-    return inSpan("hindsight.http.request", { "http.request.method": method, "http.route": this.route(url) }, () => this.sendJson<T>(method, url, body, signal, timeoutMs, retry));
+  async requestJson<T>(method: string, url: string, body?: unknown, signal?: AbortSignal, timeoutMs = this.config.requestTimeoutMs, retry = true, beforeSend?: () => void): Promise<T> {
+    return inSpan("hindsight.http.request", { "http.request.method": method, "http.route": this.route(url) }, () => this.sendJson<T>(method, url, body, signal, timeoutMs, retry, beforeSend));
   }
 
   private route(url: string): string {
@@ -169,7 +191,7 @@ export class HindsightClient {
     return "/other";
   }
 
-  private async sendJson<T>(method: string, url: string, body: unknown, signal: AbortSignal | undefined, timeoutMs: number, retry: boolean): Promise<T> {
+  private async sendJson<T>(method: string, url: string, body: unknown, signal: AbortSignal | undefined, timeoutMs: number, retry: boolean, beforeSend?: () => void): Promise<T> {
     const classifyNotSent = method === "POST" && !retry;
     const checkBeforeSend = (): void => {
       if (classifyNotSent && signal?.aborted) throw new HindsightRequestNotSentError();
@@ -203,8 +225,10 @@ export class HindsightClient {
       try {
         response = await inSpan("hindsight.http.attempt", { "http.request.method": method, "http.route": this.route(url), "retry.attempt": attempt + 1 }, async (span) => {
           Object.assign(headers, traceHeaders());
+          if (beforeSend) request.headers = new Headers(headers);
           checkBeforeSend();
           if (classifyNotSent && timeout.aborted) throw new HindsightRequestNotSentError();
+          beforeSend?.();
           const result = await this.fetcher(url, request);
           span?.setAttribute("http.response.status_code", result.status);
           telemetryCount("hindsight.http.responses", 1, { method, route: this.route(url), status: result.status });
@@ -308,42 +332,45 @@ export class HindsightClient {
     await this.requestJson("POST", this.bankUrl("/import"), manifest, signal);
   }
 
-  async retainWithOperationId(session: CanonicalSession, operationId: string, signal?: AbortSignal): Promise<RetainResponse> {
-    if (signal?.aborted) throw new HindsightRequestNotSentError();
-    let content: string;
-    try { content = await session.readContent(); }
-    catch (error) { if (signal?.aborted) throw new HindsightRequestNotSentError(); throw error; }
-    const metadata = Object.fromEntries(Object.entries({
-      source: session.metadata.source,
-      native_session_id: session.metadata.native_session_id,
-      source_path: session.metadata.source_path,
-      cwd: session.metadata.cwd,
-      title: session.metadata.title,
-      parent_session_id: session.metadata.parent_session_id,
-      project_id: session.metadata.project_id,
-      agent: session.metadata.agent,
-      model: session.metadata.model,
-      canonical_schema: session.metadata.canonical_schema,
-      adapter_version: session.metadata.adapter_version,
-      redaction_policy_version: session.metadata.redaction_policy_version,
-      canonical_hash: session.canonicalHash,
-      retain_policy_version: RETAIN_POLICY_VERSION,
-    }).filter((entry): entry is [string, string] => typeof entry[1] === "string").map(([key, value]) => [key, redactText(value).text]));
-    const item: RetainItem = {
-      content,
-      context: `Global coding-agent session from ${session.source}`,
-      document_id: session.documentId,
-      update_mode: "replace",
-      timestamp: session.sessionStartedAt,
-      strategy: "conversation",
-      tags: [`source:${session.source}`, `schema:${session.metadata.canonical_schema}`],
-      observation_scopes: "shared",
-      metadata,
-    };
+  async retainWithOperationId(session: CanonicalSession, operationId: string, signal?: AbortSignal, beforeSend?: () => void): Promise<RetainResponse> {
+    let started = false;
     let receipt: RetainResponse | undefined;
     try {
-      receipt = await this.requestJson<RetainResponse>("POST", this.bankUrl("/memories"), { items: [item], async: true, operation_id: operationId }, signal, undefined, false);
+      if (signal?.aborted) throw new HindsightRequestNotSentError();
+      const content = await session.readContent();
+      const metadata = Object.fromEntries(Object.entries({
+        source: session.metadata.source,
+        native_session_id: session.metadata.native_session_id,
+        source_path: session.metadata.source_path,
+        cwd: session.metadata.cwd,
+        title: session.metadata.title,
+        parent_session_id: session.metadata.parent_session_id,
+        project_id: session.metadata.project_id,
+        agent: session.metadata.agent,
+        model: session.metadata.model,
+        canonical_schema: session.metadata.canonical_schema,
+        adapter_version: session.metadata.adapter_version,
+        redaction_policy_version: session.metadata.redaction_policy_version,
+        canonical_hash: session.canonicalHash,
+        retain_policy_version: RETAIN_POLICY_VERSION,
+      }).filter((entry): entry is [string, string] => typeof entry[1] === "string").map(([key, value]) => [key, redactText(value).text]));
+      const item: RetainItem = {
+        content,
+        context: `Global coding-agent session from ${session.source}`,
+        document_id: session.documentId,
+        update_mode: "replace",
+        timestamp: session.sessionStartedAt,
+        strategy: "conversation",
+        tags: [`source:${session.source}`, `schema:${session.metadata.canonical_schema}`],
+        observation_scopes: "shared",
+        metadata,
+      };
+      receipt = await this.requestJson<RetainResponse>("POST", this.bankUrl("/memories"), { items: [item], async: true, operation_id: operationId }, signal, undefined, false, () => {
+        started = true;
+        beforeSend?.();
+      });
     } catch (error) {
+      if (!started && !(error instanceof HindsightRequestNotSentError)) throw new HindsightRequestNotSentError({ cause: error });
       if (!(error instanceof HindsightJsonError)) throw error;
       throw new HindsightUnresolvedOperationError("Hindsight returned an invalid retain receipt", { cause: error });
     }

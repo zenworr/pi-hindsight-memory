@@ -69,13 +69,15 @@ scripts/importer-service.sh start
 
 If you are running a one-off import instead of a service, wait for the previous command to stop, reset the failures, then resume that import. To process just the existing queue while the service is stopped, use `process-queued`. This supports continuous-mode auto-consolidation. Known terminal failures can receive a new operation ID. `retry-failed` does not reset unresolved submissions.
 
-Use `retry-unresolved` only after you review **all** held submissions and confirm it is safe to send each retain again. Check the original operation and any conflicting receipt ID in Hindsight. Check the remote document and its expected hash. If a prior write can still run or its outcome makes a repeat unsafe, leave the holds in place.
+Run `retry-unresolved` without options to list held operation IDs, sessions, and submission times. This does not change state and does not require a service stop. For each operation you want to retry, check the original operation, any conflicting receipt ID, and the remote document hash in Hindsight. If a prior write can still run or a repeat is unsafe, leave that operation on hold.
 
 ```bash
 scripts/importer-service.sh stop
-node dist/src/importer/cli.js retry-unresolved
+node dist/src/importer/cli.js retry-unresolved --operation REVIEWED_ID
 scripts/importer-service.sh start
 ```
+
+Use one `--operation ID` per reviewed submission. Other submissions stay on hold. If the status reports a local payload integrity failure, restore the verified payload before using `retry-failed`.
 
 The command prints the number of requeued generations. It does not requeue generations that are already pending exclusion cleanup. It saves each verified payload under a new operation ID before replacing the queue entry. An invalid or obsolete payload stops the command without clearing the holds. When there is no saved payload, the importer must reproduce the same hash from the source before it can submit. For a historical repair, resume with its reviewed `repair --plan` command before you start the normal importer.
 
@@ -139,7 +141,7 @@ Operations and queue state are durable. After Hindsight returns:
 node dist/src/importer/cli.js process-queued --max-ms 86400000
 ```
 
-Stop the importer service before you use the manual command. Otherwise, the daemon performs recovery. If the importer knows a retain was not sent, it can try again with the same operation ID. For a retain that may have reached Hindsight, the importer polls the original operation ID. If Hindsight no longer has the operation, the importer accepts a matching remote document hash as proof of completion, except when the prior document already had that hash. A matching hash alone cannot prove that a policy-only rewrite ran.
+Stop the importer service before you use the manual command. Otherwise, the daemon performs recovery. When a routine poll reports a future retry for an overdue operation, the status shows the earliest reported retry in UTC. If the importer knows a retain was not sent, it can try again with the same operation ID. For a retain that may have reached Hindsight, the importer polls the original operation ID. If Hindsight no longer has the operation, the importer accepts a matching remote document hash as proof of completion, except when the prior document already had that hash. A matching hash alone cannot prove that a policy-only rewrite ran.
 
 An invalid receipt, unknown operation status, or missing operation without proof of completion causes an `unresolved-submission` hold. The importer keeps the operation ID and payload and does not send a new retain for that document. To investigate, record the operation ID and compare Hindsight's operation and document records with the generation's expected hash. For a conflicting receipt, also check server records for the ID returned by Hindsight. Keep the document on hold until an operator reviews whether the previous write can still run. After a successful review, use `retry-unresolved` as described above. Do not edit state rows or reset retry timestamps.
 

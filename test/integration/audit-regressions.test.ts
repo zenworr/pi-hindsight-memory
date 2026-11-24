@@ -97,7 +97,8 @@ for (const change of ["append", "remove"] as const) test(`recovery polls a submi
     let oldActive = false;
     const client: any = {
       ensureBank: async () => undefined, assertBankConfiguration: async () => ({}), assertExtractionAvailable: async () => undefined,
-      retainWithOperationId: async (_session: unknown, id: string) => {
+      retainWithOperationId: async (_session: unknown, id: string, _signal: AbortSignal, beforeSend: () => void) => {
+        beforeSend();
         assert.equal(oldActive, false, "a document still has an active remote writer");
         if (id === old.operationId) oldActive = true;
         return { operation_id: id };
@@ -126,7 +127,7 @@ test("a reverted document receives a fresh operation and becomes current again",
   const writes: string[] = [];
   let remote = "";
   const client: any = { ensureBank: async () => undefined, assertBankConfiguration: async () => ({}), assertExtractionAvailable: async () => undefined,
-    retainWithOperationId: async (session: any, id: string) => { writes.push(id); remote = await session.readContent(); return { operation_id: id }; },
+    retainWithOperationId: async (session: any, id: string, _signal: AbortSignal, beforeSend: () => void) => { remote = await session.readContent(); beforeSend(); writes.push(id); return { operation_id: id }; },
     waitForOperation: async () => ({ status: "completed" }),
   };
   try {
@@ -176,7 +177,7 @@ test("an unresolved retain holds newer generations of the same document", async 
     const ids: string[] = [];
     const client: any = {
       ensureBank: async () => undefined, assertBankConfiguration: async () => ({}), assertExtractionAvailable: async () => undefined,
-      retainWithOperationId: async (_session: unknown, id: string) => { ids.push(id); throw new Error("lost response"); },
+      retainWithOperationId: async (_session: unknown, id: string, _signal: AbortSignal, beforeSend: () => void) => { beforeSend(); ids.push(id); throw new Error("lost response"); },
       waitForOperation: async (id: string) => { throw new HindsightOperationNotFoundError(id); },
       getDocument: async () => undefined,
     };
@@ -200,7 +201,7 @@ test("a terminal failed operation gets a fresh retry identity", async () => {
     const ids: string[] = [];
     const client: any = {
       ensureBank: async () => undefined, assertBankConfiguration: async () => ({}), assertExtractionAvailable: async () => undefined,
-      retainWithOperationId: async (_session: unknown, id: string) => { ids.push(id); return { operation_id: id }; },
+      retainWithOperationId: async (_session: unknown, id: string, _signal: AbortSignal, beforeSend: () => void) => { beforeSend(); ids.push(id); return { operation_id: id }; },
       waitForOperation: async (id: string) => { if (ids.length === 1) throw new HindsightOperationError("failed", id); return { status: "completed" }; },
     };
     assert.equal((await new ImportWorker(f.config, f.state, client).runOnce(1)).failed, 1);
@@ -220,7 +221,7 @@ test("reviewed repair resumes after deletion without deleting a submitted replac
       ensureBank: async () => undefined, assertBankConfiguration: async () => ({}), assertExtractionAvailable: async () => undefined,
       getDocument: async () => remoteHash ? { id: "agent-session:pi:audit-session", content_hash: remoteHash } : undefined,
       deleteDocument: async () => { deletions += 1; remoteHash = undefined; controller.abort(); },
-      retainWithOperationId: async (session: any, id: string, signal?: AbortSignal) => { signal?.throwIfAborted(); remoteHash = session.canonicalHash; completed.add(id); return { operation_id: id }; },
+      retainWithOperationId: async (session: any, id: string, signal: AbortSignal, beforeSend: () => void) => { signal.throwIfAborted(); beforeSend(); remoteHash = session.canonicalHash; completed.add(id); return { operation_id: id }; },
       waitForOperation: async (id: string) => { if (!completed.has(id)) throw new HindsightOperationNotFoundError(id); return { status: "completed" }; },
     };
     await scan(f.config, f.state, { source: "pi" });
@@ -293,7 +294,7 @@ test("historical repair is plan-bound, resumable, and verifies final hashes", as
       getDocument: async () => remoteHash ? { id: "agent-session:pi:audit-session", content_hash: remoteHash } : undefined,
       getBankStats: async () => ({ pending_consolidation: 0, failed_consolidation: 0, failed_operations: 0 }),
       deleteDocument: async () => { deleted += 1; remoteHash = undefined; },
-      retainWithOperationId: async (session: any, id: string) => { remoteHash = session.canonicalHash; return { operation_id: id }; },
+      retainWithOperationId: async (session: any, id: string, _signal: AbortSignal, beforeSend: () => void) => { beforeSend(); remoteHash = session.canonicalHash; return { operation_id: id }; },
       waitForOperation: async () => ({ status: "completed" }),
     };
     await scan(f.config, f.state, { source: "pi" });

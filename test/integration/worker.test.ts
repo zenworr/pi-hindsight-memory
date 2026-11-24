@@ -66,7 +66,7 @@ test("worker shutdown leaves submitted work recoverable instead of failed", asyn
     ensureBank: async () => undefined,
     assertBankConfiguration: async () => ({}),
     assertExtractionAvailable: async () => undefined,
-    retainWithOperationId: async () => ({ operation_id: operationId }),
+    retainWithOperationId: async (_session: unknown, _id: string, _signal: AbortSignal, beforeSend: () => void) => { beforeSend(); return { operation_id: operationId }; },
     waitForOperation: async (_id: string, signal: AbortSignal) => {
       signal.throwIfAborted();
       return new Promise((_, reject) => {
@@ -125,7 +125,7 @@ test("worker never submits two mutable generations for one document at once", as
       return {};
     },
     assertExtractionAvailable: async () => undefined,
-    retainWithOperationId: async () => { retainCalls += 1; await new Promise((resolve) => setTimeout(resolve, 30)); return { operation_id: first.operationId }; },
+    retainWithOperationId: async (_session: unknown, _id: string, _signal: AbortSignal, beforeSend: () => void) => { beforeSend(); retainCalls += 1; await new Promise((resolve) => setTimeout(resolve, 30)); return { operation_id: first.operationId }; },
     waitForOperation: async () => ({ status: "completed" }),
   };
   const worker = new ImportWorker(config, state, fakeClient as any);

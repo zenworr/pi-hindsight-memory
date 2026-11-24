@@ -27,7 +27,7 @@ const COMMANDS: Record<string, { flags: string[]; positionals: number }> = {
   consolidate: { flags: [], positionals: 0 },
   "enable-auto-consolidation": { flags: [], positionals: 0 },
   "retry-failed": { flags: [], positionals: 0 },
-  "retry-unresolved": { flags: [], positionals: 0 },
+  "retry-unresolved": { flags: ["operation"], positionals: 0 },
   "cancel-queued": { flags: [], positionals: 0 },
   "dry-run-extract": { flags: ["mode"], positionals: 1 },
   "select-pilot": { flags: ["count", "max-bytes", "include-largest"], positionals: 1 },
@@ -43,6 +43,7 @@ export interface CommandArguments {
   command: string;
   positionals: string[];
   values: Record<string, string | boolean | undefined>;
+  operationIds: string[];
 }
 
 export function parseArguments(input: string[]): CommandArguments {
@@ -52,8 +53,14 @@ export function parseArguments(input: string[]): CommandArguments {
   const options = Object.fromEntries(["config", "help", ...spec.flags].map((flag) => [flag, { type: BOOLEAN_FLAGS.has(flag) ? "boolean" as const : "string" as const }]));
   const { values, positionals, tokens } = parseArgs({ args: input.slice(1), options, allowPositionals: true, strict: true, tokens: true });
   const seen = new Set<string>();
+  const operationIds = new Set<string>();
   for (const token of tokens) {
     if (token.kind !== "option") continue;
+    if (token.name === "operation") {
+      if (!token.value || !/^[a-zA-Z0-9-]+$/.test(token.value) || operationIds.has(token.value)) throw new Error("Use a valid, distinct ID for each --operation");
+      operationIds.add(token.value);
+      continue;
+    }
     if (seen.has(token.name)) throw new Error(`Duplicate option: --${token.name}`);
     seen.add(token.name);
   }
@@ -67,5 +74,5 @@ export function parseArguments(input: string[]): CommandArguments {
   for (const flag of INTEGER_FLAGS) if (values[flag] !== undefined) positiveInteger(Number(values[flag]), `--${flag}`);
   if (values["max-ms"] !== undefined && Number(values["max-ms"]) > MAX_TIMER_MS) throw new Error(`--max-ms exceeds the Node timer limit (${MAX_TIMER_MS} ms)`);
   if (values.defaults && values.check) throw new Error("Use either config --defaults or config --check, not both");
-  return { command, values, positionals };
+  return { command, values, positionals, operationIds: [...operationIds] };
 }

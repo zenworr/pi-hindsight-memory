@@ -157,6 +157,25 @@ test("retain sends the canonical document with a caller-owned stable operation I
   await fs.rm(contentPath, { force: true });
 });
 
+test("operation polling accepts only validated, attributable retry schedules", async () => {
+  const op = "known";
+  const valid = "2099-10-22T08:13:12.123456+02:00";
+  for (const [body, nextRetryAt] of [
+    [{ operation_id: op, next_retry_at: valid }, "2099-10-22T06:13:12.123Z"],
+    [{ operation_id: op, next_retry_at: "2099-02-31T00:00:00Z" }, undefined],
+    [{ operation_id: op, next_retry_at: "2099-99-31T00:00:00Z" }, undefined],
+    [{ operation_id: op, next_retry_at: "2099-10-22T06:13:12" }, undefined],
+    [{ operation_id: op, child_operations: [{ status: "pending", parent_operation_id: "different", next_retry_at: valid }] }, undefined],
+    [{ next_retry_at: valid }, undefined],
+    [{ operation_id: "different", next_retry_at: valid }, undefined],
+  ] as const) {
+    const client = new HindsightClient(config(), async () => jsonResponse({ status: "pending", ...body }), "token");
+    const polls: (string | undefined)[] = [];
+    await assert.rejects(() => client.waitForOperation(op, undefined, 0, poll => { polls.push(poll.nextRetryAt); }));
+    assert.deepEqual(polls, [nextRetryAt]);
+  }
+});
+
 test("request retries a transient failure but keeps one operation payload", async () => {
   let calls = 0;
   let serialized = 0;

@@ -18,7 +18,7 @@ import { canPollOperation, TERMINAL_OPERATION_FAILURES, UNRESOLVED_SUBMISSION } 
 import { configuredExclusion } from "./exclusions.js";
 import { nextOperationId } from "./queue.js";
 import { removeEvidence } from "./evidence.js";
-import { loadPendingPayload, removePendingPayload, savePendingPayload, StaleRedactionPayloadError } from "./pending-payload.js";
+import { loadPendingPayload, PendingPayloadIntegrityError, removePendingPayload, savePendingPayload, StaleRedactionPayloadError } from "./pending-payload.js";
 
 type Block = Omit<ImportBlock, "since">;
 type Admission = { approval?: ImportApproval; blocked?: never } | { blocked: Block; approval?: never };
@@ -122,8 +122,8 @@ export class ImportWorker {
   private async pollSubmission(generation: GenerationRecord, session: SessionStateRecord, signal: AbortSignal): Promise<"completed"> {
     let reconciled = false;
     try {
-      await this.client.waitForOperation(generation.operationId, signal, Math.min(OPERATION_POLL_SLICE_MS, this.config.hindsight.retainWallTimeoutMs), ({ status, progressKey }) => {
-        this.state.recordOperationPoll(generation.operationId, status, progressKey);
+      await this.client.waitForOperation(generation.operationId, signal, Math.min(OPERATION_POLL_SLICE_MS, this.config.hindsight.retainWallTimeoutMs), ({ status, progressKey, nextRetryAt }) => {
+        this.state.recordOperationPoll(generation.operationId, status, progressKey, nextRetryAt);
       });
     } catch (error) {
       if (!(error instanceof HindsightOperationNotFoundError)) throw error;
@@ -152,6 +152,14 @@ export class ImportWorker {
     });
     this.logger.error("Submission requires review", { source: generation.source, session: generation.nativeSessionId, operation: generation.operationId });
     return "deferred";
+  }
+
+  private async readPendingPayload(generation: GenerationRecord): Promise<CanonicalSession | undefined> {
+    try { return await loadPendingPayload(this.config.spoolDirectory, generation.operationId, generation.canonicalHash); }
+    catch (error) {
+      if (error instanceof PendingPayloadIntegrityError || error instanceof StaleRedactionPayloadError) throw error;
+      throw new HindsightRequestNotSentError({ cause: error });
+    }
   }
 
   private async cleanupPayload(operationId: string): Promise<void> {
@@ -201,13 +209,13 @@ export class ImportWorker {
     try {
       operationSignal.throwIfAborted();
       if (persisted && TERMINAL_OPERATION_FAILURES.includes(persisted.hindsightStatus ?? "")) {
-        session = await loadPendingPayload(this.config.spoolDirectory, generation.operationId, generation.canonicalHash);
+        session = await this.readPendingPayload(generation);
         previousPayloadId = session ? generation.operationId : undefined;
         generation = { ...generation, operationId: nextOperationId(this.state, this.config.hindsight.bankId, sessionState.documentId, generation.canonicalHash, generation.operationId), submittedAt: undefined, completedAt: undefined };
         persisted = undefined;
       }
       if (polling) return await this.pollSubmission(generation, sessionState, operationSignal);
-      if (persisted) session = await loadPendingPayload(this.config.spoolDirectory, generation.operationId, generation.canonicalHash);
+      if (persisted) session = await this.readPendingPayload(generation);
       const origin = sessionState.sourceOrigin ?? this.config.localOrigin;
       const adapter = createAdapters(this.config, origin).find((item) => item.source === generation.source);
       if (!adapter) throw new Error(`No adapter for ${generation.source} on ${origin}`);
@@ -238,7 +246,7 @@ export class ImportWorker {
         return "deferred";
       }
       if (session.canonicalHash !== generation.canonicalHash) {
-        if (persisted) throw new Error("Submitted source changed and its immutable payload is unavailable; remote reconciliation is required");
+        if (persisted) throw new PendingPayloadIntegrityError("Pending payload is unavailable and the source no longer matches the generation");
         this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "superseded", { error: "Source changed before submission" });
         return "deferred";
       }
@@ -262,8 +270,8 @@ export class ImportWorker {
         });
         persisted = this.state.getOperation(generation.operationId)!;
         if (previousPayloadId) {
-          session = await loadPendingPayload(this.config.spoolDirectory, generation.operationId, generation.canonicalHash);
-          if (!session) throw new Error("Retry payload is unavailable");
+          session = await this.readPendingPayload(generation);
+          if (!session) throw new PendingPayloadIntegrityError("Retry payload is unavailable");
           await this.cleanupPayload(previousPayloadId);
         }
       }
@@ -279,15 +287,22 @@ export class ImportWorker {
         this.state.durableTransaction(() => { this.state.upsertOperation({ ...persisted!, hindsightStatus: "ready" }); });
       }
       operationSignal.throwIfAborted();
-      const submittedAt = new Date().toISOString();
-      this.state.durableTransaction(() => {
-        this.state.upsertOperation({ ...persisted!, hindsightStatus: "submitting", submittedAt });
-        this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { submittedAt });
-      });
-      await inSpan("hindsight.retain.submit", { source: generation.source, "hindsight.canonical.bytes": session.canonicalBytes, "hindsight.canonical.turns": session.canonicalTurns }, () => this.client.retainWithOperationId(session!, generation.operationId, operationSignal));
+      await inSpan("hindsight.retain.submit", { source: generation.source, "hindsight.canonical.bytes": session.canonicalBytes, "hindsight.canonical.turns": session.canonicalTurns }, () => this.client.retainWithOperationId(session!, generation.operationId, operationSignal, () => {
+        const submittedAt = new Date().toISOString();
+        this.state.durableTransaction(() => {
+          this.state.upsertOperation({ ...persisted!, hindsightStatus: "submitting", submittedAt });
+          this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { submittedAt });
+        });
+      }));
       this.state.upsertOperation({ ...persisted, hindsightStatus: "pending" });
       return await this.pollSubmission(generation, sessionState, operationSignal);
     } catch (error) {
+      const localError = error instanceof HindsightRequestNotSentError ? error.cause : error;
+      if (localError instanceof PendingPayloadIntegrityError) {
+        this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "failed", { attemptCount: this.config.importer.maxAttempts, error: localError.message });
+        this.logger.error("Session import failed", { source: generation.source, session: generation.nativeSessionId, error: localError.message });
+        return "failed";
+      }
       if (error instanceof HindsightRequestNotSentError) {
         this.state.restoreUnsentOperation(generation);
         return "deferred";

@@ -112,6 +112,7 @@ export interface OperationRecord {
   lastPolledAt?: string;
   lastObservedStatus?: string;
   lastProgressAt?: string;
+  nextRetryAt?: string;
   retryCount: number;
   responseSummary?: string;
 }
@@ -353,6 +354,12 @@ export class StateDatabase {
           ALTER TABLE operations ADD COLUMN last_progress_key TEXT;
         `);
         this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (8,?)").run(new Date().toISOString());
+      });
+    }
+    if (!this.db.prepare("SELECT version FROM schema_migrations WHERE version=9").get()) {
+      this.transaction(() => {
+        this.db.exec("ALTER TABLE operations ADD COLUMN next_retry_at TEXT");
+        this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (9,?)").run(new Date().toISOString());
       });
     }
   }
@@ -864,26 +871,32 @@ export class StateDatabase {
   }
 
   private toOperation(row: Record<string, unknown>): OperationRecord {
-    return { operationId: String(row.operation_id), documentId: String(row.document_id), canonicalHash: String(row.canonical_hash), hindsightStatus: nullableString(row.hindsight_status), submittedAt: nullableString(row.submitted_at), lastPolledAt: nullableString(row.last_polled_at), lastObservedStatus: nullableString(row.last_observed_status), lastProgressAt: nullableString(row.last_progress_at), retryCount: Number(row.retry_count), responseSummary: nullableString(row.response_summary) };
+    return { operationId: String(row.operation_id), documentId: String(row.document_id), canonicalHash: String(row.canonical_hash), hindsightStatus: nullableString(row.hindsight_status), submittedAt: nullableString(row.submitted_at), lastPolledAt: nullableString(row.last_polled_at), lastObservedStatus: nullableString(row.last_observed_status), lastProgressAt: nullableString(row.last_progress_at), nextRetryAt: nullableString(row.next_retry_at), retryCount: Number(row.retry_count), responseSummary: nullableString(row.response_summary) };
   }
 
   restoreUnsentOperation(generation: GenerationRecord): void {
     this.durableTransaction(() => {
-      const restored = this.db.prepare("UPDATE operations SET hindsight_status='ready', submitted_at=NULL WHERE operation_id=? AND hindsight_status='submitting'").run(generation.operationId);
+      const restored = this.db.prepare("UPDATE operations SET hindsight_status='ready', submitted_at=NULL WHERE operation_id=? AND hindsight_status IN ('submitting','ready')").run(generation.operationId);
       if (restored.changes) this.db.prepare("UPDATE generations SET state='processing', submitted_at=NULL, error=NULL WHERE operation_id=? AND state='submitted'").run(generation.operationId);
     });
   }
 
-  recordOperationPoll(operationId: string, status: string, progressKey?: string): void {
+  recordOperationPoll(operationId: string, status: string, progressKey?: string, nextRetryAt?: string): void {
     const now = new Date().toISOString();
     this.db.prepare(`UPDATE operations SET last_polled_at=?1, last_observed_status=?2,
       last_progress_at=CASE WHEN ?3 IS NOT NULL AND last_progress_key IS NOT ?3 THEN ?1 ELSE last_progress_at END,
-      last_progress_key=COALESCE(?3,last_progress_key) WHERE operation_id=?4`).run({ "?1": now, "?2": status, "?3": progressKey ?? null, "?4": operationId });
+      last_progress_key=COALESCE(?3,last_progress_key), next_retry_at=?4 WHERE operation_id=?5`).run({ "?1": now, "?2": status, "?3": progressKey ?? null, "?4": nextRetryAt ?? null, "?5": operationId });
   }
 
   listActiveOperations(): OperationRecord[] {
     const rows = this.db.prepare("SELECT o.* FROM operations o JOIN generations g USING (operation_id) WHERE g.state IN ('submitted','processing') OR o.hindsight_status=?").all(UNRESOLVED_SUBMISSION) as Record<string, unknown>[];
     return rows.map((row) => this.toOperation(row));
+  }
+
+  listHeldSubmissions(): { operationId: string; source: Source; nativeSessionId: string; since: string }[] {
+    const rows = this.db.prepare(`SELECT g.operation_id, g.source, g.native_session_id, COALESCE(o.submitted_at,g.submitted_at,g.queued_at) AS since
+      FROM generations g JOIN operations o USING (operation_id) WHERE g.state='submitted' AND o.hindsight_status=? ORDER BY since,g.operation_id`).all(UNRESOLVED_SUBMISSION) as { operation_id: string; source: Source; native_session_id: string; since: string }[];
+    return rows.map(({ operation_id, source, native_session_id, since }) => ({ operationId: operation_id, source, nativeSessionId: native_session_id, since }));
   }
 
   unresolvedOperationCount(): number {

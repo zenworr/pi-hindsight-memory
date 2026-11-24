@@ -23,6 +23,7 @@ async function fixture(t: TestContext) {
   config.requireImportApproval = false;
   config.sessionSettleSeconds = 0;
   config.hindsight.operationPollMs = 10;
+  config.hindsight.apiTokenFile = path.join(root, "test-token");
   await fs.mkdir(config.sourceRoots.pi, { recursive: true });
   const transcript = await fs.readFile(path.resolve("test/fixtures/pi/session.jsonl"), "utf8");
   let state = new StateDatabase(config.stateDatabase);
@@ -73,6 +74,9 @@ async function fixture(t: TestContext) {
     restart() { state.close(); state = new StateDatabase(config.stateDatabase); },
     run(limit = 1, signal?: AbortSignal, repair = false, fetcher?: FetchLike) {
       return new ImportWorker(config, state, new HindsightClient(config.hindsight, fetcher, "fixture-token"), undefined, false, repair).runOnce(limit, signal, { admission: {} });
+    },
+    runWithTokenFile(fetcher: FetchLike) {
+      return new ImportWorker(config, state, new HindsightClient(config.hindsight, fetcher)).runOnce(1, undefined, { admission: {} });
     },
   };
 }
@@ -143,6 +147,63 @@ test("a connection refusal restores the same retain ID for a safe retry", async 
   assert.deepEqual(f.calls, ["POST /memories", `GET /operations/${g.operationId}`]);
 });
 
+test("token read and invalid request headers fail before fetch and recover with the original ID", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("token-read");
+  const fetcher = t.mock.fn(fetch);
+  for (const contents of [undefined, "invalid\nheader"]) {
+    if (contents) await fs.writeFile(f.config.hindsight.apiTokenFile, contents);
+    assert.equal((await f.runWithTokenFile(fetcher)).deferred, 1);
+    assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, "ready");
+    assert.equal(f.state.getLatestGeneration("pi", g.nativeSessionId)?.submittedAt, undefined);
+    assert.equal(fetcher.mock.callCount(), 0);
+    f.restart();
+  }
+  await fs.writeFile(f.config.hindsight.apiTokenFile, "fixture-token");
+  assert.equal((await f.runWithTokenFile(fetcher)).completed, 1);
+  assert.deepEqual(f.calls, ["POST /memories", `GET /operations/${g.operationId}`]);
+  assert.deepEqual(f.posts, [g.operationId]);
+});
+
+test("a transient content read fails before fetch and recovers with the original ID", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("content-read");
+  const fetcher = t.mock.fn(fetch);
+  assert.equal((await f.runWithTokenFile(fetcher)).deferred, 1);
+  await fs.writeFile(f.config.hindsight.apiTokenFile, "fixture-token");
+  const payloadPath = path.join(f.config.spoolDirectory, "pending", `${g.operationId}.jsonl`);
+  const readFile = fs.readFile.bind(fs);
+  const failRead = t.mock.method(fs, "readFile", (file: string, options?: BufferEncoding) => file === payloadPath
+    ? Promise.reject(Object.assign(new Error("temporary file read failure"), { code: "EAGAIN" }))
+    : readFile(file, options));
+  assert.equal((await f.runWithTokenFile(fetcher)).deferred, 1);
+  assert.equal(failRead.mock.calls.filter(call => call.arguments[0] === payloadPath).length, 1);
+  assert.equal(fetcher.mock.callCount(), 0);
+  assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, "ready");
+  assert.equal(f.state.getLatestGeneration("pi", g.nativeSessionId)?.submittedAt, undefined);
+  failRead.mock.restore();
+  f.restart();
+  assert.equal((await f.runWithTokenFile(fetcher)).completed, 1);
+  assert.deepEqual(f.posts, [g.operationId]);
+});
+
+test("a damaged pending payload fails locally without fetch or an unresolved submission", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("damaged");
+  const fetcher = t.mock.fn(fetch);
+  assert.equal((await f.runWithTokenFile(fetcher)).deferred, 1);
+  const payloadPath = path.join(f.config.spoolDirectory, "pending", `${g.operationId}.jsonl`);
+  await fs.writeFile(payloadPath, "damaged");
+  assert.equal((await f.runWithTokenFile(fetcher)).failed, 1);
+  const failed = f.state.getLatestGeneration("pi", g.nativeSessionId)!;
+  assert.equal(failed.state, "failed");
+  assert.equal(failed.operationId, g.operationId);
+  assert.match(failed.error!, /^Local payload integrity failure:/);
+  assert.equal(f.state.unresolvedOperationCount(), 0);
+  assert.equal(fetcher.mock.callCount(), 0);
+  assert.equal((await f.runWithTokenFile(fetcher)).selected, 0);
+});
+
 test("a connection reset after POST polls and holds when the operation is absent", async (t) => {
   const f = await fixture(t);
   const g = await f.add("reset");
@@ -165,37 +226,49 @@ test("a connection reset after POST polls and holds when the operation is absent
   assert.ok(f.calls.includes(`GET /operations/${g.operationId}`));
 });
 
-test("retry-unresolved uses the writer lock and preserves the original payload under a new ID", async (t) => {
+test("retry-unresolved lists holds without a lock and requeues only selected IDs under the writer lock", async (t) => {
   const f = await fixture(t);
   const g = await f.add("reviewed");
+  const other = await f.add("not-reviewed");
   f.remote.receipt = () => ({});
-  assert.equal((await f.run()).deferred, 1);
+  assert.equal((await f.run(2)).deferred, 2);
   const cli = fileURLToPath(new URL("../../src/importer/cli.js", import.meta.url));
   const configFile = path.join(f.root, "config.json");
   await fs.writeFile(configFile, JSON.stringify({ stateDatabase: f.config.stateDatabase, spoolDirectory: f.config.spoolDirectory }));
-  const run = () => spawnSync(process.execPath, [cli, "retry-unresolved", "--config", configFile], { encoding: "utf8", env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: f.root, XDG_STATE_HOME: f.root }, timeout: 10_000 });
+  const run = (...args: string[]) => spawnSync(process.execPath, [cli, "retry-unresolved", "--config", configFile, ...args], { encoding: "utf8", env: { ...process.env, HOME: f.root, XDG_CONFIG_HOME: f.root, XDG_STATE_HOME: f.root }, timeout: 10_000 });
   const old = f.state.getOperation(g.operationId)!;
   const id = nextOperationId(f.state, f.config.hindsight.bankId, old.documentId, g.canonicalHash, old.operationId);
   const payloadPath = (id: string, suffix = "jsonl") => path.join(f.config.spoolDirectory, "pending", `${id}.${suffix}`);
   const original = await fs.readFile(payloadPath(g.operationId), "utf8");
+  const otherPayload = await fs.readFile(payloadPath(other.operationId), "utf8");
+  const held = [g, other].map(({ operationId, source, nativeSessionId }) => ({ operationId, source, nativeSessionId, since: f.state.getOperation(operationId)?.submittedAt }))
+    .sort((a, b) => a.since!.localeCompare(b.since!) || a.operationId.localeCompare(b.operationId));
   await withWriterLock(f.config.stateDatabase, () => {
-    const result = run();
+    const listed = run();
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.deepEqual(JSON.parse(listed.stdout), { held });
+    const result = run("--operation", g.operationId);
     assert.equal(result.status, 1);
     assert.match(result.stderr, /writer lock is busy/);
   });
-  assert.equal(f.state.unresolvedOperationCount(), 1);
-  const result = run();
+  const invalid = run("--operation", g.operationId, "--operation", "not-held");
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /no holds were requeued/);
+  assert.equal(f.state.unresolvedOperationCount(), 2);
+  const result = run("--operation", g.operationId);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), { requeued: 1 });
-  assert.deepEqual(JSON.parse(run().stdout), { requeued: 0 });
+  assert.deepEqual(JSON.parse(run().stdout), { held: held.filter(row => row.operationId === other.operationId) });
   assert.equal(f.state.getLatestGeneration("pi", "reviewed")?.operationId, id);
-  assert.equal(f.state.unresolvedOperationCount(), 0);
+  assert.equal(f.state.unresolvedOperationCount(), 1);
+  assert.equal(await fs.readFile(payloadPath(other.operationId), "utf8"), otherPayload);
   assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, UNRESOLVED_SUBMISSION);
   assert.equal(await fs.readFile(payloadPath(id), "utf8"), original);
   for (const suffix of ["jsonl", "json"]) await assert.rejects(fs.access(payloadPath(g.operationId, suffix)), { code: "ENOENT" });
   f.remote.receipt = (id) => ({ operation_id: id });
   assert.equal((await f.run()).completed, 1);
-  assert.deepEqual(f.posts, [g.operationId, id]);
+  assert.deepEqual(f.posts.slice(0, 2).sort(), [g.operationId, other.operationId].sort());
+  assert.equal(f.posts[2], id);
 });
 
 for (const [outcome, status] of [["matching hash", 200], ["mismatching hash", 200], ["no document", 404]] as const) test(`operation ${status} not_found with ${outcome} never replays`, async (t) => {
@@ -271,14 +344,17 @@ test("a delayed child persists poll time separately from progress across shutdow
   const first = await pollThenStop("2099-10-22T06:13:12Z", "pending");
   assert.ok(first.submittedAt && first.lastPolledAt && first.lastProgressAt);
   assert.equal(first.lastObservedStatus, "pending");
+  assert.equal(first.nextRetryAt, "2099-10-22T06:13:12.000Z");
   assert.deepEqual(f.state.listActiveOperations(), [first]);
   assert.equal(f.state.getLatestGeneration("pi", "delayed-child")?.state, "submitted");
   const again = await pollThenStop("2099-10-23T06:13:12Z", "pending");
   assert.ok(again.lastPolledAt! > first.lastPolledAt);
   assert.equal(again.lastProgressAt, first.lastProgressAt);
   assert.equal(again.submittedAt, first.submittedAt);
+  assert.equal(again.nextRetryAt, "2099-10-23T06:13:12.000Z");
   const advanced = await pollThenStop("2099-10-23T06:13:12Z", "processing");
   assert.ok(advanced.lastProgressAt! > again.lastProgressAt);
+  assert.equal(advanced.nextRetryAt, undefined);
   assert.deepEqual(f.posts, [g.operationId]);
 });
 

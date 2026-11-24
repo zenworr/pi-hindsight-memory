@@ -117,7 +117,9 @@ function importerIssues(importer: ImporterStatus): string[] {
   if (importer.scanErrors > 0) issues.push(`${importer.scanErrors} source scan errors require attention`);
   if (importer.overdueSubmissions > 0 && importer.oldestSubmittedAgeSeconds !== undefined) {
     const hours = (importer.oldestSubmittedAgeSeconds * MS_PER_SECOND / HOUR_MS).toFixed(1);
-    issues.push(`${importer.overdueSubmissions} overdue submissions (oldest ${hours} h) — check Hindsight operations`);
+    const retryAt = importer.earliestOverdueRetryAt;
+    const schedule = retryAt ? `; remote retry scheduled ${retryAt.replace(/T(\d{2}:\d{2}).*$/, " $1 UTC")}` : "";
+    issues.push(`${importer.overdueSubmissions} overdue submissions (oldest ${hours} h${schedule}) — check Hindsight operations`);
   }
   if (importer.unresolvedSubmissions > 0) issues.push(`${importer.unresolvedSubmissions} unresolved submissions — review before retry-unresolved`);
   if (importer.quarantinedPayloads > 0) issues.push(`${importer.quarantinedPayloads} payloads use an old redaction policy — reconcile before retry`);

@@ -12,12 +12,15 @@ export function nextOperationId(state: StateDatabase, bankId: string, documentId
   return id;
 }
 
-export async function requeueUnresolved(config: AppConfig, state: StateDatabase): Promise<number> {
+export async function requeueUnresolved(config: AppConfig, state: StateDatabase, operationIds: readonly string[]): Promise<number> {
+  const selected = new Set(operationIds);
+  const generations = state.listGenerations().filter(generation => generation.state === "submitted" && selected.has(generation.operationId));
+  if (generations.length !== selected.size || generations.some(generation => state.getOperation(generation.operationId)?.hindsightStatus !== UNRESOLVED_SUBMISSION)) {
+    throw new Error("Every requested operation must be a held submission; no holds were requeued");
+  }
   const replacements: { generation: GenerationRecord; old: OperationRecord; operationId: string; copiedPayload: boolean }[] = [];
-  for (const generation of state.listGenerations()) {
-    if (generation.state !== "submitted") continue;
-    const old = state.getOperation(generation.operationId);
-    if (old?.hindsightStatus !== UNRESOLVED_SUBMISSION) continue;
+  for (const generation of generations) {
+    const old = state.getOperation(generation.operationId)!;
     const session = state.getSession(generation.source, generation.nativeSessionId);
     if (session?.classification?.kind !== "primary" || session.documentId !== old.documentId || old.canonicalHash !== generation.canonicalHash) {
       throw new Error("A held generation no longer matches its primary session and operation; no holds were requeued");

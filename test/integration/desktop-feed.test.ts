@@ -127,7 +127,8 @@ test("a single state owner scans distinct desktop and dev sessions with origin l
       ensureBank: async () => undefined,
       assertBankConfiguration: async () => ({}),
       assertExtractionAvailable: async () => undefined,
-      retainWithOperationId: async (session: CanonicalSession, operationId: string) => {
+      retainWithOperationId: async (session: CanonicalSession, operationId: string, _signal: AbortSignal, beforeSend: () => void) => {
+        beforeSend();
         paths.push(session.metadata.source_path);
         return { operation_id: operationId };
       },

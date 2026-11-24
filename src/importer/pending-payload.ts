@@ -13,6 +13,10 @@ export class StaleRedactionPayloadError extends Error {
   constructor() { super(STALE_REDACTION_PAYLOAD); }
 }
 
+export class PendingPayloadIntegrityError extends Error {
+  constructor(message: string) { super(`Local payload integrity failure: ${message}`); }
+}
+
 function paths(directory: string, operationId: string) {
   if (!/^[a-zA-Z0-9-]+$/.test(operationId)) throw new Error("Invalid pending operation identifier");
   const root = path.join(directory, "pending");
@@ -44,20 +48,35 @@ export async function loadPendingPayload(directory: string, operationId: string,
   const files = paths(directory, operationId);
   let metadata: PayloadMetadata | null;
   try { metadata = JSON.parse(await fs.readFile(files.metadata, "utf8")) as PayloadMetadata | null; }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-  if (metadata?.metadata?.redaction_policy_version !== REDACTION_POLICY_VERSION) throw new StaleRedactionPayloadError();
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if (error instanceof SyntaxError) throw new PendingPayloadIntegrityError("Pending payload metadata is invalid");
+    throw error;
+  }
+  if (!metadata?.metadata) throw new PendingPayloadIntegrityError("Pending payload metadata is invalid");
+  if (metadata.metadata.redaction_policy_version !== REDACTION_POLICY_VERSION) throw new StaleRedactionPayloadError();
   const hash = createHash("sha256");
-  for await (const chunk of createReadStream(files.text)) hash.update(chunk as Buffer);
-  if (metadata.canonicalHash !== expectedHash || hash.digest("hex") !== expectedHash) throw new Error("Pending payload hash does not match the submitted generation");
+  try { for await (const chunk of createReadStream(files.text)) hash.update(chunk as Buffer); }
+  catch (error) { throw pendingReadError(error); }
+  if (metadata.canonicalHash !== expectedHash || hash.digest("hex") !== expectedHash) throw new PendingPayloadIntegrityError("Pending payload hash does not match the generation");
   return {
     ...metadata,
     contentPath: files.text,
     async readContent(maxBytes = metadata.canonicalBytes) {
-      if ((await fs.stat(files.text)).size > maxBytes) throw new Error("Pending payload exceeds the request limit");
-      return fs.readFile(files.text, "utf8");
+      try {
+        if ((await fs.stat(files.text)).size > maxBytes) throw new PendingPayloadIntegrityError("Pending payload exceeds the request limit");
+        const bytes = await fs.readFile(files.text);
+        if (createHash("sha256").update(bytes).digest("hex") !== expectedHash) throw new PendingPayloadIntegrityError("Pending payload hash does not match the generation");
+        return bytes.toString("utf8");
+      } catch (error) { throw pendingReadError(error); }
     },
     cleanup() { return Promise.resolve(); },
   };
+}
+
+function pendingReadError(error: unknown): unknown {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "EISDIR" ? new PendingPayloadIntegrityError("Pending payload content is missing or invalid") : error;
 }
 
 export async function removePendingPayload(directory: string, operationId: string): Promise<void> {

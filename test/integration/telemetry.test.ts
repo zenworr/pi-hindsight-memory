@@ -31,7 +31,7 @@ test("instrumented normalization, indexing, payload persistence, and retain pres
   let retains = 0;
   const client = {
     ensureBank: async () => undefined, assertBankConfiguration: async () => ({}), assertExtractionAvailable: async () => undefined,
-    retainWithOperationId: async (_session: unknown, operationId: string) => { retains++; return { operation_id: operationId }; },
+    retainWithOperationId: async (_session: unknown, operationId: string, _signal: AbortSignal, beforeSend: () => void) => { beforeSend(); retains++; return { operation_id: operationId }; },
     waitForOperation: async () => ({ status: "completed" }),
   } as unknown as HindsightClient;
   try {

@@ -71,7 +71,9 @@ test("status reports a proactive disk block, failed and overdue updates, then cl
   add("failed", "failed", now, "failed", "CANARY_PRIVATE_GENERATION_ERROR");
   add("disk", "failed", now, undefined, "Free disk space is below the approved minimum");
   add("overdue", "submitted", old, "pending");
+  state.recordOperationPoll("overdue", "pending", undefined, "2099-10-22T06:13:12.000Z");
   add("new", "submitted", now, "pending");
+  state.recordOperationPoll("new", "pending", undefined, "2099-10-21T06:13:12.000Z");
   add("unresolved", "submitted", now, UNRESOLVED_SUBMISSION);
   add("quarantined", "submitted", now, "ready", STALE_REDACTION_PAYLOAD);
   const stalled = await collectHindsightStatus(config);
@@ -79,7 +81,7 @@ test("status reports a proactive disk block, failed and overdue updates, then cl
   assert.equal(stalled.importer.oldestSubmittedAt, old);
   assert.ok(stalled.importer.oldestSubmittedAgeSeconds! >= config.importer.overdueSubmissionSeconds);
   assert.match(stalled.issues.join(" "), /2 session updates failed \(disk-below-minimum: 1; operation-failed: 1\) — fix cause; run retry-failed/);
-  assert.match(stalled.issues.join(" "), /1 overdue submissions \(oldest 2\.\d h\) — check Hindsight operations/);
+  assert.match(stalled.issues.join(" "), /1 overdue submissions \(oldest 2\.\d h; remote retry scheduled 2099-10-22 06:13 UTC\) — check Hindsight operations/);
   assert.match(stalled.issues.join(" "), /1 unresolved submissions — review before retry-unresolved/);
   assert.match(stalled.issues.join(" "), /1 payloads use an old redaction policy/);
   assert.doesNotMatch(JSON.stringify(stalled), /CANARY_PRIVATE_GENERATION_ERROR/);

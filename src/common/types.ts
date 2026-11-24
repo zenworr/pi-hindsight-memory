@@ -268,6 +268,7 @@ export interface HindsightOperation {
   progress?: Record<string, unknown> | null;
   result_metadata?: Record<string, unknown> | null;
   child_operations?: unknown[] | null;
+  next_retry_at?: string | null;
 }
 
 export interface HindsightBankConfigResponse {
@@ -281,7 +282,7 @@ export interface HindsightVersionResponse {
 }
 
 export type ImportBlockReason = "disk-below-minimum" | "approval-missing" | "approval-invalid" | "provider-not-approved" | "budget-exceeded" | "extraction-unavailable" | "hindsight-unreachable";
-export type ImportFailureReason = "operation-failed" | "document-rejected" | "disk-below-minimum" | "unresolved-submission" | "other";
+export type ImportFailureReason = "operation-failed" | "document-rejected" | "disk-below-minimum" | "unresolved-submission" | "payload-integrity" | "other";
 
 type ImportPrivacyMode = "remote-redacted" | "local";
 

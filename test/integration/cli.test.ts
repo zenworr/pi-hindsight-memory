@@ -55,14 +55,14 @@ test("CLI recovery commands show safe help, reject invalid options, and honor th
   new StateDatabase(state).close();
   await withWriterLock(state, () => {
     for (const command of ["retry-failed", "retry-unresolved", "spool-cleanup"]) {
-      const locked = run(command);
+      const locked = command === "retry-unresolved" ? run(command, "--operation", "reviewed-id") : run(command);
       assert.equal(locked.status, 1, locked.stderr);
       assert.match(locked.stderr, /writer lock is busy.*scripts\/importer-service\.sh stop/);
     }
   });
   const retry = run("retry-unresolved");
   assert.equal(retry.status, 0, retry.stderr);
-  assert.deepEqual(JSON.parse(retry.stdout), { requeued: 0 });
+  assert.deepEqual(JSON.parse(retry.stdout), { held: [] });
   for (const flags of [[], ["--apply"]]) {
     const clean = run("spool-cleanup", ...flags);
     assert.equal(clean.status, 0, clean.stderr);
