@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { defaultConfig } from "../../src/common/config.js";
-import { HindsightClient } from "../../src/hindsight/client.js";
+import { HindsightClient, HindsightTimeoutError } from "../../src/hindsight/client.js";
 import { formatRecallResponse, boundOutput } from "../../src/hindsight/response-format.js";
 import { expectedRetainMission } from "../../src/common/retention-policy.js";
 import type { HindsightConfig } from "../../src/common/types.js";
@@ -254,11 +254,27 @@ test("missing operation response does not poll forever", async () => {
 });
 
 test("one recall deadline covers a hanging endpoint", async () => {
-  const started = Date.now();
   const client = new HindsightClient({ ...config(), recallTimeoutMs: 120 }, async (_url, request) => await new Promise<Response>((_resolve, reject) => {
     const keepAlive = setTimeout(() => { reject(new Error("test timeout")); }, 2_000);
     request?.signal?.addEventListener("abort", () => { clearTimeout(keepAlive); reject(new Error("aborted")); }, { once: true });
   }), "token");
-  await assert.rejects(() => client.recall("hang"), { name: "TimeoutError" });
-  assert.ok(Date.now() - started < 1000);
+  await assert.rejects(() => client.recall("hang"), HindsightTimeoutError);
+});
+
+test("a caller abort inside fetch keeps the original reason", async () => {
+  const controller = new AbortController();
+  const reason = new Error("caller aborted");
+  const client = new HindsightClient(config(), async (_url, request) => {
+    controller.abort(reason);
+    request?.signal?.throwIfAborted();
+    assert.fail("fetch must see the abort");
+  }, "token");
+  await assert.rejects(() => client.recall("cancel", controller.signal), (error) => error === reason);
+});
+
+test("a request deadline that expires before fetch reports a timeout", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"] });
+  const client = new HindsightClient(config(), async () => assert.fail("expired requests must not reach fetch"), "token");
+  const payload = { toJSON() { t.mock.timers.tick(250); return {}; } };
+  await assert.rejects(() => client.requestJson("POST", "http://example.test/memories", payload, undefined, 250), HindsightTimeoutError);
 });

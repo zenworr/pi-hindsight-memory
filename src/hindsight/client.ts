@@ -26,6 +26,13 @@ export class HindsightHttpError extends Error {
   }
 }
 
+export class HindsightTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Hindsight request exceeded ${timeoutMs} ms`);
+    this.name = "HindsightTimeoutError";
+  }
+}
+
 export class HindsightOperationError extends Error {
   constructor(readonly status: string, readonly operationId: string) {
     super(`Hindsight operation ${operationId} ended ${status}`);
@@ -118,13 +125,17 @@ export class HindsightClient {
   private async sendJson<T>(method: string, url: string, body: unknown, signal: AbortSignal | undefined, timeoutMs: number): Promise<T> {
     signal?.throwIfAborted();
     const deadline = Date.now() + timeoutMs;
+    const checkTimeout = (timeout: AbortSignal): void => {
+      signal?.throwIfAborted();
+      if (timeout.aborted || Date.now() >= deadline) throw new HindsightTimeoutError(timeoutMs);
+    };
     const payload = body === undefined ? undefined : JSON.stringify(body);
     let token = await this.token();
     let authRetry = false;
     for (let attempt = 0; attempt < this.config.httpMaxAttempts; attempt += 1) {
       signal?.throwIfAborted();
       const remaining = deadline - Date.now();
-      if (remaining <= 0) throw new Error(`${method} ${url}: request exceeded ${timeoutMs} ms`);
+      if (remaining <= 0) throw new HindsightTimeoutError(timeoutMs);
       const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${token}` };
       const request: RequestInit = { method, headers };
       if (payload !== undefined) { headers["Content-Type"] = "application/json"; request.body = payload; }
@@ -140,7 +151,8 @@ export class HindsightClient {
           return result;
         }, SpanKind.CLIENT, (result) => result.ok ? "ok" : "error");
       } catch (error) {
-        if (attempt + 1 < this.config.httpMaxAttempts && !signal?.aborted && Date.now() < deadline) {
+        checkTimeout(timeout);
+        if (attempt + 1 < this.config.httpMaxAttempts) {
           telemetryCount("hindsight.http.retries", 1, { reason: "transport" });
           await sleep(Math.min(this.config.httpRetryDelayMs * RETRY_BACKOFF_FACTOR ** attempt, this.config.httpMaxRetryDelayMs, Math.max(0, deadline - Date.now())), signal);
           continue;
@@ -155,14 +167,18 @@ export class HindsightClient {
         authRetry = true;
         continue;
       }
+      if (response.status === HTTP_STATUS.NO_CONTENT) return undefined as T;
+      let responseBody: string;
+      try { responseBody = await response.text(); }
+      catch (error) {
+        checkTimeout(timeout);
+        throw error;
+      }
       if (response.ok) {
-        if (response.status === HTTP_STATUS.NO_CONTENT) return undefined as T;
-        const text = await response.text();
-        if (!text) return undefined as T;
-        try { return JSON.parse(text) as T; }
+        if (!responseBody) return undefined as T;
+        try { return JSON.parse(responseBody) as T; }
         catch { throw new Error(`${method} ${url}: server returned invalid JSON`); }
       }
-      const responseBody = await response.text();
       const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
       if (isRetryableStatus(response.status) && attempt + 1 < this.config.httpMaxAttempts && !signal?.aborted && Date.now() < deadline) {
         telemetryCount("hindsight.http.retries", 1, { reason: "http", status: response.status });
@@ -323,17 +339,7 @@ export class HindsightClient {
         entities: null,
       },
     };
-    const timeout = AbortSignal.timeout(this.config.recallTimeoutMs);
-    const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
-    try {
-      const result = await this.requestJson<RecallResponse>("POST", this.bankUrl("/memories/recall"), body, requestSignal, this.config.recallTimeoutMs);
-      requestSignal.throwIfAborted();
-      return result;
-    } catch (error) {
-      signal?.throwIfAborted();
-      timeout.throwIfAborted();
-      throw error;
-    }
+    return this.requestJson<RecallResponse>("POST", this.bankUrl("/memories/recall"), body, signal, this.config.recallTimeoutMs);
   }
 
   async consolidate(observationScopes?: string[][], signal?: AbortSignal): Promise<{ operation_id?: string }> {

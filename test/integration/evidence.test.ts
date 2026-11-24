@@ -181,8 +181,17 @@ test("retrieval preserves an in-flight caller abort and reports a timeout separa
   t.after(f.close);
   let arrived!: () => void;
   const arrival = new Promise<void>((resolve) => { arrived = resolve; });
-  const client = await fakeRecall(t, f.config, () => { arrived(); });
-  f.config.hindsight.recallTimeoutMs = 5_000;
+  const clientConfig = { ...f.config, hindsight: { ...f.config.hindsight, recallTimeoutMs: 5_000 } };
+  let requests = 0;
+  const client = await fakeRecall(t, clientConfig, (_request, response) => {
+    requests += 1;
+    if (requests === 1) arrived();
+    else {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.flushHeaders();
+    }
+  });
+  f.config.hindsight.recallTimeoutMs = 45_000;
   const controller = new AbortController();
   const pending = retrieveMemory(f.config, client, "Hindsight rollback", controller.signal);
   await arrival;
@@ -190,9 +199,10 @@ test("retrieval preserves an in-flight caller abort and reports a timeout separa
   controller.abort(reason);
   await assert.rejects(pending, (error) => error === reason);
 
-  f.config.hindsight.recallTimeoutMs = 150;
+  clientConfig.hindsight.recallTimeoutMs = 500;
   const result = await retrieveMemory(f.config, client, "Hindsight rollback");
-  assert.match(result.text, /timed out/);
+  assert.equal(requests, 2);
+  assert.match(result.text, /recall timed out/);
   assert.equal(result.details.degraded, true);
   assert.equal(result.details.noMatch, true);
 });

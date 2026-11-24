@@ -1,7 +1,7 @@
 import { inSpan, telemetryCount, telemetryGauge } from "../common/telemetry.js";
 import { DatabaseSync } from "node:sqlite";
 import type { AppConfig } from "../common/types.js";
-import { HindsightHttpError, type HindsightClient } from "../hindsight/client.js";
+import { HindsightHttpError, HindsightTimeoutError, type HindsightClient } from "../hindsight/client.js";
 import { boundOutput, formatRecallResponse, type MemorySearchDetails } from "../hindsight/response-format.js";
 import { reviewedFacts, searchEvidence, type EvidenceHit, type ReviewedFact } from "../importer/evidence.js";
 
@@ -70,7 +70,7 @@ async function retrieve(config: AppConfig, client: HindsightClient, query: strin
       });
     } catch (error) {
       signal?.throwIfAborted();
-      const reason = timeout.aborted || error instanceof DOMException && error.name === "TimeoutError" ? "recall timed out"
+      const reason = timeout.aborted || error instanceof HindsightTimeoutError ? "recall timed out"
         : error instanceof HindsightHttpError ? `HTTP ${error.status}` : "network or response error";
       warnings.push(`Hindsight is unavailable (${reason}). Only local evidence is shown.`);
     }
