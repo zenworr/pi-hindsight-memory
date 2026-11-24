@@ -23,6 +23,7 @@ import { importAll } from "./historical.js";
 import { verifyFullImport } from "./verify.js";
 import { cleanupSubagents } from "./subagent-cleanup.js";
 import { buildCleanupPlan } from "./cleanup-plan.js";
+import type { CleanupPlan } from "./cleanup-plan.js";
 import { buildRepairPlan, repairHistory, type RepairPlan } from "./repair.js";
 
 const PROCESS_ARGUMENT_OFFSET = 2;
@@ -241,14 +242,9 @@ async function main(): Promise<void> {
     if (!has(args, "--apply")) throw new Error("cleanup-subagents requires --apply");
     const planPath = value(args, "--plan");
     if (!planPath) throw new Error("cleanup-subagents requires --plan FILE");
-    const expected = JSON.parse(await fs.readFile(planPath, "utf8")) as { planHash?: string; config?: { includeAmbiguous?: boolean } };
-    if (!expected.planHash) throw new Error("cleanup plan has no planHash");
-    const includeAmbiguous = expected.config?.includeAmbiguous === true;
-    const result = await withLock(config, async (state) => {
-      const current = await buildCleanupPlan(config, new HindsightClient(config.hindsight), { includeAmbiguous });
-      if (current.planHash !== expected.planHash) throw new Error(`Cleanup plan hash changed: expected ${expected.planHash}, got ${current.planHash}`);
-      return cleanupSubagents(config, state, new HindsightClient(config.hindsight), { includeAmbiguous, jobIds: new Set(current.jobs.map((job) => job.jobId)) });
-    });
+    const expected = JSON.parse(await fs.readFile(planPath, "utf8")) as CleanupPlan | null;
+    if (!expected?.planHash) throw new Error("cleanup plan has no planHash");
+    const result = await cleanupSubagents(config, new HindsightClient(config.hindsight), expected);
     await writeJson("-", result); return;
   }
   if (command === "status") { await writeJson("-", status(config)); return; }

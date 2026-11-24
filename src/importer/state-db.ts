@@ -784,10 +784,14 @@ export class StateDatabase {
     return Number(result.changes);
   }
 
-  finalizeExcluded(source: Source, nativeSessionId: string, hash: string, reason: string, classificationKind: "subagent" | "ambiguous" | "configured-exclusion" = "subagent"): void {
+  finalizeExcluded(source: Source, nativeSessionId: string, hash: string, reason: string, classificationKind: "subagent" | "ambiguous" | "configured-exclusion" = "subagent", cleanupJobId?: string): void {
     this.transaction(() => {
       this.db.prepare("UPDATE generations SET state='excluded', error=?, submitted_at=NULL WHERE source=? AND native_session_id=? AND canonical_hash=? AND state='cleanup_pending'").run(reason, source, nativeSessionId, hash);
       this.db.prepare("UPDATE sessions SET classification=?, classification_reason=?, classification_policy_version=?, status=?, last_seen_at=?, last_error=? WHERE source=? AND native_session_id=?").run(classificationKind, reason, CLASSIFICATION_POLICY_VERSION, classificationKind === "subagent" ? "excluded_subagent" : classificationKind === "configured-exclusion" ? "excluded_configured" : "excluded_ambiguous", new Date().toISOString(), reason, source, nativeSessionId);
+      if (cleanupJobId) {
+        this.db.prepare("UPDATE sessions SET acknowledged_hash=NULL, acknowledged_policy=NULL WHERE source=? AND native_session_id=?").run(source, nativeSessionId);
+        this.updateCleanupJob(cleanupJobId, "state_finalized");
+      }
     });
   }
 

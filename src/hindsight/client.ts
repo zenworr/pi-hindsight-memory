@@ -90,6 +90,8 @@ export class HindsightClient {
     private readonly fixedToken?: string,
   ) {}
 
+  get bankEndpoint(): string { return this.bankUrl(); }
+
   private bankUrl(suffix = ""): string {
     return `${this.config.apiUrl.replace(/\/$/, "")}/v1/default/banks/${encodeURIComponent(this.config.bankId)}${suffix}`;
   }
@@ -110,8 +112,8 @@ export class HindsightClient {
     } catch { return false; }
   }
 
-  async requestJson<T>(method: string, url: string, body?: unknown, signal?: AbortSignal, timeoutMs = this.config.requestTimeoutMs): Promise<T> {
-    return inSpan("hindsight.http.request", { "http.request.method": method, "http.route": this.route(url) }, () => this.sendJson<T>(method, url, body, signal, timeoutMs));
+  async requestJson<T>(method: string, url: string, body?: unknown, signal?: AbortSignal, timeoutMs = this.config.requestTimeoutMs, retry = true): Promise<T> {
+    return inSpan("hindsight.http.request", { "http.request.method": method, "http.route": this.route(url) }, () => this.sendJson<T>(method, url, body, signal, timeoutMs, retry));
   }
 
   private route(url: string): string {
@@ -123,7 +125,7 @@ export class HindsightClient {
     return "/other";
   }
 
-  private async sendJson<T>(method: string, url: string, body: unknown, signal: AbortSignal | undefined, timeoutMs: number): Promise<T> {
+  private async sendJson<T>(method: string, url: string, body: unknown, signal: AbortSignal | undefined, timeoutMs: number, retry: boolean): Promise<T> {
     signal?.throwIfAborted();
     const deadline = Date.now() + timeoutMs;
     const checkTimeout = (timeout: AbortSignal): void => {
@@ -133,12 +135,13 @@ export class HindsightClient {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     let token = await this.token();
     let authRetry = false;
-    for (let attempt = 0; attempt < this.config.httpMaxAttempts; attempt += 1) {
+    const maxAttempts = retry ? this.config.httpMaxAttempts : 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       signal?.throwIfAborted();
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new HindsightTimeoutError(timeoutMs);
       const headers: Record<string, string> = { Accept: "application/json", Authorization: `Bearer ${token}` };
-      const request: RequestInit = { method, headers };
+      const request: RequestInit = { method, headers, ...(!retry ? { redirect: "error" as const } : {}) };
       if (payload !== undefined) { headers["Content-Type"] = "application/json"; request.body = payload; }
       const timeout = AbortSignal.timeout(Math.max(1, remaining));
       request.signal = signal ? AbortSignal.any([signal, timeout]) : timeout;
@@ -153,7 +156,7 @@ export class HindsightClient {
         }, SpanKind.CLIENT, (result) => result.ok ? "ok" : "error");
       } catch (error) {
         checkTimeout(timeout);
-        if (attempt + 1 < this.config.httpMaxAttempts) {
+        if (attempt + 1 < maxAttempts) {
           telemetryCount("hindsight.http.retries", 1, { reason: "transport" });
           await sleep(Math.min(this.config.httpRetryDelayMs * RETRY_BACKOFF_FACTOR ** attempt, this.config.httpMaxRetryDelayMs, Math.max(0, deadline - Date.now())), signal);
           continue;
@@ -161,7 +164,7 @@ export class HindsightClient {
         // eslint-disable-next-line preserve-caught-error -- Transport causes can include credentials.
         throw new Error(`${method} ${url}: ${errorMessage(error)}`);
       }
-      if (response.status === HTTP_STATUS.UNAUTHORIZED && !authRetry && await this.tokenChanged(token) && Date.now() < deadline) {
+      if (response.status === HTTP_STATUS.UNAUTHORIZED && attempt + 1 < maxAttempts && !authRetry && await this.tokenChanged(token) && Date.now() < deadline) {
         await response.body?.cancel();
         token = await this.token();
         telemetryCount("hindsight.http.retries", 1, { reason: "authentication" });
@@ -181,7 +184,7 @@ export class HindsightClient {
         catch { throw new Error(`${method} ${url}: server returned invalid JSON`); }
       }
       const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
-      if (isRetryableStatus(response.status) && attempt + 1 < this.config.httpMaxAttempts && !signal?.aborted && Date.now() < deadline) {
+      if (isRetryableStatus(response.status) && attempt + 1 < maxAttempts && !signal?.aborted && Date.now() < deadline) {
         telemetryCount("hindsight.http.retries", 1, { reason: "http", status: response.status });
         const requestedWait = Math.min(this.config.httpMaxRetryDelayMs, response.status === HTTP_STATUS.TOO_MANY_REQUESTS ? retryAfterMs ?? RATE_LIMIT_FALLBACK_DELAY_MS : this.config.httpRetryDelayMs * RETRY_BACKOFF_FACTOR ** attempt);
         const wait = Math.min(requestedWait, Math.max(0, deadline - Date.now()));
@@ -377,8 +380,8 @@ export class HindsightClient {
     }
   }
 
-  async deleteDocument(documentId: string, signal?: AbortSignal): Promise<void> {
-    await this.requestJson("DELETE", this.bankUrl(`/documents/${encodeURIComponent(documentId)}`), undefined, signal);
+  async deleteDocument(documentId: string, signal?: AbortSignal, { retry = true }: { retry?: boolean } = {}): Promise<void> {
+    await this.requestJson("DELETE", this.bankUrl(`/documents/${encodeURIComponent(documentId)}`), undefined, signal, undefined, retry);
   }
 
   async deleteBank(signal?: AbortSignal): Promise<void> {

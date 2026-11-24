@@ -72,6 +72,20 @@ The restore test uses a temporary database, application, and loopback port. It c
 
 When a source disappears, Hindsight evidence remains and the session becomes `source_missing`. Source cleanup is not interpreted as a request to forget memory.
 
+## Reviewed exclusion cleanup
+
+Stop the importer and make a backup before you apply a cleanup plan. Do not let other clients write to the bank during review or cleanup. Hindsight does not provide a conditional delete that checks the document hash on the server.
+
+```bash
+pi-hindsight-memory plan-cleanup --output cleanup.json
+# Review the file before you continue.
+pi-hindsight-memory cleanup-subagents --apply --plan cleanup.json
+```
+
+The plan does not change source files or importer state. Review the counts, `jobs`, and `blocked` entries. The plan identifies the endpoint and bank. Each job shows the source owner, generations, operation states, and whether the remote document exists. If it exists, the job includes its hash. The plan can exclude definite subagents and sessions with configured exclusions. `--include-ambiguous` adds eligible ambiguous sessions, but never frozen `ambiguous_preserved` sessions. A missing source is not a cleanup target.
+
+Apply takes the importer writer lock and checks the plan again. Do not edit the plan to clear an error. If a target changed or a delete failed, make and review a new plan. If an operation is unresolved, let it end and resolve any unknown state before you make a new plan. If a cleanup job from an older version conflicts with a new plan, investigate the old job before you continue. Run `verify-import` after cleanup and before you restart the importer.
+
 ## Hindsight outage
 
 Operations and queue state are durable. After Hindsight returns:

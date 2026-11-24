@@ -49,17 +49,17 @@ function processingSignature(config: AppConfig): string {
   return `${CANONICAL_SCHEMA}|${ADAPTER_VERSION}|${SCAN_REDACTION_BASELINE}|classification:${CLASSIFICATION_POLICY_VERSION}|retain:${RETAIN_POLICY_VERSION}|exclusions:${JSON.stringify(exclusions)}`;
 }
 
-interface Discovered { adapter: SessionAdapter; reference: SessionReference; }
+export interface Discovered { adapter: SessionAdapter; reference: SessionReference; }
 function fingerprintSignature(value: unknown): string { return JSON.stringify(value); }
 async function exists(value: string): Promise<boolean> { try { await fs.access(value); return true; } catch { return false; } }
-function sourceRoot(adapter: SessionAdapter, config: AppConfig): string {
+export function sourceRoot(adapter: SessionAdapter, config: AppConfig): string {
   if (adapter.discoveryRoot) return adapter.discoveryRoot;
   return adapter.source === "opencode" ? config.opencodeDatabase : config.sourceRoots[adapter.source];
 }
 function discoveryErrorLocator(adapter: SessionAdapter, config: AppConfig): string {
   return adapter.origin && adapter.origin !== config.localOrigin ? `<discovery:${adapter.origin}>` : "<discovery>";
 }
-function ownsLocator(adapter: SessionAdapter, config: AppConfig, locator: string): boolean {
+export function ownsLocator(adapter: SessionAdapter, config: AppConfig, locator: string): boolean {
   const root = adapter.locatorRoot ?? sourceRoot(adapter, config);
   if (adapter.source === "opencode") return locator.startsWith(`${root}#`);
   return locator.startsWith(root.endsWith(path.sep) ? root : `${root}${path.sep}`);
@@ -70,10 +70,31 @@ function artifactErrorStatus(message: string): InventorySessionResult["status"] 
 function withProcessingSignature(fingerprint: SourceFingerprint, signature: string): SourceFingerprint { return { ...fingerprint, processing_signature: signature }; }
 function timestampOf(reference: SessionReference): number { const value = reference.sessionStartedAt ? Date.parse(reference.sessionStartedAt) : Number.NaN; return Number.isNaN(value) ? Number.POSITIVE_INFINITY : value; }
 
-function effectiveReference(state: StateDatabase, reference: SessionReference): SessionReference {
+export function effectiveReference(state: StateDatabase, reference: SessionReference): SessionReference {
   const alias = state.findSessionByAlias(reference.source, reference.locator);
   if (!alias || alias === reference.nativeSessionId) return reference;
   return { ...reference, nativeSessionId: alias, metadata: { ...reference.metadata, native_session_id: alias }, identityIsFallback: false };
+}
+
+export function selectSourceOwners(config: AppConfig, discovered: Discovered[], onlySource?: Source): Discovered[] {
+  for (const source of SOURCES) {
+    if (onlySource && onlySource !== source) continue;
+    for (const nativeId of config.promotedSessions[source]) {
+      if (!discovered.some(({ adapter, reference }) => adapter.source === source && (adapter.origin ?? config.localOrigin) === config.localOrigin && reference.nativeSessionId === nativeId)) {
+        throw new Error(`Promoted ${source} session ${nativeId} is absent from ${config.localOrigin}; no importer state was changed`);
+      }
+    }
+  }
+  const selected = discovered.filter(({ adapter, reference }) => adapter.origin !== "desktop" || !config.promotedSessions[adapter.source].includes(reference.nativeSessionId));
+  const owners = new Map<string, { origin: string; locator: string }>();
+  for (const { adapter, reference } of selected) {
+    const key = `${adapter.source}\n${reference.nativeSessionId}`;
+    const origin = adapter.origin ?? config.localOrigin;
+    const earlier = owners.get(key);
+    if (earlier && earlier.origin !== origin) throw new Error(`Duplicate ${adapter.source} session ${reference.nativeSessionId} at ${earlier.locator} and ${reference.locator}; no importer state was changed`);
+    owners.set(key, { origin, locator: reference.locator });
+  }
+  return selected;
 }
 
 export async function scan(config: AppConfig, state: StateDatabase, options: ScanOptions = {}): Promise<ScanSummary> {
@@ -129,23 +150,7 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     }
   }
   options.signal?.throwIfAborted();
-  for (const source of SOURCES) {
-    if (options.source && options.source !== source) continue;
-    for (const nativeId of config.promotedSessions[source]) {
-      if (!discovered.some(({ adapter, reference }) => adapter.source === source && (adapter.origin ?? config.localOrigin) === config.localOrigin && reference.nativeSessionId === nativeId)) {
-        throw new Error(`Promoted ${source} session ${nativeId} is absent from ${config.localOrigin}; no importer state was changed`);
-      }
-    }
-  }
-  discovered = discovered.filter(({ adapter, reference }) => adapter.origin !== "desktop" || !config.promotedSessions[adapter.source].includes(reference.nativeSessionId));
-  const owners = new Map<string, { origin: string; locator: string }>();
-  for (const { adapter, reference } of discovered) {
-    const key = `${adapter.source}\n${reference.nativeSessionId}`;
-    const origin = adapter.origin ?? config.localOrigin;
-    const earlier = owners.get(key);
-    if (earlier && earlier.origin !== origin) throw new Error(`Duplicate ${adapter.source} session ${reference.nativeSessionId} at ${earlier.locator} and ${reference.locator}; no importer state was changed`);
-    owners.set(key, { origin, locator: reference.locator });
-  }
+  discovered = selectSourceOwners(config, discovered, options.source);
   for (const adapter of adapters) {
     if (adapter.origin && adapter.origin !== config.localOrigin) continue;
     state.upsertSource(adapter.source, sourceRoot(adapter, config));
