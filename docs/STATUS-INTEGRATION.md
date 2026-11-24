@@ -56,8 +56,14 @@ interface StatusSnapshot {
     unprocessed: number;
     staleSources: number;
     uncertain: number;
+    available?: boolean;
+    blocked?: { reason: ImportBlockReason; since: string; action: string };
+    overdueSubmissions?: number;
+    oldestSubmittedAt?: string;
+    failureReasons?: { reason: ImportFailureReason; count: number }[];
   };
   service: {
+    available?: boolean;
     healthy: boolean;
     databaseConnected: boolean;
     documents: number;
@@ -70,7 +76,13 @@ interface StatusSnapshot {
   };
   issues: string[];
 }
+
+type ImportBlockReason = "disk-below-minimum" | "approval-missing" | "approval-invalid"
+  | "provider-not-approved" | "budget-exceeded" | "extraction-unavailable" | "hindsight-unreachable";
+type ImportFailureReason = "operation-failed" | "document-rejected" | "unresolved-submission" | "other";
 ```
+
+The new fields are optional so older providers and consumers can continue to use protocol version 1. When `available` is false, do not show the associated counts as current. An absent `available` flag does not assert availability. If present, `blocked` identifies the current import block, its start time, and a suggested action. `overdueSubmissions` uses the configured submission age threshold. `oldestSubmittedAt` and `blocked.since` are timestamps in ISO format. `failureReasons` groups current importer failures by reason code.
 
 The requester owns polling and rendering. A 15-second interval is normally sufficient. The provider is session-scoped, so a request made while Pi is starting or reloading can have no immediate responder; retry it after session startup completes. Requests use `hindsight.statusTimeoutMs`, which defaults to four seconds. A consumer's timeout must allow for the configured provider budget. Concurrent requests share one collection; the provider does not cache completed snapshots. Importer counts and health come from one read-only SQLite snapshot in a worker thread, so database queries do not block Pi's UI. The worker uses the same status timeout and does not run the importer. The response never includes credentials, transcript text, recalled memory, or provider responses.
 

@@ -1,6 +1,6 @@
 import { Worker } from "node:worker_threads";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { AppConfig, HindsightBankStats, HindsightOperation } from "../common/types.js";
+import type { AppConfig, HindsightBankStats, HindsightOperation, ImportBlockReason, ImportFailureReason } from "../common/types.js";
 import { errorMessage } from "../common/logging.js";
 import { ERROR_MESSAGE_MAX_CHARS } from "../common/limits.js";
 import { HindsightClient } from "../hindsight/client.js";
@@ -21,8 +21,14 @@ export interface HindsightStatusSnapshotV1 {
     processing: number;
     failed: number;
     cleanupPending: number;
+    available?: boolean;
+    blocked?: { reason: ImportBlockReason; since: string; action: string };
+    overdueSubmissions?: number;
+    oldestSubmittedAt?: string;
+    failureReasons?: { reason: ImportFailureReason; count: number }[];
   } & ImporterHealth;
   service: {
+    available?: boolean;
     healthy: boolean;
     databaseConnected: boolean;
     documents: number;

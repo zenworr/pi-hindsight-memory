@@ -26,6 +26,7 @@ test("approval gate matches the active provider and estimates a bounded cost", a
   await fs.writeFile(config.approvalFile, JSON.stringify({ approvedAt: "2026-01-01T00:00:00Z", provider: "local", model: "model-a", privacy: "local", maxEstimatedInputTokens: 1000, maxEstimatedCostUsd: 2, inputUsdPerMillionTokens: 1, outputUsdPerMillionTokens: 2, outputTokenMultiplier: 0.5 }), "utf8");
   const approval = assertImportApproval(config);
   assert.equal(approval.provider, "local");
+  assert.equal(approval.continuousMinFailureSample, undefined);
   assert.equal(estimateInputTokens(401), 101);
   assert.equal(estimateCostUsd(1000, approval), 0.002);
   await fs.writeFile(config.approvalFile, JSON.stringify({ ...approval, maxEstimatedInputTokens: null }));

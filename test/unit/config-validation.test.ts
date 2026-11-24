@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { defaultConfig, loadConfig } from "../../src/common/config.js";
+import { MAX_TIMER_MS } from "../../src/common/limits.js";
 
 const invalid: Array<[unknown, RegExp]> = [
   [{ maxInflightDocument: 3 }, /Unknown config key: maxInflightDocument/],
@@ -11,6 +12,10 @@ const invalid: Array<[unknown, RegExp]> = [
   [{ importer: { maxAttempts: "3" } }, /importer.maxAttempts must be a number/],
   [{ importer: { maxAttempts: 0 } }, /importer.maxAttempts.*positive integer/],
   [{ importer: { workBatchSize: 1.5 } }, /importer.workBatchSize.*positive integer/],
+  [{ importer: { overdueSubmissionSeconds: "7200" } }, /importer.overdueSubmissionSeconds must be a number/],
+  [{ importer: { overdueSubmissionSeconds: 0 } }, /importer.overdueSubmissionSeconds.*positive integer/],
+  [{ importer: { overdueSubmissionSeconds: 1.5 } }, /importer.overdueSubmissionSeconds.*positive integer/],
+  [{ importer: { overdueSubmissionSeconds: Number.MAX_SAFE_INTEGER + 1 } }, /importer.overdueSubmissionSeconds.*positive integer/],
   [{ requireImportApproval: "false" }, /requireImportApproval.*boolean/],
   [{ sourceRoots: null }, /sourceRoots must be an object/],
   [{ hindsight: [] }, /hindsight must be an object/],
@@ -18,6 +23,10 @@ const invalid: Array<[unknown, RegExp]> = [
   [{ sessionExclusions: { exactLabels: [123] } }, /exactLabels.*non-empty strings/],
   [{ hindsight: { dryRunTimeoutMs: 0 } }, /dryRunTimeoutMs.*positive integer/],
   [{ hindsight: { requestTimeoutMs: 2_147_483_648 } }, /Node timer limit/],
+  [{ hindsight: { recallTimeoutMs: "45000" } }, /hindsight.recallTimeoutMs must be a number/],
+  [{ hindsight: { recallTimeoutMs: 0 } }, /hindsight.recallTimeoutMs.*positive integer/],
+  [{ hindsight: { recallTimeoutMs: 1.5 } }, /hindsight.recallTimeoutMs.*positive integer/],
+  [{ hindsight: { recallTimeoutMs: MAX_TIMER_MS + 1 } }, /hindsight.recallTimeoutMs exceeds the Node timer limit/],
   [{ hindsight: { recallMaxTokens: 1.5 } }, /recallMaxTokens.*integer/],
   [{ hindsight: { apiUrl: "http://" } }, /valid HTTP or HTTPS URL/],
   [{ hindsight: { apiUrl: "https://user:secret@example.test" } }, /without credentials/],
@@ -54,6 +63,25 @@ test("partial retry settings merge with defaults and valid zero budgets remain s
     assert.equal(config.hindsight.recallMaxTokens, 0);
     assert.equal(config.sessionSettleSeconds, 0);
     assert.equal(config.hindsight.minRelevanceScore, 0.005);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("recall timeout and overdue submissions default for legacy configurations and accept independent overrides", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-config-"));
+  const file = path.join(root, "config.json");
+  try {
+    for (const overrides of [{}, { importer: { workBatchSize: 50 }, hindsight: { requestTimeoutMs: 5000 } }]) {
+      await fs.writeFile(file, JSON.stringify(overrides));
+      const config = loadConfig(file, root);
+      assert.equal(config.hindsight.recallTimeoutMs, 45_000);
+      assert.equal(config.importer.overdueSubmissionSeconds, 7_200);
+      assert.equal(config.hindsight.requestTimeoutMs, overrides.hindsight?.requestTimeoutMs ?? 15_000);
+    }
+    await fs.writeFile(file, JSON.stringify({ importer: { overdueSubmissionSeconds: 300 }, hindsight: { recallTimeoutMs: MAX_TIMER_MS } }));
+    const config = loadConfig(file, root);
+    assert.equal(config.hindsight.recallTimeoutMs, MAX_TIMER_MS);
+    assert.equal(config.importer.overdueSubmissionSeconds, 300);
+    assert.equal(config.hindsight.requestTimeoutMs, 15_000);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 

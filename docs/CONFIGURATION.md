@@ -67,8 +67,9 @@ A small file is sufficient. Omitted settings retain their defaults.
 | `importer.retryDelayMs` | 30000 | Delay after a failed daemon cycle. |
 | `importer.maxAttempts` | 3 | Maximum attempts for a failed generation. Submitted operations remain recoverable. |
 | `importer.workBatchSize` | 1000 | Maximum candidates selected per worker pass. The concurrency limit still applies. |
+| `importer.overdueSubmissionSeconds` | 7200 | Age threshold in seconds for reporting an overdue submission. This is not a retry deadline. |
 
-The approval file can set `maxEstimatedInputTokens: null` to disable its cumulative token ceiling without disabling other checks. See [provider approval](PROVIDER-GATE.md#approval).
+The approval file can set `maxEstimatedInputTokens: null` to disable its cumulative token ceiling without disabling other checks. The optional `continuousMinFailureSample` sets a minimum sample size for continuous failure-rate checks when supported by the importer. Omit it to keep the existing check. See [provider approval](PROVIDER-GATE.md#approval).
 
 Increasing `maxAttempts` can make exhausted failures eligible again. Review the root cause and budget first. The same limit applies to queue counts, candidate selection, and execution. `retry-failed` remains an explicit reset command.
 
@@ -83,7 +84,8 @@ All keys below are inside `hindsight`.
 | `apiUrl` | `http://127.0.0.1:8888` | API base URL. |
 | `uiUrl` | `http://127.0.0.1:9999` | Status link target. |
 | `bankId` | `coding-history` | Letters, digits, hyphens, and underscores only. |
-| `requestTimeoutMs` | 15000 | Overall HTTP request deadline, including retries. |
+| `requestTimeoutMs` | 15000 | General HTTP request deadline, including retries. |
+| `recallTimeoutMs` | 45000 | Deadline in milliseconds for recall only. Does not change other HTTP deadlines. |
 | `statusTimeoutMs` | 4000 | Status-provider request budget. Consumers need a compatible timeout. |
 | `httpMaxAttempts` | 3 | Maximum HTTP attempts, including the first request and any authentication retry. |
 | `httpRetryDelayMs` | 100 | Initial exponential retry delay. |
@@ -97,6 +99,8 @@ All keys below are inside `hindsight`.
 | `recallSourceFactsMaxTokens` | 1500 | Supporting fact token budget. Zero is allowed. |
 | `minRelevanceScore` | 0.01 | Non-negative relevance filter. This is not a confidence score. |
 | `operationRetentionDays` | 14 | Retention policy metadata; zero is allowed. Changing this value alone does not change the server's environment. |
+
+The config loader accepts `recallTimeoutMs` and `overdueSubmissionSeconds` even when the corresponding runtime features are not available.
 
 URLs must be valid HTTP or HTTPS URLs without embedded credentials, queries, or fragments. Use the token file for API authentication. Millisecond timeouts must not exceed Node's timer limit (2147483647 ms). The maximum retry delay must be at least the initial retry delay.
 

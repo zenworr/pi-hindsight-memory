@@ -45,8 +45,9 @@ export function validateConfig(config: AppConfig): AppConfig {
     if (key === "minRelevanceScore") {
       if (!Number.isFinite(value) || value < 0) throw new Error("hindsight.minRelevanceScore must be a finite non-negative number");
     } else {
-      positiveInteger(value, `hindsight.${key}`, key.startsWith("recall") || key === "operationRetentionDays");
-      if (key.endsWith("Ms") && value > MAX_TIMER_MS) throw new Error(`hindsight.${key} exceeds the Node timer limit (${MAX_TIMER_MS} ms)`);
+      const isTimeout = key.endsWith("Ms");
+      positiveInteger(value, `hindsight.${key}`, (!isTimeout && key.startsWith("recall")) || key === "operationRetentionDays");
+      if (isTimeout && value > MAX_TIMER_MS) throw new Error(`hindsight.${key} exceeds the Node timer limit (${MAX_TIMER_MS} ms)`);
     }
   }
   if (config.importer.retryDelayMs > MAX_TIMER_MS) throw new Error(`importer.retryDelayMs exceeds the Node timer limit (${MAX_TIMER_MS} ms)`);

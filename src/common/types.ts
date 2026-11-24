@@ -180,6 +180,7 @@ export interface AppConfig {
     retryDelayMs: number;
     maxAttempts: number;
     workBatchSize: number;
+    overdueSubmissionSeconds: number;
   };
   requireImportApproval: boolean;
   sourceRoots: {
@@ -200,6 +201,7 @@ export interface HindsightConfig {
   bankId: string;
   apiTokenFile: string;
   requestTimeoutMs: number;
+  recallTimeoutMs: number;
   statusTimeoutMs: number;
   httpMaxAttempts: number;
   httpRetryDelayMs: number;
@@ -275,6 +277,9 @@ export interface HindsightVersionResponse {
   features?: Record<string, unknown>;
 }
 
+export type ImportBlockReason = "disk-below-minimum" | "approval-missing" | "approval-invalid" | "provider-not-approved" | "budget-exceeded" | "extraction-unavailable" | "hindsight-unreachable";
+export type ImportFailureReason = "operation-failed" | "document-rejected" | "unresolved-submission" | "other";
+
 type ImportPrivacyMode = "remote-redacted" | "local";
 
 export interface ImportApproval {
@@ -289,4 +294,5 @@ export interface ImportApproval {
   outputTokenMultiplier?: number;
   minFreeBytes?: number;
   maxFailureRate?: number;
+  continuousMinFailureSample?: number;
 }

@@ -3,7 +3,7 @@ import path from "node:path";
 import { absolutePath, defaultRuntimePaths, homeDirectory } from "./paths.js";
 import type { AppConfig } from "./types.js";
 import { SOURCES } from "./types.js";
-import { DEFAULT_DESKTOP_FEED_MAX_AGE_SECONDS, DEFAULT_MAX_CANONICAL_BYTES, DAY_MS, HOUR_MS } from "./limits.js";
+import { DEFAULT_DESKTOP_FEED_MAX_AGE_SECONDS, DEFAULT_MAX_CANONICAL_BYTES, DEFAULT_OVERDUE_SUBMISSION_SECONDS, DEFAULT_RECALL_TIMEOUT_MS, DAY_MS, HOUR_MS } from "./limits.js";
 import { validateConfig, validateOverrides } from "./config-validation.js";
 
 const DEFAULT_BANK = "coding-history";
@@ -35,7 +35,7 @@ export function defaultConfig(home = homeDirectory()): AppConfig {
     scanIntervalSeconds: 900,
     sessionSettleSeconds: 3600,
     maxInflightDocuments: 4,
-    importer: { retryDelayMs: 30_000, maxAttempts: 3, workBatchSize: 1_000 },
+    importer: { retryDelayMs: 30_000, maxAttempts: 3, workBatchSize: 1_000, overdueSubmissionSeconds: DEFAULT_OVERDUE_SUBMISSION_SECONDS },
     requireImportApproval: true,
     sourceRoots: {
       pi: path.join(piAgentDirectory, "sessions"),
@@ -52,6 +52,7 @@ export function defaultConfig(home = homeDirectory()): AppConfig {
       bankId: DEFAULT_BANK,
       apiTokenFile: paths.tokenPath,
       requestTimeoutMs: 15_000,
+      recallTimeoutMs: DEFAULT_RECALL_TIMEOUT_MS,
       statusTimeoutMs: 4_000,
       httpMaxAttempts: 3,
       httpRetryDelayMs: 100,
