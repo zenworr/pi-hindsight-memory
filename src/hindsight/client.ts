@@ -306,6 +306,7 @@ export class HindsightClient {
   }
 
   async recall(query: string, signal?: AbortSignal): Promise<RecallResponse> {
+    signal?.throwIfAborted();
     const trimmed = query.trim();
     if (!trimmed) throw new Error("memory_search query must not be empty");
     if (estimateTokens(trimmed) > MAX_RECALL_QUERY_TOKENS) throw new Error("memory_search query is longer than Hindsight's 500-token limit");
@@ -322,7 +323,17 @@ export class HindsightClient {
         entities: null,
       },
     };
-    return this.requestJson<RecallResponse>("POST", this.bankUrl("/memories/recall"), body, signal);
+    const timeout = AbortSignal.timeout(this.config.recallTimeoutMs);
+    const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    try {
+      const result = await this.requestJson<RecallResponse>("POST", this.bankUrl("/memories/recall"), body, requestSignal, this.config.recallTimeoutMs);
+      requestSignal.throwIfAborted();
+      return result;
+    } catch (error) {
+      signal?.throwIfAborted();
+      timeout.throwIfAborted();
+      throw error;
+    }
   }
 
   async consolidate(observationScopes?: string[][], signal?: AbortSignal): Promise<{ operation_id?: string }> {

@@ -72,7 +72,7 @@ world + experience + observation results
 bounded text with explicit provenance and recording dates
 ```
 
-The formatter does not call `reflect`. Hindsight result scores are relative. The formatter rejects results below the configurable `hindsight.minRelevanceScore` floor.
+The formatter does not call `reflect`. Hindsight result scores are relative. The formatter requires a finite final score at or above the configurable `hindsight.minRelevanceScore` floor.
 
 ## Session identity
 

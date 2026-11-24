@@ -97,10 +97,10 @@ All keys below are inside `hindsight`.
 | `recallMaxTokens` | 2500 | Derived memory token budget. Zero is allowed. |
 | `recallChunksMaxTokens` | 2500 | Original chunk token budget. Zero is allowed. |
 | `recallSourceFactsMaxTokens` | 1500 | Supporting fact token budget. Zero is allowed. |
-| `minRelevanceScore` | 0.01 | Non-negative relevance filter. This is not a confidence score. |
+| `minRelevanceScore` | 0.01 | Minimum finite final score for a recall match. Results with no final score do not match, even at zero. This is not a confidence score. |
 | `operationRetentionDays` | 14 | Retention policy metadata; zero is allowed. Changing this value alone does not change the server's environment. |
 
-The config loader accepts `recallTimeoutMs` and `overdueSubmissionSeconds` even when the corresponding runtime features are not available.
+The config loader accepts `overdueSubmissionSeconds` even when overdue-submission reporting is not available.
 
 URLs must be valid HTTP or HTTPS URLs without embedded credentials, queries, or fragments. Use the token file for API authentication. Millisecond timeouts must not exceed Node's timer limit (2147483647 ms). The maximum retry delay must be at least the initial retry delay.
 

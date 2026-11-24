@@ -1,8 +1,7 @@
-import fs from "node:fs";
 import { inSpan, telemetryCount, telemetryGauge } from "../common/telemetry.js";
 import { DatabaseSync } from "node:sqlite";
 import type { AppConfig } from "../common/types.js";
-import type { HindsightClient } from "../hindsight/client.js";
+import { HindsightHttpError, type HindsightClient } from "../hindsight/client.js";
 import { boundOutput, formatRecallResponse, type MemorySearchDetails } from "../hindsight/response-format.js";
 import { reviewedFacts, searchEvidence, type EvidenceHit, type ReviewedFact } from "../importer/evidence.js";
 
@@ -10,6 +9,37 @@ const MAX_QUERY_CHARS = 2_000;
 const MAX_REVIEWED_TEXT_CHARS = 1_600;
 const MAX_REVIEWED_SOURCE_CHARS = 600;
 const MAX_SUPERSEDED_TEXT_CHARS = 800;
+const STATE_READ_TIMEOUT_MS = 500;
+
+type RetrievalState = { allowPassage?: (hit: EvidenceHit, canonicalHash: string) => boolean };
+
+function readRetrievalState(file: string): RetrievalState | undefined {
+  try {
+    const db = new DatabaseSync(file, { readOnly: true, timeout: STATE_READ_TIMEOUT_MS });
+    try {
+      db.exec("BEGIN");
+      const pending = db.prepare(`SELECT DISTINCT s.document_id FROM generations g
+        LEFT JOIN sessions s USING (source, native_session_id) WHERE g.state='cleanup_pending'`).all();
+      if (!pending.length) return {};
+      if (pending.some((row) => row.document_id == null)) return { allowPassage: () => false };
+      const affected = new Set(pending.map((row) => row.document_id));
+      const sessions = db.prepare(`SELECT document_id, source, native_session_id, canonical_hash FROM sessions
+        WHERE classification='primary' AND status IN ('discovered','imported','source_missing')`).all();
+      const safe = new Map(sessions.filter((row) => !affected.has(row.document_id)).map((row) => [row.document_id, row]));
+      return { allowPassage(hit, hash) {
+        const session = safe.get(hit.documentId);
+        return session?.source === hit.source && session.native_session_id === hit.sessionId && session.canonical_hash === hash;
+      } };
+    } finally { db.close(); }
+  } catch { return undefined; }
+}
+
+function stateUnavailable(): { text: string; details: MemorySearchDetails } {
+  return {
+    text: "Memory search is blocked because importer state is missing or unreadable. Check the state database or read-only mirror.",
+    details: { resultCount: 0, sourceCount: 0, noMatch: true, degraded: true },
+  };
+}
 
 export async function retrieveMemory(config: AppConfig, client: HindsightClient, query: string, signal?: AbortSignal): Promise<{ text: string; details: MemorySearchDetails }> {
   return inSpan("hindsight.memory.search", {}, async (span) => {
@@ -22,31 +52,47 @@ export async function retrieveMemory(config: AppConfig, client: HindsightClient,
 }
 
 async function retrieve(config: AppConfig, client: HindsightClient, query: string, signal?: AbortSignal): Promise<{ text: string; details: MemorySearchDetails }> {
-  const callerSignal = signal;
-  signal = signal ? AbortSignal.any([signal, AbortSignal.timeout(config.hindsight.requestTimeoutMs)]) : AbortSignal.timeout(config.hindsight.requestTimeoutMs);
-  signal.throwIfAborted();
+  signal?.throwIfAborted();
+  if (!query.trim()) throw new Error("memory_search query must not be empty");
   if ([...query].length > MAX_QUERY_CHARS) throw new Error("memory_search query is longer than Hindsight's 500-token limit");
-  if (fs.existsSync(config.stateDatabase)) {
-    const db = new DatabaseSync(config.stateDatabase, { readOnly: true, timeout: 500 });
-    try {
-      if (db.prepare("SELECT 1 FROM generations WHERE state='cleanup_pending' LIMIT 1").get()) throw new Error("Memory retrieval is blocked until excluded-session cleanup is complete");
-    } finally { db.close(); }
-  }
+  let state = readRetrievalState(config.stateDatabase);
+  if (!state) return stateUnavailable();
   const warnings: string[] = [];
+  let derived: ReturnType<typeof formatRecallResponse> | undefined;
+  if (!state.allowPassage) {
+    const timeout = AbortSignal.timeout(config.hindsight.recallTimeoutMs);
+    const recallSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
+    try {
+      derived = await inSpan("hindsight.memory.recall", {}, async () => {
+        const response = await client.recall(query, recallSignal);
+        recallSignal.throwIfAborted();
+        return formatRecallResponse(response, { minRelevanceScore: config.hindsight.minRelevanceScore });
+      });
+    } catch (error) {
+      signal?.throwIfAborted();
+      const reason = timeout.aborted || error instanceof DOMException && error.name === "TimeoutError" ? "recall timed out"
+        : error instanceof HindsightHttpError ? `HTTP ${error.status}` : "network or response error";
+      warnings.push(`Hindsight is unavailable (${reason}). Only local evidence is shown.`);
+    }
+    signal?.throwIfAborted();
+    state = readRetrievalState(config.stateDatabase);
+    if (!state) return stateUnavailable();
+  }
+  if (state.allowPassage) {
+    // Observations can combine sources and reviewed facts have no structured provenance.
+    derived = undefined;
+    warnings.push("Session cleanup is pending. Only state-verified local transcript excerpts are shown.");
+  }
   let hits: EvidenceHit[] = [];
   let facts: ReviewedFact[] = [];
   try {
-    const evidence = searchEvidence(config, query);
+    const evidence = searchEvidence(config, query, state.allowPassage);
     hits = evidence.hits;
     if (!evidence.available) warnings.push("The local original-evidence index is not available.");
   } catch { warnings.push("The local original-evidence index could not be read."); }
-  try { facts = reviewedFacts(config, query); }
-  catch { warnings.push("Reviewed current facts could not be read; check current-facts.json."); }
-  let derived: ReturnType<typeof formatRecallResponse> | undefined;
-  try { derived = await inSpan("hindsight.memory.recall", {}, async () => formatRecallResponse(await client.recall(query, signal), { minRelevanceScore: config.hindsight.minRelevanceScore })); }
-  catch (error) {
-    if (callerSignal?.aborted || hits.length + facts.length === 0) throw error;
-    warnings.push("Hindsight is unavailable. Only local evidence is shown.");
+  if (!state.allowPassage) {
+    try { facts = reviewedFacts(config, query); }
+    catch { warnings.push("Reviewed current facts could not be read; check current-facts.json."); }
   }
   const lines: string[] = [];
   if (warnings.length) lines.push(...warnings, "");

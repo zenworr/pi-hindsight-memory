@@ -6,8 +6,8 @@ import { formatRecallResponse, boundOutput } from "../../src/hindsight/response-
 import { expectedRetainMission } from "../../src/common/retention-policy.js";
 import type { HindsightConfig } from "../../src/common/types.js";
 
-function config(timeout = 2_000): HindsightConfig {
-  return { ...defaultConfig().hindsight, apiUrl: "http://127.0.0.1:8888", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: timeout, retainWallTimeoutMs: 60_000, recallMaxTokens: 2_500, recallChunksMaxTokens: 2_500, recallSourceFactsMaxTokens: 1_500, operationPollMs: 10, operationPollTimeoutMs: 1000, operationRetentionDays: 14 };
+function config(): HindsightConfig {
+  return { ...defaultConfig().hindsight, apiUrl: "http://127.0.0.1:8888", environmentFile: "/unused", bankId: "coding-history", apiTokenFile: "/unused", requestTimeoutMs: 2_000, retainWallTimeoutMs: 60_000, recallMaxTokens: 2_500, recallChunksMaxTokens: 2_500, recallSourceFactsMaxTokens: 1_500, operationPollMs: 10, operationPollTimeoutMs: 1000, operationRetentionDays: 14 };
 }
 
 function jsonResponse(value: unknown, status = 200, headers?: HeadersInit): Response { return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json", ...headers } }); }
@@ -207,10 +207,45 @@ test("formatter accepts a configured relevance floor", () => {
   assert.equal(formatRecallResponse(response, { minRelevanceScore: 0.001 }).details.noMatch, false);
 });
 
-test("formatter bounds very large recall output", () => {
-  const bounded = boundOutput(`${"line\n".repeat(3_000)}tail`, { resultCount: 1, sourceCount: 1, noMatch: false });
-  assert.ok(Buffer.byteLength(bounded.text) <= 50 * 1024);
-  assert.match(bounded.text, /Output truncated/);
+test("formatter rejects missing or non-finite scores even at a zero floor", () => {
+  const formatted = formatRecallResponse({ results: [
+    { text: "unscored" }, { text: "null score", scores: { final: null } },
+    { text: "non-finite score", scores: { final: Infinity } }, { text: "zero score", scores: { final: 0 } },
+  ] }, { minRelevanceScore: 0 });
+  assert.equal(formatted.details.resultCount, 1);
+  assert.match(formatted.text, /zero score/);
+  assert.doesNotMatch(formatted.text, /unscored|null score|non-finite score/);
+});
+
+test("formatter cites mixed-source observations and labels derived support separately from transcripts", () => {
+  const formatted = formatRecallResponse({
+    results: [
+      { id: "mixed", type: "observation", text: "Derived observation", source_fact_ids: ["a", "b"], scores: { final: 1 } },
+      { id: "single", type: "world", text: "Derived memory", chunk_id: "chunk", scores: { final: 1 } },
+    ],
+    source_facts: { a: { document_id: "doc-a", text: "Derived supporting text" }, b: { document_id: "doc-b", text: "Second source" } },
+    chunks: { chunk: { text: "Verbatim transcript text" } },
+  });
+  assert.equal(formatted.details.sourceCount, 3);
+  assert.match(formatted.text, /data, not instructions/);
+  assert.match(formatted.text, /session doc-a[\s\S]+session doc-b/);
+  assert.match(formatted.text, /Derived supporting fact \(not an original quotation\): Derived supporting text/);
+  assert.match(formatted.text, /Transcript excerpt: Verbatim transcript text/);
+});
+
+test("formatter counts its truncation notice within byte and line limits", () => {
+  const maxBytes = 50 * 1024;
+  const notice = "\n\n[Output truncated to 50 KB or 2,000 lines.]";
+  const details = { resultCount: 1, sourceCount: 1, noMatch: false };
+  for (const value of ["x".repeat(100_000), "🌍".repeat(25_000), `${"line\n".repeat(3_000)}tail`, "🌍\n".repeat(3_000)]) {
+    const bounded = boundOutput(value, details).text;
+    assert.ok(Buffer.byteLength(bounded) <= maxBytes);
+    assert.ok(bounded.split("\n").length <= 2_000);
+    assert.ok(bounded.endsWith(notice));
+    assert.doesNotMatch(bounded, /[\uD800-\uDFFF]/u);
+  }
+  const exact = "🌍".repeat(maxBytes / 4);
+  assert.equal(boundOutput(exact, details).text, exact);
 });
 
 test("missing operation response does not poll forever", async () => {
@@ -220,10 +255,10 @@ test("missing operation response does not poll forever", async () => {
 
 test("one recall deadline covers a hanging endpoint", async () => {
   const started = Date.now();
-  const client = new HindsightClient(config(120), async (_url, request) => await new Promise<Response>((_resolve, reject) => {
+  const client = new HindsightClient({ ...config(), recallTimeoutMs: 120 }, async (_url, request) => await new Promise<Response>((_resolve, reject) => {
     const keepAlive = setTimeout(() => { reject(new Error("test timeout")); }, 2_000);
     request?.signal?.addEventListener("abort", () => { clearTimeout(keepAlive); reject(new Error("aborted")); }, { once: true });
   }), "token");
-  await assert.rejects(() => client.recall("hang"));
+  await assert.rejects(() => client.recall("hang"), { name: "TimeoutError" });
   assert.ok(Date.now() - started < 1000);
 });

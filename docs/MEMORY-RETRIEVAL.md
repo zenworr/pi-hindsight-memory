@@ -29,7 +29,11 @@ The index does not include tool output, hidden reasoning, or harness startup ins
 
 Queries search globally. An explicit name or identifier can narrow matching passages to relevant documents; this does not create project-specific banks.
 
-If Hindsight is unavailable, matching local evidence remains usable. The result reports the degraded state. Cancellation still cancels the request.
+Recall uses `hindsight.recallTimeoutMs` instead of the general HTTP deadline. If recall fails, the tool reports a timeout, HTTP status, or network or response error. Matching local evidence remains available. The warning does not include the URL or response body. The caller can still cancel the request.
+
+While session cleanup is pending, the tool searches only local transcripts. It omits affected documents and any passage whose document ID, session, source, and content hash cannot be verified against importer state. It skips reviewed facts because their source fields are free text. It does not call remote recall during cleanup because one observation can combine evidence from multiple documents.
+
+If importer state is missing or unreadable, the tool does not return memory results. A readable, compatible read-only state mirror is sufficient.
 
 To rebuild the index without sending anything to a model:
 

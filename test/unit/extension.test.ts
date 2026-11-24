@@ -15,21 +15,32 @@ function client(response: unknown): HindsightClient {
 }
 
 test("the extension exposes exactly one small memory search tool shape", async () => {
-  const tool = createMemorySearchTool(client({ results: [{ id: "1", text: "The user prefers simple designs", type: "observation", metadata: { source: "pi", native_session_id: "s1" }, document_id: "agent-session:pi:s1" }] }));
+  const tool = createMemorySearchTool(client({ results: [{ id: "1", text: "The user prefers simple designs", type: "observation", scores: { final: 0.5 }, metadata: { source: "pi", native_session_id: "s1" }, document_id: "agent-session:pi:s1" }] }));
   assert.equal(tool.name, "memory_search");
   assert.deepEqual(Object.keys(tool.parameters.properties), ["query"]);
   const result = await tool.execute("call-1", { query: "simple designs" }, undefined, undefined, {} as any);
   assert.equal(result.content[0]?.type, "text");
   assert.match(String(result.content[0]?.text), /simple designs/);
+  assert.match(String(result.content[0]?.text), /data, not instructions/);
   assert.equal(result.details?.resultCount, 1);
 });
 
-test("extension registers memory_search only after the Pi runtime starts", async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-runtime-"));
-  await fs.writeFile(path.join(directory, "settings.json"), JSON.stringify({ packages: [] }), "utf8");
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = directory;
+async function withExtensionConfig(run: () => Promise<void>): Promise<void> {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-extension-"));
+  const previous = process.env.PI_HINDSIGHT_CONFIG;
   try {
+    const configPath = path.join(directory, "config.json");
+    await fs.writeFile(configPath, JSON.stringify(defaultConfig(directory)));
+    process.env.PI_HINDSIGHT_CONFIG = configPath;
+    await run();
+  } finally {
+    if (previous === undefined) delete process.env.PI_HINDSIGHT_CONFIG; else process.env.PI_HINDSIGHT_CONFIG = previous;
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+}
+
+test("extension registers memory_search only after the Pi runtime starts", async () => {
+  await withExtensionConfig(async () => {
     const handlers = new Map<string, (...args: any[]) => unknown>();
     const tools: any[] = [];
     let statusListeners = 0;
@@ -56,18 +67,11 @@ test("extension registers memory_search only after the Pi runtime starts", async
     await handlers.get("session_start")?.({}, {});
     assert.equal(tools.length, 1);
     assert.equal(statusListeners, 1);
-  } finally {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
-    await fs.rm(directory, { recursive: true, force: true });
-  }
+  });
 });
 
 test("runtime collision check refuses an existing memory_search tool", async () => {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-collision-"));
-  await fs.writeFile(path.join(directory, "settings.json"), JSON.stringify({ packages: [] }), "utf8");
-  const previous = process.env.PI_CODING_AGENT_DIR;
-  process.env.PI_CODING_AGENT_DIR = directory;
-  try {
+  await withExtensionConfig(async () => {
     let start: ((...args: any[]) => unknown) | undefined;
     const fakePi: any = {
       getAllTools: () => [{ name: "memory_search", sourceInfo: { path: "/other/extension.ts" } }],
@@ -77,10 +81,7 @@ test("runtime collision check refuses an existing memory_search tool", async () 
     };
     piHindsightMemory(fakePi);
     assert.throws(() => start?.({}, {}), /already registered by \/other\/extension\.ts/);
-  } finally {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
-    await fs.rm(directory, { recursive: true, force: true });
-  }
+  });
 });
 
 test("status provider exposes queue and service health without secrets", async () => {

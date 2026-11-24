@@ -105,7 +105,7 @@ export function removeEvidence(config: AppConfig, documentId: string): void {
   } finally { db.close(); }
 }
 
-export function searchEvidence(config: AppConfig, query: string): { available: boolean; hits: EvidenceHit[] } {
+export function searchEvidence(config: AppConfig, query: string, allowPassage?: (hit: EvidenceHit, canonicalHash: string) => boolean): { available: boolean; hits: EvidenceHit[] } {
   if (!fs.existsSync(config.evidenceDatabase)) return { available: false, hits: [] };
   const terms = queryTerms(query);
   if (!terms.length) return { available: true, hits: [] };
@@ -121,8 +121,8 @@ export function searchEvidence(config: AppConfig, query: string): { available: b
     const anchors = candidates.map((term) => ({ term, count: Number((frequency.get(quoted(term)) as { count: number }).count) })).filter((item) => item.count > 0).sort((a, b) => a.count - b.count);
     const anchor = quoted(anchors[0]?.term ?? terms[0]!);
     const recent = /\b(current|latest|now|still|recent|today|final|correction|removed|retired)\b/i.test(query) && !/\b(before|previous|originally|historical)\b/i.test(query);
-    const read = (order: string) => (db.prepare(`SELECT p.document_id AS documentId,d.source,d.session_id AS sessionId,d.source_path AS sourcePath,p.entry_id AS entryId,p.parent_entry_id AS parentEntryId,p.role,p.provenance,p.timestamp,p.text,d.indexed_at AS indexedAt FROM passages p JOIN documents d ON d.id=p.document_id WHERE passages MATCH ? AND p.document_id IN (SELECT document_id FROM passages WHERE passages MATCH ?) ORDER BY ${order} LIMIT 100`).all(expression, anchor) as unknown as EvidenceHit[])
-      .filter((row) => matchedTerms(row.text, terms) >= Math.min(LIMITS.matchedTerms, terms.length));
+    const read = (order: string) => (db.prepare(`SELECT p.document_id AS documentId,d.source,d.session_id AS sessionId,d.source_path AS sourcePath,p.entry_id AS entryId,p.parent_entry_id AS parentEntryId,p.role,p.provenance,p.timestamp,p.text,d.indexed_at AS indexedAt,d.canonical_hash AS canonicalHash FROM passages p JOIN documents d ON d.id=p.document_id WHERE passages MATCH ? AND p.document_id IN (SELECT document_id FROM passages WHERE passages MATCH ?) ORDER BY ${order} LIMIT 100`).all(expression, anchor) as unknown as Array<EvidenceHit & { canonicalHash: string }>)
+      .filter((row) => (!allowPassage || allowPassage(row, row.canonicalHash)) && matchedTerms(row.text, terms) >= Math.min(LIMITS.matchedTerms, terms.length));
     const lexical = read("rank");
     const latest = recent ? read("p.timestamp DESC,rank") : [];
     const corrections = latest.filter((row) => /\b(correction|superseded|no longer|removed|retired)\b/i.test(row.text));
@@ -131,7 +131,7 @@ export function searchEvidence(config: AppConfig, query: string): { available: b
     const excerpts = new Set<string>();
     const perEntry = new Map<string, number>();
     const perDocument = new Map<string, number>();
-    for (const row of rows) {
+    for (const { canonicalHash: _canonicalHash, ...row } of rows) {
       const key = `${row.documentId}:${row.entryId}`;
       const excerpt = `${key}:${row.text}`;
       if (excerpts.has(excerpt) || (perEntry.get(key) ?? 0) >= LIMITS.perEntry || (perDocument.get(row.documentId) ?? 0) >= LIMITS.perDocument) continue;
