@@ -19,6 +19,8 @@ const SOURCE_READ_ATTEMPTS = 2;
 // Redaction changes apply to new normalization, not to the identity of a source snapshot.
 const SCAN_REDACTION_BASELINE = "3";
 
+export interface ReviewedSession { origin: string; locator: string; canonicalHash: string; canonicalBytes: number; }
+
 export interface ScanOptions {
   inventoryOnly?: boolean;
   indexOnly?: boolean;
@@ -27,6 +29,7 @@ export interface ScanOptions {
   offset?: number;
   limit?: number;
   sessionIds?: string[];
+  review?: { expected: ReadonlyMap<string, ReviewedSession>; error: string; capture?: (session: CanonicalSession) => void };
   signal?: AbortSignal;
 }
 
@@ -109,7 +112,7 @@ export async function scan(config: AppConfig, state: StateDatabase, options: Sca
 async function scanSources(config: AppConfig, state: StateDatabase, options: ScanOptions): Promise<ScanSummary> {
   const adapters = createAdapters(config).filter((adapter) => !options.source || adapter.source === options.source);
   const signature = processingSignature(config);
-  const indexed = indexedDocumentHashes(config);
+  const indexed = options.inventoryOnly ? new Map<string, string>() : indexedDocumentHashes(config);
   const summary: ScanSummary = { discovered: 0, queued: 0, unchanged: 0, active: 0, empty: 0, errors: 0, sourceMissing: 0, excluded: 0, configured: 0, ambiguous: 0, results: [] };
   let discovered: Discovered[] = [];
   const unhealthy = new Set<SessionAdapter>();
@@ -120,8 +123,9 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     options.signal?.throwIfAborted();
     unhealthy.add(adapter);
     summary.errors += 1;
+    if (options.review) throw new Error(options.review.error, { cause: error });
     const message = redactText(errorMessage(error)).text;
-    state.recordScanError(adapter.source, locator, message);
+    if (!options.inventoryOnly) state.recordScanError(adapter.source, locator, message);
     summary.results.push({ source: adapter.source, nativeSessionId, locator, status: artifactErrorStatus(message), error: message });
   }
   for (const adapter of adapters) {
@@ -150,25 +154,37 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     }
   }
   options.signal?.throwIfAborted();
-  discovered = selectSourceOwners(config, discovered, options.source);
-  for (const adapter of adapters) {
+  try { discovered = selectSourceOwners(config, discovered, options.source); }
+  catch (error) { if (options.review) throw new Error(options.review.error, { cause: error }); throw error; }
+  for (const adapter of options.inventoryOnly ? [] : adapters) {
     if (adapter.origin && adapter.origin !== config.localOrigin) continue;
     state.upsertSource(adapter.source, sourceRoot(adapter, config));
     state.markScanStarted(adapter.source, new Date().toISOString());
   }
   for (const { adapter, locator, message } of discoveryErrors) {
-    state.recordScanError(adapter.source, locator, message);
+    if (!options.inventoryOnly) state.recordScanError(adapter.source, locator, message);
     summary.errors += 1;
     if (locator !== discoveryErrorLocator(adapter, config)) {
       summary.discovered += 1;
       summary.results.push({ source: adapter.source, nativeSessionId: "<discovery>", locator, status: artifactErrorStatus(message), error: message });
     }
   }
-  for (const adapter of enumerated) state.clearScanError(adapter.source, discoveryErrorLocator(adapter, config));
+  if (!options.inventoryOnly) for (const adapter of enumerated) state.clearScanError(adapter.source, discoveryErrorLocator(adapter, config));
   discovered.sort((a, b) => timestampOf(a.reference) - timestampOf(b.reference) || a.adapter.source.localeCompare(b.adapter.source) || a.reference.nativeSessionId.localeCompare(b.reference.nativeSessionId));
   const offset = options.offset ?? 0;
   const matching = options.sessionIds ? discovered.filter(({ reference }) => options.sessionIds!.includes(effectiveReference(state, reference).nativeSessionId)) : discovered;
   const selected = options.limit === undefined ? matching.slice(offset) : matching.slice(offset, offset + options.limit);
+  const review = options.review;
+  if (review) {
+    const ids = new Set<string>();
+    if (summary.errors || selected.length !== review.expected.size) throw new Error(review.error);
+    for (const { adapter, reference } of selected) {
+      const identity = effectiveReference(state, reference).nativeSessionId;
+      const expected = review.expected.get(identity);
+      if (!expected || ids.has(identity) || expected.origin !== (adapter.origin ?? config.localOrigin) || expected.locator !== reference.locator) throw new Error(review.error);
+      ids.add(identity);
+    }
+  }
   for (const item of selected) {
     options.signal?.throwIfAborted();
     const { adapter, reference: discoveredReference } = item;
@@ -187,10 +203,12 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     const tombstone = state.getExclusionTombstone(adapter.source, discoveredReference.nativeSessionId, documentId);
     const classification = configured ?? (tombstone ? { kind: "configured-exclusion" as const, reason: `persisted-configured-exclusion:${tombstone.label}`, policyVersion: structuralClassification.policyVersion } : structuralClassification);
     const reference = { ...effective, classification, ...(label ? { sessionLabel: label } : {}) };
-    if (configured && label) {
+    const frozen = state.getSession(adapter.source, reference.nativeSessionId);
+    if (review && (classification.kind !== "primary" || frozen?.status === "ambiguous_preserved")) throw new Error(review.error);
+    if (!options.inventoryOnly && configured && label) {
       state.recordExclusionTombstone({ source: adapter.source, nativeSessionId: reference.nativeSessionId, documentId, locator: discoveredReference.locator, label, normalizedLabel: label.normalize("NFKC").trim().toLowerCase(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     }
-    state.recordArtifact({
+    if (!options.inventoryOnly) state.recordArtifact({
       source: adapter.source,
       locator: discoveredReference.locator,
       nativeSessionId: reference.nativeSessionId,
@@ -200,25 +218,26 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       sessionStartedAt: reference.sessionStartedAt,
       sessionUpdatedAt: reference.sessionUpdatedAt,
     });
-    const frozen = state.getSession(adapter.source, reference.nativeSessionId);
     if (frozen?.status === "ambiguous_preserved" && classification.kind !== "configured-exclusion") {
-      state.clearScanCandidate(adapter.source, reference.nativeSessionId);
-      state.clearScanError(adapter.source, reference.locator);
-      if (indexed.delete(frozen.documentId)) removeEvidence(config, frozen.documentId);
+      if (!options.inventoryOnly) {
+        state.clearScanCandidate(adapter.source, reference.nativeSessionId);
+        state.clearScanError(adapter.source, reference.locator);
+        if (indexed.delete(frozen.documentId)) removeEvidence(config, frozen.documentId);
+      }
       summary.ambiguous += 1;
       summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: "ambiguous" });
       continue;
     }
     if (classification.kind !== "primary") {
-      state.clearScanError(adapter.source, reference.locator);
+      if (!options.inventoryOnly) state.clearScanError(adapter.source, reference.locator);
       if (classification.kind === "subagent") summary.excluded += 1;
       else if (classification.kind === "configured-exclusion") summary.configured += 1;
       else summary.ambiguous += 1;
       const existing = state.getSession(adapter.source, reference.nativeSessionId);
       const sameArtifact = existing?.sourceLocator === reference.locator;
       const safeToMutateSession = existing && (adapter.source !== "claude" || sameArtifact);
-      state.clearScanCandidate(adapter.source, reference.nativeSessionId);
-      if (safeToMutateSession) {
+      if (!options.inventoryOnly) state.clearScanCandidate(adapter.source, reference.nativeSessionId);
+      if (!options.inventoryOnly && safeToMutateSession) {
         if (indexed.delete(existing.documentId)) removeEvidence(config, existing.documentId);
         const latest = state.getLatestGeneration(adapter.source, reference.nativeSessionId);
         const preserveAmbiguous = classification.kind === "ambiguous" && latest?.state === "completed";
@@ -237,7 +256,7 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     const acknowledged = previous?.canonicalHash && previous.acknowledgedHash === previous.canonicalHash && previous.acknowledgedPolicy === RETAIN_POLICY_VERSION;
     const knownEmpty = previous?.status === "empty_after_normalization";
     const sameFingerprint = previous && fingerprintSignature(previous.sourceFingerprint) === fingerprintSignature(fingerprint);
-    const unchanged = previous && !options.inventoryOnly && !options.force && sameFingerprint && previous.canonicalHash && (knownEmpty || acknowledged && indexed.has(previous.documentId) || indexed.get(previous.documentId) === previous.canonicalHash && tracked && ["queued", "submitted", "processing", "failed"].includes(tracked.state));
+    const unchanged = previous && !options.inventoryOnly && !review && !options.force && sameFingerprint && previous.canonicalHash && (knownEmpty || acknowledged && indexed.has(previous.documentId) || indexed.get(previous.documentId) === previous.canonicalHash && tracked && ["queued", "submitted", "processing", "failed"].includes(tracked.state));
     if (unchanged) {
       state.clearScanError(adapter.source, reference.locator);
       state.clearScanCandidate(adapter.source, reference.nativeSessionId);
@@ -249,7 +268,7 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: knownEmpty ? "empty_after_normalization" : "eligible", canonicalBytes: previous.canonicalBytes, canonicalTurns: previous.canonicalTurns, startedAt: previous.sessionStartedAt, updatedAt: previous.sessionUpdatedAt });
       continue;
     }
-    const settled = options.force || sameFingerprint && acknowledged || config.sessionSettleSeconds === 0 || state.observeScanCandidate(
+    const settled = options.inventoryOnly || review || options.force || sameFingerprint && acknowledged || config.sessionSettleSeconds === 0 || state.observeScanCandidate(
       adapter.source,
       reference.nativeSessionId,
       fingerprintSignature(fingerprint),
@@ -262,7 +281,7 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: "active", startedAt: reference.sessionStartedAt, updatedAt: reference.sessionUpdatedAt });
       continue;
     }
-    state.clearScanCandidate(adapter.source, reference.nativeSessionId);
+    if (!options.inventoryOnly) state.clearScanCandidate(adapter.source, reference.nativeSessionId);
 
     let session: CanonicalSession | undefined;
     let loaded = false;
@@ -289,10 +308,13 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       continue;
     }
     if (!session) continue;
+    let captured = false;
     try {
       const tooLarge = session.canonicalBytes > config.maxCanonicalBytes;
-      summary.results.push({ source: adapter.source, nativeSessionId: session.nativeSessionId, locator: reference.locator, status: tooLarge ? "too_large" : session.emptyAfterNormalization ? "empty_after_normalization" : "eligible", canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, redactionCount: session.redactionCount, startedAt: session.sessionStartedAt, updatedAt: session.sessionUpdatedAt });
-      if (tooLarge) { unhealthy.add(adapter); summary.errors += 1; state.recordScanError(adapter.source, reference.locator, "Canonical document is too large"); continue; }
+      const expected = review?.expected.get(reference.nativeSessionId);
+      if (review && (!expected || tooLarge || session.emptyAfterNormalization || session.source !== adapter.source || session.nativeSessionId !== reference.nativeSessionId || session.documentId !== documentIdFor(adapter.source, reference.nativeSessionId) || session.sourceLocator !== reference.locator || session.canonicalHash !== expected.canonicalHash || session.canonicalBytes !== expected.canonicalBytes || session.classification && session.classification.kind !== "primary")) throw new Error(review.error);
+      summary.results.push({ source: adapter.source, nativeSessionId: session.nativeSessionId, locator: reference.locator, origin, canonicalHash: session.canonicalHash, status: tooLarge ? "too_large" : session.emptyAfterNormalization ? "empty_after_normalization" : "eligible", canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, redactionCount: session.redactionCount, startedAt: session.sessionStartedAt, updatedAt: session.sessionUpdatedAt });
+      if (tooLarge) { unhealthy.add(adapter); summary.errors += 1; if (!options.inventoryOnly) state.recordScanError(adapter.source, reference.locator, "Canonical document is too large"); continue; }
       if (!options.inventoryOnly) {
         try { await inSpan("hindsight.evidence.index", { source: session.source, "hindsight.canonical.bytes": session.canonicalBytes }, () => indexEvidence(config, session, options.indexOnly && options.force)); }
         catch (error) {
@@ -303,7 +325,8 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
           continue;
         }
       }
-      state.clearScanError(adapter.source, reference.locator);
+      if (options.inventoryOnly && review?.capture) { review.capture(session); captured = true; }
+      if (!options.inventoryOnly) state.clearScanError(adapter.source, reference.locator);
       if (session.emptyAfterNormalization) summary.empty += 1;
       if (!options.inventoryOnly && previous && acknowledged && fingerprintSignature(previous.sourceFingerprint) === fingerprintSignature(fingerprint)) {
         state.markSessionSeen(adapter.source, reference.nativeSessionId, fingerprint, fingerprint.size, fingerprint.mtimeMs, previous.status === "source_missing" ? "imported" : previous.status, reference.locator, adapter.origin ?? config.localOrigin);
@@ -314,7 +337,7 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
         if (generation) summary.queued += 1;
         else if (!session.emptyAfterNormalization && state.getSession(session.source, session.nativeSessionId)?.acknowledgedHash === session.canonicalHash) state.setSessionStatus(session.source, session.nativeSessionId, "imported");
       }
-    } finally { await session.cleanup().catch(() => undefined); }
+    } finally { if (!captured) await session.cleanup().catch(() => undefined); }
   }
 
   const unrestricted = options.limit === undefined && options.offset === undefined && !options.sessionIds;
@@ -345,7 +368,7 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       }
     }
   }
-  if (unrestricted) {
+  if (!options.inventoryOnly && unrestricted) {
     for (const source of new Set(adapters.map((adapter) => adapter.source))) {
       if (![...unhealthy].some((adapter) => adapter.source === source)) state.markScanCompleted(source, new Date().toISOString());
     }

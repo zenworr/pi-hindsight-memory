@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { sha256 } from "../../src/common/hashing.js";
 import { selectPilot } from "../../src/importer/pilot.js";
 import type { InventoryReport, Source } from "../../src/common/types.js";
 
 function report(): InventoryReport {
   const sources = ["pi", "codex", "claude", "opencode"] as Source[];
-  const results = sources.flatMap((source) => Array.from({ length: 30 }, (_, index) => ({ source, nativeSessionId: `${source}-${index}`, locator: `/x/${source}-${index}`, status: "eligible" as const, canonicalBytes: index + 1, canonicalTurns: index + 2 })));
+  const results = sources.flatMap((source) => Array.from({ length: 30 }, (_, index) => ({ source, nativeSessionId: `${source}-${index}`, locator: `/x/${source}-${index}`, origin: "test", canonicalHash: sha256(`${source}-${index}`), status: "eligible" as const, canonicalBytes: index + 1, canonicalTurns: index + 2 })));
   return { generatedAt: new Date().toISOString(), durationMs: 1, parserVersion: "x", canonicalSchema: "x", redactionPolicyVersion: "x", totals: {} as any, bySource: {} as any, largestCanonical: [], missingIdentifiers: 0, missingTimestamps: 0, results };
 }
 

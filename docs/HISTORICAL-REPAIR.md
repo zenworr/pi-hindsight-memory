@@ -2,7 +2,7 @@
 
 Use this workflow when an evidence-policy change affects documents that were already imported. Do not delete the bank or reset all observations as an upgrade shortcut.
 
-A repair preserves stable document IDs. Each changed policy generation receives a fresh operation ID. The worker stores an immutable redacted payload before replacement, then checkpoints preparation, deletion, submission, and completion. Interrupted work resumes from that payload rather than rereading a changed source file.
+A repair preserves stable document IDs. Each changed policy generation receives a fresh operation ID. The worker stores an immutable redacted payload before replacement, then checkpoints preparation, deletion, submission, and completion. The worker can resume an admitted generation from that payload. The repair command still checks the source snapshots against the plan.
 
 Only reviewed primary-session targets are repaired. Frozen ambiguous snapshots are not included. A configured exclusion remains stronger than ordinary classification and must complete its separate cleanup workflow.
 
@@ -32,12 +32,12 @@ node dist/src/importer/cli.js plan-repair --output repair-plan.local.json
 
 Review:
 
-- every target document and source;
-- the previous acknowledged hash and new canonical hash;
+- every target document, source origin, and locator;
+- the previous acknowledged hash and policy, and the new canonical hash;
 - canonical size and estimated resource use;
 - protected, missing, excluded, or empty sources that are not repair targets.
 
-The plan hash binds the targets to the API, bank, source configuration, exclusion labels, declared provider, and evidence policy. A changed plan or configuration is rejected.
+The plan hash binds the targets to the API, bank, source configuration, exclusion labels, declared provider, and evidence policy. The command checks all source snapshots before it makes remote changes. If the plan, configuration, source classification, or canonical bytes change, stop, resolve pending work, and build and review a new plan.
 
 Keep private plans outside Git. Native histories remain authoritative and are not changed by repair.
 
@@ -56,7 +56,7 @@ The queue is bounded to twice the configured document concurrency. Completed wor
 
 The previous remote hash must match the reviewed state or the known in-progress replacement. Unexpected remote changes stop repair. Pending and uncertain remote operations continue to block newer versions of the same document.
 
-Repairs consolidate after extraction finishes, rather than repeatedly invalidating and rebuilding the same shared observations between small batches. Failed operations or consolidation items stop the run.
+Repairs verify each replacement against its reviewed hash before and after consolidation. Failures in this repair or in new consolidation work stop the run. Historical failures alone do not stop it.
 
 Progress is written to `reports/repair-progress.json` under the state directory. Logs report counts and operation state, not transcript text.
 
@@ -74,7 +74,7 @@ Inspect errors first. After correcting a temporary failure, explicitly reset fai
 node dist/src/importer/cli.js retry-failed
 ```
 
-A lost response retries the same immutable payload and operation ID. A known terminal failure uses a fresh retry identity. Do not remove failed pending payloads while they may still be needed for recovery.
+Do not remove failed pending payloads while they may still be needed for recovery. Keep the reviewed source snapshots unchanged while a repair is in progress.
 
 Do not rebuild or replace the running repair's JavaScript files. Use a fixed release checkout or a verified build snapshot for a long repair.
 

@@ -7,7 +7,7 @@ import { DAY_MS, JSON_INDENT } from "../common/limits.js";
 import { parseArguments, type CommandArguments } from "./arguments.js";
 import { startTelemetry } from "../common/telemetry.js";
 
-import { activeProvider, assertImportApproval, estimateCostUsd, estimateInputTokens, readApproval } from "../common/approval.js";
+import { activeProvider, assertImportApproval, readApproval } from "../common/approval.js";
 import { errorMessage, Logger } from "../common/logging.js";
 import { HindsightClient } from "../hindsight/client.js";
 import { runInventory } from "./inventory.js";
@@ -29,8 +29,6 @@ import { buildRepairPlan, repairHistory, type RepairPlan } from "./repair.js";
 const PROCESS_ARGUMENT_OFFSET = 2;
 const DEFAULT_COHORT_SIZE = 250;
 const DEFAULT_PILOT_SIZE = 200;
-const PILOT_EXTRACTION_MODES = 2;
-const COST_DECIMAL_PLACES = 4;
 
 function value(args: CommandArguments, flag: string): string | undefined {
   const result = args.values[flag.replace(/^--/, "")];
@@ -124,13 +122,11 @@ async function runPilotCommand(config: ReturnType<typeof loadConfig>, args: Comm
   const [pilotPath, outputPath] = args.positionals;
   if (!pilotPath || !outputPath) throw new Error("run-pilot requires PILOT_JSON OUTPUT_JSON");
   const entries = JSON.parse(await fs.readFile(pilotPath, "utf8")) as PilotEntry[];
-  const approval = assertImportApproval(config);
-  const estimatedTokens = entries.reduce((sum, entry) => sum + estimateInputTokens(entry.canonicalBytes) * PILOT_EXTRACTION_MODES, 0);
-  const estimatedCost = estimateCostUsd(estimatedTokens, approval);
-  if (approval.maxEstimatedInputTokens !== null && estimatedTokens > approval.maxEstimatedInputTokens) throw new Error(`Two-mode pilot estimate ${estimatedTokens} exceeds approved input-token limit ${approval.maxEstimatedInputTokens}`);
-  if (estimatedCost > approval.maxEstimatedCostUsd) throw new Error(`Two-mode pilot estimate $${estimatedCost.toFixed(COST_DECIMAL_PLACES)} exceeds approved cost limit $${approval.maxEstimatedCostUsd}`);
-  await writePilotResults(outputPath, await runPilot(config, entries));
-  process.stdout.write(`${JSON.stringify({ output: outputPath, count: entries.length })}\n`);
+  const results = await runPilot(config, entries, assertImportApproval(config));
+  await writePilotResults(outputPath, results);
+  const failed = results.filter((result) => result.error !== undefined).length;
+  if (failed) throw new Error(`Pilot failed for ${failed} session(s); see ${outputPath}`);
+  process.stdout.write(`${JSON.stringify({ output: outputPath, count: results.length })}\n`);
 }
 
 async function queuePilotCommand(config: ReturnType<typeof loadConfig>, args: CommandArguments): Promise<void> {

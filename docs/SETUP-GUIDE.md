@@ -211,6 +211,8 @@ scripts/run-pilot.sh
 
 By default, this chooses at most 20 sessions no larger than 1 MiB each and compares concise and verbose extraction. Optional arguments change the count and size limit. It does not retain the pilot in the production bank. The approval gate bounds its estimated two-mode input.
 
+The pilot checks source identity, origin, locator, classification, size, and content hash before it calls the provider. If a check fails, generate a new inventory and pilot. If extraction fails, the command returns a non-zero exit code and writes the error in the results JSON.
+
 Review the reported JSON. Stop if there are extraction errors, empty results for clearly durable sessions, leaked credentials, excessive latency, or unexpected provider use.
 
 After review, use the reported pilot file to test real asynchronous retention:

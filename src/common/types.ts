@@ -100,6 +100,8 @@ export interface InventorySessionResult {
   locator: string;
   status: "eligible" | "active" | "empty_after_normalization" | "excluded_subagent" | "excluded_configured" | "ambiguous" | "malformed" | "too_large" | "error";
   sourceBytes?: number;
+  origin?: string;
+  canonicalHash?: string;
   canonicalBytes?: number;
   canonicalTurns?: number;
   redactionCount?: number;

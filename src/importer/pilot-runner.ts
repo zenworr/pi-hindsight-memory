@@ -1,49 +1,60 @@
 import fs from "node:fs/promises";
-import { JSON_INDENT } from "../common/limits.js";
-
 import path from "node:path";
-import type { AppConfig, Source } from "../common/types.js";
-import { createAdapters } from "../adapters/index.js";
+import { estimateCostUsd, estimateInputTokens } from "../common/approval.js";
+import { JSON_INDENT } from "../common/limits.js";
+import type { AppConfig, CanonicalSession, ImportApproval, Source } from "../common/types.js";
+import { documentIdFor } from "../common/hashing.js";
+import { errorMessage } from "../common/logging.js";
 import { HindsightClient } from "../hindsight/client.js";
-import type { PilotEntry } from "./pilot.js";
+import { pilotGroups, STALE_PILOT, type PilotEntry } from "./pilot.js";
+import { scan } from "./scanner.js";
+import { StateDatabase } from "./state-db.js";
 
-const DEFAULT_PILOT_CONCURRENCY = 2;
+const PILOT_CONCURRENCY = 2;
+const PILOT_MODES = ["concise", "verbose"];
+const PILOT_CHUNK_SIZE = 30_000;
+const COST_DECIMAL_PLACES = 4;
 
 export interface PilotRunResult { source: Source; nativeSessionId: string; canonicalBytes: number; modes: Record<string, Record<string, unknown>>; error?: string; }
 
-export async function runPilot(config: AppConfig, entries: PilotEntry[], modes = ["concise", "verbose"], maxConcurrent = DEFAULT_PILOT_CONCURRENCY): Promise<PilotRunResult[]> {
-  if (config.desktopFeed.enabled) throw new Error("Pilot extraction needs an explicit origin in multi-origin mode");
-  const client = new HindsightClient(config.hindsight);
-  await client.ensureBank();
-  const adapters = new Map(createAdapters(config).map((adapter) => [adapter.source, adapter]));
-  const results: Array<PilotRunResult | undefined> = new Array<PilotRunResult | undefined>(entries.length);
-  let next = 0;
-  async function worker(): Promise<void> {
-    for (;;) {
-      const index = next++;
-      if (index >= entries.length) return;
-      results[index] = await runOne(config, client, adapters, entries[index]!, modes);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(maxConcurrent, Math.max(1, entries.length)) }, () => worker()));
-  return results.filter((result): result is PilotRunResult => result !== undefined);
-}
-
-async function runOne(config: AppConfig, client: HindsightClient, adapters: Map<Source, ReturnType<typeof createAdapters>[number]>, entry: PilotEntry, modes: string[]): Promise<PilotRunResult> {
-  const adapter = adapters.get(entry.source);
-  if (!adapter) return { source: entry.source, nativeSessionId: entry.nativeSessionId, canonicalBytes: entry.canonicalBytes, modes: {}, error: "no adapter" };
+export async function runPilot(config: AppConfig, entries: PilotEntry[], approval: ImportApproval): Promise<PilotRunResult[]> {
+  const groups = pilotGroups(entries);
+  const stateExists = await fs.access(config.stateDatabase).then(() => true, (error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+    return false;
+  });
+  const state = stateExists ? new StateDatabase(config.stateDatabase, { readOnly: true }) : new StateDatabase(":memory:");
+  const snapshots = new Map<string, CanonicalSession>();
   try {
-    let reference;
-    for await (const candidate of adapter.discover()) if (candidate.nativeSessionId === entry.nativeSessionId || candidate.locator === entry.locator) { reference = candidate; break; }
-    if (!reference) throw new Error("session was not found");
-    const session = await adapter.load(reference, { spoolDirectory: config.spoolDirectory, maxCanonicalBytes: config.maxCanonicalBytes });
     try {
-      const content = await session.readContent();
-      const modeResults: Record<string, Record<string, unknown>> = {};
-      for (const mode of modes) modeResults[mode] = await client.dryRunExtract(content, { retain_extraction_mode: mode, retain_chunk_size: 30000 });
-      return { source: entry.source, nativeSessionId: entry.nativeSessionId, canonicalBytes: session.canonicalBytes, modes: modeResults };
-    } finally { await session.cleanup(); }
-  } catch (error) { return { source: entry.source, nativeSessionId: entry.nativeSessionId, canonicalBytes: entry.canonicalBytes, modes: {}, error: error instanceof Error ? error.message : String(error) }; }
+      for (const [source, expected] of groups) {
+        await scan(config, state, { source, sessionIds: [...expected.keys()], inventoryOnly: true, review: { expected, error: STALE_PILOT, capture: (session) => { snapshots.set(session.documentId, session); } } });
+      }
+    } finally { state.close(); }
+    const estimatedTokens = [...snapshots.values()].reduce((sum, session) => sum + estimateInputTokens(session.canonicalBytes) * PILOT_MODES.length, 0);
+    const estimatedCost = estimateCostUsd(estimatedTokens, approval);
+    if (approval.maxEstimatedInputTokens !== null && estimatedTokens > approval.maxEstimatedInputTokens) throw new Error(`Two-mode pilot estimate ${estimatedTokens} exceeds approved input-token limit ${approval.maxEstimatedInputTokens}`);
+    if (estimatedCost > approval.maxEstimatedCostUsd) throw new Error(`Two-mode pilot estimate $${estimatedCost.toFixed(COST_DECIMAL_PLACES)} exceeds approved cost limit $${approval.maxEstimatedCostUsd}`);
+    const client = new HindsightClient(config.hindsight);
+    await client.ensureBank();
+    const results: PilotRunResult[] = [];
+    const pending = entries.entries();
+    async function worker(): Promise<void> {
+      for (const [index, entry] of pending) {
+        const result: PilotRunResult = { source: entry.source, nativeSessionId: entry.nativeSessionId, canonicalBytes: entry.canonicalBytes, modes: {} };
+        try {
+          const session = snapshots.get(documentIdFor(entry.source, entry.nativeSessionId))!;
+          const content = await session.readContent();
+          for (const mode of PILOT_MODES) result.modes[mode] = await client.dryRunExtract(content, { retain_extraction_mode: mode, retain_chunk_size: PILOT_CHUNK_SIZE });
+        } catch (error) { result.error = errorMessage(error); }
+        results[index] = result;
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(PILOT_CONCURRENCY, entries.length) }, () => worker()));
+    return results;
+  } finally {
+    await Promise.allSettled([...snapshots.values()].map((session) => session.cleanup()));
+  }
 }
 
 export async function writePilotResults(pathname: string, results: PilotRunResult[]): Promise<void> {

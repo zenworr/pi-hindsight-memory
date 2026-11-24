@@ -51,7 +51,7 @@ export async function runInventory(config: AppConfig, options: { source?: Source
         let structuralClassification;
         try { structuralClassification = reference.classification ?? await adapter.classify(reference); }
         catch (error) { recordError(reference.locator, reference.nativeSessionId, error, sourceBytes); continue; }
-        const classification = configuredExclusion(reference.sessionLabel ?? reference.metadata.title, config.sessionExclusions) ?? structuralClassification;
+        const classification = configuredExclusion(reference.sessionLabel ?? reference.metadata.title ?? structuralClassification.label, config.sessionExclusions) ?? structuralClassification;
         if (classification.kind !== "primary") {
           if (classification.kind === "subagent") stats.subagents += 1;
           else if (classification.kind === "configured-exclusion") stats.configured += 1;
@@ -75,7 +75,7 @@ export async function runInventory(config: AppConfig, options: { source?: Source
           stats.canonicalBytes += session.canonicalBytes;
           stats.canonicalTurns += session.canonicalTurns;
           stats.redactions += session.redactionCount;
-          results.push({ source: adapter.source, nativeSessionId: session.nativeSessionId, locator: reference.locator, status: tooLarge ? "too_large" : session.emptyAfterNormalization ? "empty_after_normalization" : "eligible", sourceBytes, canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, redactionCount: session.redactionCount, startedAt: session.sessionStartedAt, updatedAt: session.sessionUpdatedAt });
+          results.push({ source: adapter.source, nativeSessionId: session.nativeSessionId, locator: reference.locator, status: tooLarge ? "too_large" : session.emptyAfterNormalization ? "empty_after_normalization" : "eligible", sourceBytes, origin: adapter.origin ?? config.localOrigin, canonicalHash: session.canonicalHash, canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, redactionCount: session.redactionCount, startedAt: session.sessionStartedAt, updatedAt: session.sessionUpdatedAt });
         } finally { await session.cleanup().catch(() => undefined); }
       }
     } catch (error) {
