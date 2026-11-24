@@ -11,22 +11,26 @@ const MAX_REVIEWED_SOURCE_CHARS = 600;
 const MAX_SUPERSEDED_TEXT_CHARS = 800;
 const STATE_READ_TIMEOUT_MS = 500;
 
-type RetrievalState = { allowPassage?: (hit: EvidenceHit, canonicalHash: string) => boolean };
+type RetrievalState = { revision: number; cleanupPending: boolean; allowPassage?: (hit: EvidenceHit, canonicalHash: string) => boolean };
 
-function readRetrievalState(file: string): RetrievalState | undefined {
+function readRetrievalState(file: string, previousRevision?: number): RetrievalState | undefined {
   try {
     const db = new DatabaseSync(file, { readOnly: true, timeout: STATE_READ_TIMEOUT_MS });
     try {
       db.exec("BEGIN");
+      // Reviewed jobs stay in the journal and never go back to an earlier phase.
+      const { revision } = db.prepare(`SELECT COUNT(*) + COUNT(*) FILTER (WHERE phase <> 'planned')
+        + COUNT(*) FILTER (WHERE phase = 'state_finalized') AS revision FROM cleanup_jobs`).get() as { revision: number };
       const pending = db.prepare(`SELECT DISTINCT s.document_id FROM generations g
         LEFT JOIN sessions s USING (source, native_session_id) WHERE g.state='cleanup_pending'`).all();
-      if (!pending.length) return {};
-      if (pending.some((row) => row.document_id == null)) return { allowPassage: () => false };
+      const state = { revision, cleanupPending: pending.length > 0 };
+      if (!state.cleanupPending && (previousRevision === undefined || previousRevision === revision)) return state;
+      if (pending.some((row) => row.document_id == null)) return { ...state, allowPassage: () => false };
       const affected = new Set(pending.map((row) => row.document_id));
       const sessions = db.prepare(`SELECT document_id, source, native_session_id, canonical_hash FROM sessions
         WHERE classification='primary' AND status IN ('discovered','imported','source_missing')`).all();
       const safe = new Map(sessions.filter((row) => !affected.has(row.document_id)).map((row) => [row.document_id, row]));
-      return { allowPassage(hit, hash) {
+      return { ...state, allowPassage(hit, hash) {
         const session = safe.get(hit.documentId);
         return session?.source === hit.source && session.native_session_id === hit.sessionId && session.canonical_hash === hash;
       } };
@@ -75,13 +79,14 @@ async function retrieve(config: AppConfig, client: HindsightClient, query: strin
       warnings.push(`Hindsight is unavailable (${reason}). Only local evidence is shown.`);
     }
     signal?.throwIfAborted();
-    state = readRetrievalState(config.stateDatabase);
+    state = readRetrievalState(config.stateDatabase, state.revision);
     if (!state) return stateUnavailable();
   }
   if (state.allowPassage) {
     // Observations can combine sources and reviewed facts have no structured provenance.
     derived = undefined;
-    warnings.push("Session cleanup is pending. Only state-verified local transcript excerpts are shown.");
+    const reason = state.cleanupPending ? "Session cleanup is pending." : "Session cleanup changed during recall.";
+    warnings.push(`${reason} Only state-verified local transcript excerpts are shown.`);
   }
   let hits: EvidenceHit[] = [];
   let facts: ReviewedFact[] = [];

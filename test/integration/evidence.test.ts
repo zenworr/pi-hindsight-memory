@@ -243,6 +243,35 @@ test("cleanup that starts during recall suppresses a mixed-source observation", 
   assert.equal(result.details.noMatch, true);
 });
 
+test("cleanup that starts and finishes during recall returns only current, state-verified local evidence", async (t) => {
+  const f = await fixture();
+  t.after(f.close);
+  const valid = f.source.replace("source-session", "valid-session").replace("stack was removed", "valid FTS canary");
+  await fs.writeFile(path.join(f.config.sourceRoots.pi, "valid.jsonl"), valid);
+  await scan(f.config, f.state, { source: "pi", force: true, indexOnly: true });
+  const { nativeSessionId, documentId, canonicalHash } = f.state.getSession("pi", "source-session")!;
+  const at = "2026-01-01T00:00:00.000Z";
+  f.state.upsertGeneration({ source: "pi", nativeSessionId, canonicalHash: canonicalHash!, operationId: "retain-id", state: "completed", queuedAt: at, attemptCount: 1 });
+  const staleResponse = JSON.stringify({ results: [{ type: "observation", text: "Mixed Hindsight observation", scores: { final: 1 }, source_fact_ids: ["a", "b"] }] });
+  let requests = 0;
+  const client = await fakeRecall(t, f.config, (_request, response) => {
+    requests += 1;
+    f.state.planCleanupJob({ jobId: "cleanup-id", action: "delete-document", targetKind: "subagent", source: "pi", nativeSessionId, documentId, canonicalHash, oldOperationId: "retain-id", phase: "planned", createdAt: at, updatedAt: at });
+    f.state.updateCleanupJob("cleanup-id", "remote_deleted");
+    // A stale evidence index can still contain the excluded session.
+    f.state.finalizeExcluded("pi", nativeSessionId, canonicalHash!, "Reviewed exclusion", "subagent", "cleanup-id");
+    response.end(staleResponse);
+  });
+  const result = await retrieveMemory(f.config, client, "current Hindsight rollback logical backups");
+  assert.equal(requests, 1);
+  assert.equal(f.state.getCleanupJob("cleanup-id")?.phase, "state_finalized");
+  assert.equal(f.state.getLatestGeneration("pi", nativeSessionId)?.state, "excluded");
+  assert.match(result.text, /cleanup changed during recall/i);
+  assert.match(result.text, /valid FTS canary/);
+  assert.doesNotMatch(result.text, /source-session|Mixed Hindsight observation/);
+  assert.equal(result.details.degraded, true);
+});
+
 test("missing or unreadable state blocks both local and remote search", async (t) => {
   const f = await fixture();
   t.after(f.close);

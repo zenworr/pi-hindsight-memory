@@ -31,7 +31,7 @@ Queries search globally. An explicit name or identifier can narrow matching pass
 
 Recall uses `hindsight.recallTimeoutMs` instead of the general HTTP deadline. If recall fails, the tool reports a timeout, HTTP status, or network or response error. Matching local evidence remains available. The warning does not include the URL or response body. The caller can still cancel the request.
 
-While session cleanup is pending, the tool searches only local transcripts. It omits affected documents and any passage whose document ID, session, source, and content hash cannot be verified against importer state. It skips reviewed facts because their source fields are free text. It does not call remote recall during cleanup because one observation can combine evidence from multiple documents.
+While session cleanup is pending, the tool searches only local transcripts. It omits affected documents and any passage whose document ID, session, source, and content hash cannot be verified against importer state. It skips reviewed facts because their source fields are free text. It does not call remote recall during cleanup because one observation can combine evidence from multiple documents. If cleanup starts and finishes during a recall, the tool discards that response and shows only state-verified local transcripts.
 
 If importer state is missing or unreadable, the tool does not return memory results. A readable, compatible read-only state mirror is sufficient.
 
