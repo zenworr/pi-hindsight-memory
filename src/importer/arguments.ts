@@ -19,6 +19,7 @@ const COMMANDS: Record<string, { flags: string[]; positionals: number }> = {
   "verify-ready": { flags: [], positionals: 0 },
   "plan-cleanup": { flags: ["output", "include-ambiguous"], positionals: 0 },
   "cleanup-subagents": { flags: ["apply", "plan"], positionals: 0 },
+  "spool-cleanup": { flags: ["apply"], positionals: 0 },
   status: { flags: [], positionals: 0 },
   pause: { flags: [], positionals: 0 },
   resume: { flags: [], positionals: 0 },

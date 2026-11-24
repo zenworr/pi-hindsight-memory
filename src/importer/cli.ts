@@ -23,6 +23,7 @@ import { runPilot, writePilotResults } from "./pilot-runner.js";
 import { importAll } from "./historical.js";
 import { verifyFullImport } from "./verify.js";
 import { cleanupSubagents } from "./subagent-cleanup.js";
+import { cleanupSpool } from "./spool-cleanup.js";
 import { buildCleanupPlan } from "./cleanup-plan.js";
 import type { CleanupPlan } from "./cleanup-plan.js";
 import { buildRepairPlan, repairHistory, type RepairPlan } from "./repair.js";
@@ -54,7 +55,7 @@ async function writeJson(outputPath: string | undefined, valueToWrite: unknown):
 
 function usage(): void {
   process.stdout.write(`pi-hindsight-memory\n\nUsage:\n  config [--defaults | --check]\n  inventory [--output FILE] [--source SOURCE] [--limit N] [--summary-only]\n  scan [--source SOURCE] [--session-id ID] [--limit N] [--force]\n  index-evidence [--source SOURCE] [--session-id ID] [--limit N] [--force]\n  plan-repair [--output FILE]\n  repair --plan FILE [--max-ms N]\n  daemon [--once] [--no-scan]\n  drain [--max-ms N] [--no-scan]\n  process-queued [--max-ms N]\n  import-all [--cohort N] [--max-ms N]\n  verify-import\n  verify-ready\n  plan-cleanup [--output FILE] [--include-ambiguous]
-  cleanup-subagents --apply --plan FILE\n  status\n  pause | resume\n  configure-bank [--file FILE]\n  consolidate\n  enable-auto-consolidation\n  retry-failed\n  retry-unresolved\n  cancel-queued\n  dry-run-extract CANONICAL_FILE [--mode concise|verbose]\n  select-pilot INVENTORY_JSON [--count N] [--max-bytes N] [--include-largest]\n  queue-pilot PILOT_JSON\n  run-pilot PILOT_JSON OUTPUT_JSON\n  export-canonical SOURCE SESSION_ID OUTPUT_FILE\n  doctor\n\nAll commands accept --config FILE and --help. Numeric limits must be positive integers.\n`);
+  cleanup-subagents --apply --plan FILE\n  spool-cleanup [--apply]\n  status\n  pause | resume\n  configure-bank [--file FILE]\n  consolidate\n  enable-auto-consolidation\n  retry-failed\n  retry-unresolved\n  cancel-queued\n  dry-run-extract CANONICAL_FILE [--mode concise|verbose]\n  select-pilot INVENTORY_JSON [--count N] [--max-bytes N] [--include-largest]\n  queue-pilot PILOT_JSON\n  run-pilot PILOT_JSON OUTPUT_JSON\n  export-canonical SOURCE SESSION_ID OUTPUT_FILE\n  doctor\n\nAll commands accept --config FILE and --help. Numeric limits must be positive integers.\n`);
 }
 
 async function doctor(config: ReturnType<typeof loadConfig>): Promise<Record<string, unknown>> {
@@ -244,6 +245,7 @@ async function main(): Promise<void> {
     const result = await cleanupSubagents(config, new HindsightClient(config.hindsight), expected);
     await writeJson("-", result); return;
   }
+  if (command === "spool-cleanup") { await writeJson("-", await cleanupSpool(config, has(args, "--apply"))); return; }
   if (command === "status") { await writeJson("-", status(config)); return; }
   if (command === "pause" || command === "resume") { await setPaused(config, command === "pause"); return; }
   if (command === "configure-bank") { await configureBank(config, args); return; }

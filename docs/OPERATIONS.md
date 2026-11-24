@@ -76,6 +76,19 @@ scripts/importer-service.sh start
 
 The command prints the number of requeued generations. It does not requeue generations that are already pending exclusion cleanup. It saves each verified payload under a new operation ID before replacing the queue entry. An invalid or obsolete payload stops the command without clearing the holds. When there is no saved payload, the importer must reproduce the same hash from the source before it can submit. For a historical repair, resume with its reviewed `repair --plan` command before you start the normal importer.
 
+## Pending spool cleanup
+
+Stop the importer before you inspect or clean the pending spool. Both commands need the writer lock.
+
+```bash
+scripts/importer-service.sh stop
+node dist/src/importer/cli.js spool-cleanup
+node dist/src/importer/cli.js spool-cleanup --apply
+scripts/importer-service.sh start
+```
+
+Run without `--apply` to preview the cleanup. The command reports eligible, kept, and removed file counts and bytes. It removes only files with a matching terminal operation and a superseded, excluded, or completed generation. It keeps repair payloads, unresolved submissions, and files without matching state, including untracked `.tmp` files. It does not contact Hindsight.
+
 ## Backups
 
 Stop the importer before a coordinated capture. Keep other Hindsight writers (including manual UI writes) idle until capture ends. Use a known query and the exact document ID that supports the expected answer.
