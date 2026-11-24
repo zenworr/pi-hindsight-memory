@@ -16,6 +16,18 @@ model=$(awk -F= '/^HINDSIGHT_API_LLM_MODEL=/{print $2}' "$ENV_FILE")
 [[ -n "$provider" && "$provider" != none && -n "$model" ]] || { echo "Configure a real Hindsight provider and model first" >&2; exit 1; }
 [[ "$PRIVACY" == remote-redacted || "$PRIVACY" == local ]] || { echo "Privacy must be remote-redacted or local" >&2; exit 1; }
 umask 077
-jq -n --arg approvedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg model "$model" --arg privacy "$PRIVACY" --argjson tokens "$MAX_TOKENS" --argjson cost "$MAX_COST" --argjson inputRate "$INPUT_RATE" --argjson outputRate "$OUTPUT_RATE" '{approvedAt:$approvedAt,provider:$provider,model:$model,privacy:$privacy,maxEstimatedInputTokens:$tokens,maxEstimatedCostUsd:$cost,inputUsdPerMillionTokens:$inputRate,outputUsdPerMillionTokens:$outputRate,outputTokenMultiplier:0.25,maxFailureRate:0.05,minFreeBytes:10737418240}' > "$OUTPUT"
-chmod 600 "$OUTPUT"
+tmp=$(mktemp "$CONFIG_DIR/.import-approval.XXXXXX")
+trap 'rm -f -- "$tmp"' EXIT
+jq -n --arg approvedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg model "$model" --arg privacy "$PRIVACY" --argjson tokens "$MAX_TOKENS" --argjson cost "$MAX_COST" --argjson inputRate "$INPUT_RATE" --argjson outputRate "$OUTPUT_RATE" '
+  def nonnegative: type == "number" and isfinite and . >= 0;
+  if ($tokens != null and ($tokens | nonnegative and . > 0 and . <= 9007199254740991 and . == floor | not)) then
+    error("Token limit must be a positive safe integer or null")
+  elif ([$cost, $inputRate, $outputRate] | all(nonnegative) | not) then
+    error("Cost and prices must be finite non-negative numbers")
+  else
+    {approvedAt:$approvedAt,provider:$provider,model:$model,privacy:$privacy,maxEstimatedInputTokens:$tokens,maxEstimatedCostUsd:$cost,inputUsdPerMillionTokens:$inputRate,outputUsdPerMillionTokens:$outputRate,outputTokenMultiplier:0.25,maxFailureRate:0.05,minFreeBytes:10737418240}
+  end' > "$tmp"
+chmod 600 "$tmp"
+[[ ! -d "$OUTPUT" ]] || { echo "Approval path is a directory: $OUTPUT" >&2; exit 1; }
+mv -f -- "$tmp" "$OUTPUT"
 echo "Wrote approval for $provider/$model to $OUTPUT. Review it before starting the importer."

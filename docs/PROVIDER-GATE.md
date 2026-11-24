@@ -31,13 +31,33 @@ scripts/create-import-approval.sh \
   OUTPUT_USD_PER_MILLION
 ```
 
-The importer checks the approval against the provider and model recorded in its local `hindsight.env` metadata, then verifies that the server reports extraction support. In a split-host deployment, keep those two local metadata values aligned with the service host. The importer transactionally reserves estimated input and cost before each retain.
+The helper replaces the approval file atomically with mode `0600`. Review the approval before you start the importer. The helper writes only the primary route.
 
-Token reservations are cumulative across imports and session updates. They do not reset each month. Set `maxEstimatedInputTokens` to JSON `null` in the approval file to disable only the token ceiling, or pass `null` as the helper's first argument. This is useful for ongoing subscription-based imports. A positive number keeps a finite ceiling; a missing value is invalid. Accounting continues with either setting. Provider, model, privacy, cost, disk-space, and failure-rate checks remain enabled.
+The importer checks the approval against the primary and indexed `HINDSIGHT_API_LLM_*` routes declared in its local `hindsight.env` metadata. It also checks that the server reports extraction support. The local route and privacy settings are operator declarations, not verification of the server's provider, model, or data location. Keep the metadata in sync with the service host. Use `local` only if all routes keep the data local. Use `remote-redacted` if any route sends data to a remote provider. The importer redacts the outbound data in either case.
 
-The cost estimate defaults to zero when token prices are omitted. A zero-dollar ceiling with no prices is not an actual spending limit.
+Token reservations are cumulative across imports and session updates. They do not reset each month. Set `maxEstimatedInputTokens` to JSON `null` in the approval file to disable only the token ceiling, or pass `null` as the helper's first argument. This is useful for ongoing subscription-based imports. A positive safe integer sets a finite ceiling; a missing value is invalid. Accounting continues with either setting. Provider, model, privacy, cost, disk-space, and failure-rate checks remain enabled.
+
+The importer reserves estimated input tokens and cost before each retain. Set `maxEstimatedCostUsd` and any token prices to finite, non-negative JSON numbers. The estimate defaults to zero when prices are omitted. A zero-dollar ceiling with no prices is not an actual spending limit. If you set `maxFailureRate`, use a JSON number greater than 0 and at most 1. If you set `continuousMinFailureSample`, use a positive safe integer.
 
 The estimate is a guardrail, not a provider invoice. Prompt overhead and consolidation can increase actual use. Configure a provider-side budget or rate limit as well.
+
+### Migrate an approval for failover
+
+An existing single-route approval needs no change unless the local metadata declares indexed routes.
+
+1. Back up the private `import-approval.json` file. Keep the current limits and prices unless you approve a change to them.
+2. In the local `hindsight.env` metadata, record both `HINDSIGHT_API_LLM_<n>_PROVIDER` and `HINDSIGHT_API_LLM_<n>_MODEL` for each indexed route configured on the service. Do not copy provider credentials into the approval.
+3. Add `alternateRoutes` to the existing approval. Replace the example IDs with the exact provider and model IDs you approve. Set `privacy` for all routes, including failover.
+
+```json
+{
+  "alternateRoutes": [
+    { "provider": "openai-responses", "model": "APPROVED_MODEL_ID" }
+  ]
+}
+```
+
+4. Save the updated approval with mode `0600` before you start the importer. If any indexed route has an incomplete declaration or no exact approval, the importer stops before durable import. The legacy `*` model match applies only to the primary route.
 
 ## Required sequence
 
