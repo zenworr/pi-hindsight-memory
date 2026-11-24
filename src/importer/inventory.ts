@@ -22,8 +22,19 @@ export async function runInventory(config: AppConfig, options: { source?: Source
   const countedDatabaseBytes = new Set<string>();
   for (const adapter of adapters) {
     const stats = bySource[adapter.source];
+    const recordError = (locator: string, nativeSessionId: string, error: unknown, sourceBytes?: number) => {
+      const message = errorMessage(error);
+      const status = /configured limit|exceeds .* bytes/i.test(message) ? "too_large" : /JSON|malformed|Unexpected token/i.test(message) ? "malformed" : "error";
+      if (status === "too_large") stats.tooLarge += 1; else if (status === "malformed") stats.malformed += 1; else stats.errors += 1;
+      results.push({ source: adapter.source, nativeSessionId, locator, status, sourceBytes, error: message });
+    };
     try {
-      for await (const reference of adapter.discover()) {
+      for await (const reference of adapter.discover({ onArtifactError: (locator, error) => {
+        if (options.limit !== undefined && processed >= options.limit) return;
+        processed += 1;
+        stats.discovered += 1;
+        recordError(locator, "<discovery>", error);
+      } })) {
         if (options.limit !== undefined && processed >= options.limit) break;
         processed += 1;
         stats.discovered += 1;
@@ -37,7 +48,9 @@ export async function runInventory(config: AppConfig, options: { source?: Source
             if (adapter.source === "opencode") countedDatabaseBytes.add(sourcePath);
           }
         } catch { /* adapter will report a useful error */ }
-        const structuralClassification = reference.classification ?? await adapter.classify(reference);
+        let structuralClassification;
+        try { structuralClassification = reference.classification ?? await adapter.classify(reference); }
+        catch (error) { recordError(reference.locator, reference.nativeSessionId, error, sourceBytes); continue; }
         const classification = configuredExclusion(reference.sessionLabel ?? reference.metadata.title, config.sessionExclusions) ?? structuralClassification;
         if (classification.kind !== "primary") {
           if (classification.kind === "subagent") stats.subagents += 1;
@@ -50,11 +63,7 @@ export async function runInventory(config: AppConfig, options: { source?: Source
         try {
           session = await adapter.load(reference, { spoolDirectory: config.spoolDirectory, maxCanonicalBytes: config.maxCanonicalBytes });
         } catch (error) {
-          const message = errorMessage(error);
-          const tooLarge = /configured limit|exceeds .* bytes/i.test(message);
-          if (tooLarge) stats.tooLarge += 1; else if (/JSON|malformed|Unexpected token/i.test(message)) stats.malformed += 1; else stats.errors += 1;
-          const result: InventorySessionResult = { source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: tooLarge ? "too_large" : /JSON|malformed|Unexpected token/i.test(message) ? "malformed" : "error", sourceBytes, error: message };
-          results.push(result);
+          recordError(reference.locator, reference.nativeSessionId, error, sourceBytes);
           continue;
         }
         try {

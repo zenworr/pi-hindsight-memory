@@ -9,6 +9,7 @@ import {
   addTextTurn,
   completeSession,
   createSpool,
+  discoverFiles,
   firstJsonLine,
   forEachJsonLine,
   hasToolCall,
@@ -21,6 +22,7 @@ import {
   textParts,
   toolBlocks,
   walkFiles,
+  type DiscoveryOptions,
   type SessionAdapter,
 } from "./adapter.js";
 
@@ -122,10 +124,11 @@ export class CodexAdapter implements SessionAdapter {
     return { ...metaClassification(meta), ...(label ? { label } : {}) };
   }
 
-  async *discover(): AsyncIterable<SessionReference> {
+  async *discover(options: DiscoveryOptions = {}): AsyncIterable<SessionReference> {
     this.threadLabels = undefined;
-    const files = await walkFiles(this.root);
-    for (const sourcePath of files) {
+    const files = await walkFiles(this.root, options.requireRoot);
+    if (files.length > 0) await this.labels();
+    yield* discoverFiles(files, async (sourcePath) => {
       const first = await firstJsonLine(sourcePath);
       const meta = getMeta(sourcePath, first);
       const identityIsFallback = !meta.id;
@@ -135,8 +138,8 @@ export class CodexAdapter implements SessionAdapter {
       if (meta.cwd) metadata.cwd = meta.cwd;
       if (meta.parentId) metadata.parent_session_id = meta.parentId;
       if (label) metadata.title = label;
-      yield { source: this.source, nativeSessionId: nativeId, locator: sourcePath, sourcePath, sessionStartedAt: meta.startedAt, metadata, identityIsFallback, classification: { ...metaClassification(meta), ...(label ? { label } : {}) }, ...(label ? { sessionLabel: label } : {}) };
-    }
+      return { source: this.source, nativeSessionId: nativeId, locator: sourcePath, sourcePath, sessionStartedAt: meta.startedAt, metadata, identityIsFallback, classification: { ...metaClassification(meta), ...(label ? { label } : {}) }, ...(label ? { sessionLabel: label } : {}) };
+    }, options.onArtifactError);
   }
 
   async fingerprint(reference: SessionReference): Promise<SourceFingerprint> {

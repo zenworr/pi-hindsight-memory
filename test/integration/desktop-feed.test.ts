@@ -139,6 +139,49 @@ test("a single state owner scans distinct desktop and dev sessions with origin l
   } finally { state.close(); fs.rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a healthy dev inventory clears only its own vanished Pi candidates when the desktop feed fails", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-feed-candidates-"));
+  const config = defaultConfig(path.join(root, "dev"));
+  const state = new StateDatabase(config.stateDatabase);
+  try {
+    const originalHome = path.join(root, "desktop");
+    const generation = path.join(root, "feed/generations/gen-0001");
+    const mirrored = path.join(generation, "pi");
+    const dev = config.sourceRoots.pi;
+    const manifest = path.join(generation, "manifest.json");
+    const completed = JSON.stringify({ version: 1, origin: "desktop", sourceHome: originalHome, generation: "gen-0001" });
+    for (const dir of [dev, mirrored]) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(manifest, completed);
+    fs.symlinkSync("generations/gen-0001", path.join(root, "feed/current"));
+    config.localOrigin = "dev";
+    config.desktopFeed = { enabled: true, directory: path.join(root, "feed/current"), sourceHome: originalHome };
+    const sourceFile = path.join(dev, "session.jsonl");
+    const desktopFile = path.join(mirrored, "session.jsonl");
+    fs.writeFileSync(sourceFile, fs.readFileSync(fixture, "utf8").replace("pi-fixture-001", "pi-fixture-dev"));
+    fs.copyFileSync(fixture, desktopFile);
+    const candidates = () => state.db.prepare("SELECT source_origin FROM scan_candidates ORDER BY source_origin").all().map((row) => row.source_origin);
+    assert.equal((await scan(config, state, { source: "pi" })).active, 2);
+    assert.deepEqual(candidates(), ["desktop", "dev"]);
+    const desktopLocator = path.join(config.desktopFeed.directory, "pi/session.jsonl");
+    state.recordScanError("pi", desktopLocator, "Previous desktop artifact error");
+    fs.rmSync(sourceFile);
+    fs.rmSync(mirrored, { recursive: true });
+    fs.writeFileSync(manifest, JSON.stringify({ version: 0 }));
+    await assert.rejects(scan(config, state, { source: "pi" }), /no valid completed generation/);
+    assert.deepEqual(candidates(), ["desktop", "dev"]);
+    fs.writeFileSync(manifest, completed);
+    assert.equal((await scan(config, state, { source: "pi" })).errors, 1);
+    assert.deepEqual(candidates(), ["desktop"]);
+    assert.ok(state.db.prepare("SELECT 1 FROM scan_errors WHERE locator=?").get(desktopLocator));
+    assert.equal(importerHealth(config, state.db).unprocessed, 1);
+    fs.mkdirSync(mirrored);
+    assert.equal((await scan(config, state, { source: "pi" })).errors, 0);
+    assert.deepEqual(candidates(), []);
+    assert.equal(importerHealth(config, state.db).unprocessed, 0);
+    assert.equal(importerHealth(config, state.db).scanErrors, 0);
+  } finally { state.close(); fs.rmSync(root, { recursive: true, force: true }); }
+});
+
 test("new feed generations reuse stable artifact and alias locators", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-feed-rotate-"));
   const state = new StateDatabase(path.join(root, "state", "state.sqlite3"));

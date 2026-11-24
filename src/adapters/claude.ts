@@ -8,6 +8,7 @@ import {
   addTextTurn,
   completeSession,
   createSpool,
+  discoverFiles,
   firstJsonLine,
   forEachJsonLine,
   hasToolCall,
@@ -20,6 +21,7 @@ import {
   textParts,
   toolBlocks,
   walkFiles,
+  type DiscoveryOptions,
   type SessionAdapter,
 } from "./adapter.js";
 
@@ -82,17 +84,17 @@ export class ClaudeAdapter implements SessionAdapter {
     return metaClassification(reference.locator, metaFor(reference.locator, first));
   }
 
-  async *discover(): AsyncIterable<SessionReference> {
-    const files = await walkFiles(this.root);
-    for (const sourcePath of files) {
+  async *discover(options: DiscoveryOptions = {}): AsyncIterable<SessionReference> {
+    const files = await walkFiles(this.root, options.requireRoot);
+    yield* discoverFiles(files, async (sourcePath) => {
       const first = await firstJsonLine(sourcePath);
       const meta = metaFor(sourcePath, first);
       const identityIsFallback = !meta.id;
       const nativeId = meta.id ?? stableFallbackId(this.source, path.relative(this.root, sourcePath), meta.startedAt);
       const metadata = metadataBase(this.source, nativeId, sourcePath);
       if (meta.cwd) metadata.cwd = meta.cwd;
-      yield { source: this.source, nativeSessionId: nativeId, locator: sourcePath, sourcePath, sessionStartedAt: meta.startedAt, metadata, identityIsFallback, classification: metaClassification(sourcePath, meta) };
-    }
+      return { source: this.source, nativeSessionId: nativeId, locator: sourcePath, sourcePath, sessionStartedAt: meta.startedAt, metadata, identityIsFallback, classification: metaClassification(sourcePath, meta) };
+    }, options.onArtifactError);
   }
 
   async fingerprint(reference: SessionReference): Promise<SourceFingerprint> {

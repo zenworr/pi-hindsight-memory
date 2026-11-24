@@ -4,6 +4,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { defaultConfig } from "../../src/common/config.js";
+import { PiAdapter } from "../../src/adapters/pi.js";
+import type { DiscoveryOptions } from "../../src/adapters/adapter.js";
+import type { SessionReference } from "../../src/common/types.js";
+import { importerHealth } from "../../src/importer/health.js";
+import { runInventory } from "../../src/importer/inventory.js";
 import { StateDatabase } from "../../src/importer/state-db.js";
 import { scan } from "../../src/importer/scanner.js";
 
@@ -20,6 +25,97 @@ async function configFor(root: string) {
   config.sourceRoots.opencode = path.join(root, "opencode.db");
   return config;
 }
+
+const piFixture = (id: string) => `${JSON.stringify({ type: "session", version: 3, id, timestamp: "2026-01-01T00:00:00.000Z" })}\n${JSON.stringify({ type: "message", id: "u-1", message: { role: "user", content: "Synthetic session" } })}\n`;
+
+test("scanner and inventory report a malformed first Pi header and discover later files", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-scan-bad-header-"));
+  const config = await configFor(root);
+  const state = new StateDatabase(config.stateDatabase);
+  try {
+    await fs.mkdir(config.sourceRoots.pi);
+    const bad = path.join(config.sourceRoots.pi, "a-invalid.jsonl");
+    await fs.writeFile(bad, "not JSON\n");
+    for (const id of ["b-valid", "c-valid"]) await fs.writeFile(path.join(config.sourceRoots.pi, `${id}.jsonl`), piFixture(id));
+    const result = await scan(config, state, { source: "pi" });
+    assert.equal(result.discovered, 3);
+    assert.equal(result.errors, 1);
+    assert.equal(result.queued, 2);
+    assert.deepEqual(state.listSessions("pi").map((session) => session.nativeSessionId), ["b-valid", "c-valid"]);
+    assert.deepEqual(state.db.prepare("SELECT locator FROM scan_errors").all().map((row) => row.locator), [bad]);
+    assert.equal(result.results.find((entry) => entry.locator === bad)?.status, "malformed");
+    const inventory = await runInventory(config, { source: "pi" });
+    assert.equal(inventory.totals.malformed, 1);
+    assert.equal(inventory.totals.eligible, 2);
+  } finally { state.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("scanner records per-reference classification errors and continues", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-scan-classification-"));
+  const config = await configFor(root);
+  const state = new StateDatabase(config.stateDatabase);
+  const original = new PiAdapter(config.sourceRoots.pi);
+  const discover = original.discover.bind(original);
+  const classify = original.classify.bind(original);
+  t.mock.method(PiAdapter.prototype, "discover", async function* (options?: DiscoveryOptions) {
+    for await (const ref of discover(options)) yield { ...ref, classification: undefined };
+  });
+  t.mock.method(PiAdapter.prototype, "classify", (ref: SessionReference) => {
+    if (ref.nativeSessionId === "a-broken") throw new Error("Cannot classify source");
+    return classify(ref);
+  });
+  try {
+    await fs.mkdir(config.sourceRoots.pi);
+    for (const id of ["a-broken", "b-valid"]) await fs.writeFile(path.join(config.sourceRoots.pi, `${id}.jsonl`), piFixture(id));
+    const result = await scan(config, state, { source: "pi" });
+    assert.equal(result.errors, 1);
+    assert.equal(result.queued, 1);
+    assert.ok(state.db.prepare("SELECT 1 FROM scan_errors WHERE locator=?").get(path.join(config.sourceRoots.pi, "a-broken.jsonl")));
+    assert.equal(state.listSessions("pi")[0]?.nativeSessionId, "b-valid");
+  } finally { state.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("only a complete healthy scan clears vanished settling candidates and orphan tracking rows", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-scan-missing-candidate-"));
+  const config = await configFor(root);
+  config.sessionSettleSeconds = 3_600;
+  const state = new StateDatabase(config.stateDatabase);
+  try {
+    await fs.mkdir(config.sourceRoots.pi);
+    for (const id of ["settling", "legacy"]) await fs.writeFile(path.join(config.sourceRoots.pi, `${id}.jsonl`), piFixture(id));
+    assert.equal((await scan(config, state, { source: "pi" })).active, 2);
+    assert.equal(state.listSessions().length, 0);
+    state.db.prepare("UPDATE scan_candidates SET source_origin=NULL WHERE native_session_id='legacy'").run();
+    for (const id of ["settling", "legacy"]) await fs.rm(path.join(config.sourceRoots.pi, `${id}.jsonl`));
+    for (const options of [{ limit: 1 }, { offset: 0 }, { sessionIds: ["settling"] }, { inventoryOnly: true }]) {
+      await scan(config, state, { source: "pi", ...options });
+      assert.equal(importerHealth(config, state.db).deferred, 2);
+    }
+    await fs.rmdir(config.sourceRoots.pi);
+    await scan(config, state, { source: "pi" });
+    assert.equal(importerHealth(config, state.db).deferred, 2);
+    await fs.mkdir(config.sourceRoots.pi);
+    await fs.writeFile(path.join(config.sourceRoots.pi, "broken.jsonl"), "not JSON\n");
+    assert.equal((await scan(config, state, { source: "pi" })).errors, 1);
+    assert.equal(importerHealth(config, state.db).deferred, 2);
+    await fs.rm(path.join(config.sourceRoots.pi, "broken.jsonl"));
+    const nested = path.join(config.sourceRoots.pi, "project");
+    await fs.mkdir(nested);
+    const readdir = fs.readdir.bind(fs);
+    const incomplete = t.mock.method(fs, "readdir", (directory: string, options: { withFileTypes: true }) => directory === nested
+      ? Promise.reject(Object.assign(new Error("Directory disappeared during enumeration"), { code: "ENOENT" })) : readdir(directory, options));
+    assert.equal((await scan(config, state, { source: "pi" })).errors, 1);
+    assert.equal(importerHealth(config, state.db).deferred, 2);
+    assert.ok(state.db.prepare("SELECT 1 FROM scan_errors WHERE locator='<discovery>'").get());
+    incomplete.mock.restore();
+    assert.equal((await scan(config, state, { source: "pi" })).errors, 0);
+    const health = importerHealth(config, state.db);
+    assert.equal(health.deferred, 0);
+    assert.equal(health.unprocessed, 0);
+    assert.equal(health.scanErrors, 0);
+    assert.deepEqual(state.listGenerations(), []);
+  } finally { state.close(); await fs.rm(root, { recursive: true, force: true }); }
+});
 
 test("scanner requires an unchanged observation window unless a scan is forced", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-settle-"));

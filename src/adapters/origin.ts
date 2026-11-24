@@ -1,6 +1,6 @@
 import path from "node:path";
 import type { AdapterLoadOptions, CanonicalSession, SessionClassification, SessionReference, SourceFingerprint } from "../common/types.js";
-import type { SessionAdapter } from "./adapter.js";
+import type { DiscoveryOptions, SessionAdapter } from "./adapter.js";
 
 export class OriginAdapter implements SessionAdapter {
   readonly source;
@@ -10,7 +10,7 @@ export class OriginAdapter implements SessionAdapter {
     readonly origin: string,
     private readonly physicalRoot: string,
     private readonly logicalRoot: string,
-    private readonly stableRoot = physicalRoot,
+    readonly locatorRoot = physicalRoot,
   ) { this.source = adapter.source; this.discoveryRoot = physicalRoot; }
 
   private translate(locator: string, from: string, to: string): string {
@@ -20,8 +20,8 @@ export class OriginAdapter implements SessionAdapter {
   }
 
   private physical(reference: SessionReference): SessionReference {
-    const locator = reference.locator.startsWith(this.stableRoot) && this.stableRoot !== this.physicalRoot
-      ? this.translate(reference.locator, this.stableRoot, this.physicalRoot)
+    const locator = reference.locator.startsWith(this.locatorRoot) && this.locatorRoot !== this.physicalRoot
+      ? this.translate(reference.locator, this.locatorRoot, this.physicalRoot)
       : reference.locator.startsWith(this.logicalRoot) && !reference.locator.startsWith(this.physicalRoot)
         ? this.translate(reference.locator, this.logicalRoot, this.physicalRoot) : reference.locator;
     return { ...reference, locator, sourcePath: reference.sourcePath && reference.sourcePath.startsWith(this.logicalRoot) && !reference.sourcePath.startsWith(this.physicalRoot)
@@ -30,9 +30,10 @@ export class OriginAdapter implements SessionAdapter {
 
   private logical(locator: string): string { return this.translate(locator, this.physicalRoot, this.logicalRoot); }
 
-  async *discover(): AsyncIterable<SessionReference> {
-    for await (const reference of this.adapter.discover()) {
-      yield { ...reference, origin: this.origin, locator: this.translate(reference.locator, this.physicalRoot, this.stableRoot), logicalLocator: this.logical(reference.locator), metadata: { ...reference.metadata, source_path: this.logical(reference.metadata.source_path) } };
+  async *discover(options: DiscoveryOptions = {}): AsyncIterable<SessionReference> {
+    const { onArtifactError } = options;
+    for await (const reference of this.adapter.discover({ ...options, onArtifactError: onArtifactError && ((locator, error) => { onArtifactError(this.translate(locator, this.physicalRoot, this.locatorRoot), error); }) })) {
+      yield { ...reference, origin: this.origin, locator: this.translate(reference.locator, this.physicalRoot, this.locatorRoot), logicalLocator: this.logical(reference.locator), metadata: { ...reference.metadata, source_path: this.logical(reference.metadata.source_path) } };
     }
   }
 

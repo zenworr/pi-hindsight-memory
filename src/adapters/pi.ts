@@ -11,6 +11,7 @@ import {
   addTextTurn,
   completeSession,
   createSpool,
+  discoverFiles,
   firstJsonLine,
   hasToolCall,
   isoFromMilliseconds,
@@ -22,6 +23,7 @@ import {
   textParts,
   toolBlocks,
   walkFiles,
+  type DiscoveryOptions,
   type SessionAdapter,
 } from "./adapter.js";
 
@@ -143,9 +145,9 @@ export class PiAdapter implements SessionAdapter {
     return classifyPi(this.root, reference.locator, await sessionInfoName(reference.locator), header.parentSessionId);
   }
 
-  async *discover(): AsyncIterable<SessionReference> {
-    const files = await walkFiles(this.root);
-    for (const sourcePath of files) {
+  async *discover(options: DiscoveryOptions = {}): AsyncIterable<SessionReference> {
+    const files = await walkFiles(this.root, options.requireRoot);
+    yield* discoverFiles(files, async (sourcePath) => {
       const first = await firstJsonLine(sourcePath);
       const header = headerInfo(sourcePath, first);
       const identityIsFallback = !header.id;
@@ -154,7 +156,7 @@ export class PiAdapter implements SessionAdapter {
       const name = await sessionInfoName(sourcePath);
       if (header.cwd) metadata.cwd = header.cwd;
       if (name) metadata.title = name;
-      yield {
+      return {
         source: this.source,
         nativeSessionId: nativeId,
         locator: sourcePath,
@@ -165,7 +167,7 @@ export class PiAdapter implements SessionAdapter {
         classification: classifyPi(this.root, sourcePath, name, header.parentSessionId),
         ...(name ? { sessionLabel: name } : {}),
       };
-    }
+    }, options.onArtifactError);
   }
 
   async fingerprint(reference: SessionReference): Promise<SourceFingerprint> {

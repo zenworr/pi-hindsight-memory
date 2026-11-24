@@ -12,11 +12,17 @@ const MAX_JSON_LINE_BYTES = 268_435_456;
 const MILLISECOND_TIMESTAMP_THRESHOLD = 10_000_000_000;
 const FALLBACK_HASH_CHARS = 32;
 
+export interface DiscoveryOptions {
+  requireRoot?: boolean;
+  onArtifactError?: (locator: string, error: unknown) => void;
+}
+
 export interface SessionAdapter {
   readonly source: Source;
   readonly origin?: string;
   readonly discoveryRoot?: string;
-  discover(): AsyncIterable<SessionReference>;
+  readonly locatorRoot?: string;
+  discover(options?: DiscoveryOptions): AsyncIterable<SessionReference>;
   fingerprint(reference: SessionReference): Promise<SourceFingerprint>;
   classify(reference: SessionReference): Promise<SessionClassification>;
   load(reference: SessionReference, options: AdapterLoadOptions): Promise<CanonicalSession>;
@@ -100,21 +106,34 @@ export async function firstJsonLine(filePath: string): Promise<unknown> {
   } finally { input.destroy(); }
 }
 
-export async function walkFiles(root: string, extension = ".jsonl"): Promise<string[]> {
+export async function walkFiles(root: string, requireRoot = false): Promise<string[]> {
   const output: string[] = [];
   async function visit(directory: string): Promise<void> {
     let entries: fs.Dirent[];
     try { entries = await fs.promises.readdir(directory, { withFileTypes: true }); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    catch (error) { if (directory === root && !requireRoot && (error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
       const full = path.join(directory, entry.name);
       if (entry.isDirectory()) await visit(full);
-      else if (entry.isFile() && entry.name.endsWith(extension)) output.push(full);
+      else if (entry.isFile() && entry.name.endsWith(".jsonl")) output.push(full);
     }
   }
   await visit(root);
   return output;
+}
+
+export async function* discoverFiles(files: string[], read: (filePath: string) => Promise<SessionReference>, onError?: DiscoveryOptions["onArtifactError"]): AsyncIterable<SessionReference> {
+  for (const filePath of files) {
+    let reference;
+    try { reference = await read(filePath); }
+    catch (error) {
+      if (!onError) throw error;
+      onError(filePath, error);
+      continue;
+    }
+    yield reference;
+  }
 }
 
 export async function pathFingerprint(filePath: string, stableLocator: string): Promise<SourceFingerprint> {

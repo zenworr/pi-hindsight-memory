@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import path from "node:path";
 import { inSpan, telemetryCount } from "../common/telemetry.js";
 import { MS_PER_SECOND } from "../common/limits.js";
 
@@ -53,6 +54,17 @@ function sourceRoot(adapter: SessionAdapter, config: AppConfig): string {
   if (adapter.discoveryRoot) return adapter.discoveryRoot;
   return adapter.source === "opencode" ? config.opencodeDatabase : config.sourceRoots[adapter.source];
 }
+function discoveryErrorLocator(adapter: SessionAdapter, config: AppConfig): string {
+  return adapter.origin && adapter.origin !== config.localOrigin ? `<discovery:${adapter.origin}>` : "<discovery>";
+}
+function ownsLocator(adapter: SessionAdapter, config: AppConfig, locator: string): boolean {
+  const root = adapter.locatorRoot ?? sourceRoot(adapter, config);
+  if (adapter.source === "opencode") return locator.startsWith(`${root}#`);
+  return locator.startsWith(root.endsWith(path.sep) ? root : `${root}${path.sep}`);
+}
+function artifactErrorStatus(message: string): InventorySessionResult["status"] {
+  return /configured limit|exceeds .* bytes/i.test(message) ? "too_large" : /JSON|malformed|Unexpected token/i.test(message) ? "malformed" : "error";
+}
 function withProcessingSignature(fingerprint: SourceFingerprint, signature: string): SourceFingerprint { return { ...fingerprint, processing_signature: signature }; }
 function timestampOf(reference: SessionReference): number { const value = reference.sessionStartedAt ? Date.parse(reference.sessionStartedAt) : Number.NaN; return Number.isNaN(value) ? Number.POSITIVE_INFINITY : value; }
 
@@ -77,30 +89,44 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
   const indexed = indexedDocumentHashes(config);
   const summary: ScanSummary = { discovered: 0, queued: 0, unchanged: 0, active: 0, empty: 0, errors: 0, sourceMissing: 0, excluded: 0, configured: 0, ambiguous: 0, results: [] };
   let discovered: Discovered[] = [];
-  const healthy = new Map<Source, boolean>();
-  const seen = new Map<Source, Set<string>>();
-  const discoveryErrors: Array<{ adapter: SessionAdapter; error: string }> = [];
+  const unhealthy = new Set<SessionAdapter>();
+  const enumerated = new Set<SessionAdapter>();
+  const seen = new Map<SessionAdapter, Set<string>>();
+  const discoveryErrors: Array<{ adapter: SessionAdapter; locator: string; message: string }> = [];
+  function reportArtifactError(adapter: SessionAdapter, locator: string, nativeSessionId: string, error: unknown): void {
+    options.signal?.throwIfAborted();
+    unhealthy.add(adapter);
+    summary.errors += 1;
+    const message = redactText(errorMessage(error)).text;
+    state.recordScanError(adapter.source, locator, message);
+    summary.results.push({ source: adapter.source, nativeSessionId, locator, status: artifactErrorStatus(message), error: message });
+  }
   for (const adapter of adapters) {
-    if (!healthy.has(adapter.source)) healthy.set(adapter.source, true);
-    if (!seen.has(adapter.source)) seen.set(adapter.source, new Set());
+    options.signal?.throwIfAborted();
+    const origin = adapter.origin ?? config.localOrigin;
     try {
-      const known = state.listSessions(adapter.source).some((session) => session.sourceOrigin === (adapter.origin ?? config.localOrigin));
+      const known = state.listSessions(adapter.source).some((session) => session.sourceOrigin === origin);
       if (!(await exists(sourceRoot(adapter, config)))) {
-        if (known || adapter.origin === "desktop") throw new Error("Configured source is unavailable; existing evidence was retained");
+        if (known || origin !== config.localOrigin) throw new Error("Configured source is unavailable; existing evidence was retained");
         continue;
       }
-      await inSpan("hindsight.source.discover", { source: adapter.source, origin: adapter.origin ?? config.localOrigin }, async () => {
-        for await (const reference of adapter.discover()) {
+      await inSpan("hindsight.source.discover", { source: adapter.source, origin }, async () => {
+        for await (const reference of adapter.discover({ requireRoot: true, onArtifactError: (locator, error) => {
+          unhealthy.add(adapter);
+          discoveryErrors.push({ adapter, locator, message: redactText(errorMessage(error)).text });
+        } })) {
           options.signal?.throwIfAborted();
           discovered.push({ adapter, reference });
         }
       });
+      enumerated.add(adapter);
     } catch (error) {
-      if (options.signal?.aborted) throw error;
-      healthy.set(adapter.source, false);
-      discoveryErrors.push({ adapter, error: redactText(errorMessage(error)).text });
+      options.signal?.throwIfAborted();
+      unhealthy.add(adapter);
+      discoveryErrors.push({ adapter, locator: discoveryErrorLocator(adapter, config), message: redactText(errorMessage(error)).text });
     }
   }
+  options.signal?.throwIfAborted();
   for (const source of SOURCES) {
     if (options.source && options.source !== source) continue;
     for (const nativeId of config.promotedSessions[source]) {
@@ -123,11 +149,15 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     state.upsertSource(adapter.source, sourceRoot(adapter, config));
     state.markScanStarted(adapter.source, new Date().toISOString());
   }
-  for (const { adapter, error } of discoveryErrors) {
-    state.recordScanError(adapter.source, "<discovery>", error);
+  for (const { adapter, locator, message } of discoveryErrors) {
+    state.recordScanError(adapter.source, locator, message);
     summary.errors += 1;
+    if (locator !== discoveryErrorLocator(adapter, config)) {
+      summary.discovered += 1;
+      summary.results.push({ source: adapter.source, nativeSessionId: "<discovery>", locator, status: artifactErrorStatus(message), error: message });
+    }
   }
-  for (const adapter of adapters) if (healthy.get(adapter.source) && !discoveryErrors.some((entry) => entry.adapter === adapter)) state.clearScanError(adapter.source, "<discovery>");
+  for (const adapter of enumerated) state.clearScanError(adapter.source, discoveryErrorLocator(adapter, config));
   discovered.sort((a, b) => timestampOf(a.reference) - timestampOf(b.reference) || a.adapter.source.localeCompare(b.adapter.source) || a.reference.nativeSessionId.localeCompare(b.reference.nativeSessionId));
   const offset = options.offset ?? 0;
   const matching = options.sessionIds ? discovered.filter(({ reference }) => options.sessionIds!.includes(effectiveReference(state, reference).nativeSessionId)) : discovered;
@@ -135,13 +165,21 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
   for (const item of selected) {
     options.signal?.throwIfAborted();
     const { adapter, reference: discoveredReference } = item;
-    const structuralClassification = discoveredReference.classification ?? await adapter.classify(discoveredReference);
+    const origin = adapter.origin ?? config.localOrigin;
+    const effective = effectiveReference(state, discoveredReference);
+    const observed = seen.get(adapter) ?? new Set<string>();
+    observed.add(effective.nativeSessionId);
+    seen.set(adapter, observed);
+    summary.discovered += 1;
+    let structuralClassification;
+    try { structuralClassification = discoveredReference.classification ?? await adapter.classify(discoveredReference); }
+    catch (error) { reportArtifactError(adapter, discoveredReference.locator, discoveredReference.nativeSessionId, error); continue; }
     const label = discoveredReference.sessionLabel ?? discoveredReference.metadata.title ?? structuralClassification.label;
     const documentId = documentIdFor(adapter.source, discoveredReference.nativeSessionId);
     const configured = configuredExclusion(label, config.sessionExclusions);
     const tombstone = state.getExclusionTombstone(adapter.source, discoveredReference.nativeSessionId, documentId);
     const classification = configured ?? (tombstone ? { kind: "configured-exclusion" as const, reason: `persisted-configured-exclusion:${tombstone.label}`, policyVersion: structuralClassification.policyVersion } : structuralClassification);
-    const reference = { ...effectiveReference(state, discoveredReference), classification, ...(label ? { sessionLabel: label } : {}) };
+    const reference = { ...effective, classification, ...(label ? { sessionLabel: label } : {}) };
     if (configured && label) {
       state.recordExclusionTombstone({ source: adapter.source, nativeSessionId: reference.nativeSessionId, documentId, locator: discoveredReference.locator, label, normalizedLabel: label.normalize("NFKC").trim().toLowerCase(), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
     }
@@ -155,7 +193,6 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       sessionStartedAt: reference.sessionStartedAt,
       sessionUpdatedAt: reference.sessionUpdatedAt,
     });
-    summary.discovered += 1;
     const frozen = state.getSession(adapter.source, reference.nativeSessionId);
     if (frozen?.status === "ambiguous_preserved" && classification.kind !== "configured-exclusion") {
       state.clearScanCandidate(adapter.source, reference.nativeSessionId);
@@ -185,16 +222,9 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: classification.kind === "subagent" ? "excluded_subagent" : classification.kind === "configured-exclusion" ? "excluded_configured" : "ambiguous" });
       continue;
     }
-    seen.get(adapter.source)?.add(reference.nativeSessionId);
     let fingerprint: SourceFingerprint;
     try { fingerprint = withProcessingSignature(await adapter.fingerprint(reference), signature); }
-    catch (error) {
-      healthy.set(adapter.source, false); summary.errors += 1;
-      const message = redactText(errorMessage(error)).text;
-      state.recordScanError(adapter.source, reference.locator, message);
-      summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: "error", error: message });
-      continue;
-    }
+    catch (error) { reportArtifactError(adapter, reference.locator, reference.nativeSessionId, error); continue; }
     const previous = state.getSession(adapter.source, reference.nativeSessionId);
     const tracked = previous?.canonicalHash ? state.getGeneration(adapter.source, reference.nativeSessionId, previous.canonicalHash) : undefined;
     const acknowledged = previous?.canonicalHash && previous.acknowledgedHash === previous.canonicalHash && previous.acknowledgedPolicy === RETAIN_POLICY_VERSION;
@@ -217,6 +247,7 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       fingerprintSignature(fingerprint),
       new Date().toISOString(),
       config.sessionSettleSeconds * MS_PER_SECOND,
+      origin,
     );
     if (!settled) {
       summary.active += 1;
@@ -246,23 +277,18 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       }
     } catch (error) {
       await session?.cleanup().catch(() => undefined);
-      if (options.signal?.aborted) throw error;
-      healthy.set(adapter.source, false); summary.errors += 1;
-      const message = redactText(errorMessage(error)).text;
-      state.recordScanError(adapter.source, reference.locator, message);
-      const status = /configured limit|exceeds .* bytes/i.test(message) ? "too_large" as const : /JSON|malformed|Unexpected token/i.test(message) ? "malformed" as const : "error" as const;
-      summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status, error: message });
+      reportArtifactError(adapter, reference.locator, reference.nativeSessionId, error);
       continue;
     }
     if (!session) continue;
     try {
       const tooLarge = session.canonicalBytes > config.maxCanonicalBytes;
       summary.results.push({ source: adapter.source, nativeSessionId: session.nativeSessionId, locator: reference.locator, status: tooLarge ? "too_large" : session.emptyAfterNormalization ? "empty_after_normalization" : "eligible", canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, redactionCount: session.redactionCount, startedAt: session.sessionStartedAt, updatedAt: session.sessionUpdatedAt });
-      if (tooLarge) { healthy.set(adapter.source, false); summary.errors += 1; state.recordScanError(adapter.source, reference.locator, "Canonical document is too large"); continue; }
+      if (tooLarge) { unhealthy.add(adapter); summary.errors += 1; state.recordScanError(adapter.source, reference.locator, "Canonical document is too large"); continue; }
       if (!options.inventoryOnly) {
         try { await inSpan("hindsight.evidence.index", { source: session.source, "hindsight.canonical.bytes": session.canonicalBytes }, () => indexEvidence(config, session, options.indexOnly && options.force)); }
         catch (error) {
-          healthy.set(adapter.source, false); summary.errors += 1;
+          unhealthy.add(adapter); summary.errors += 1;
           const message = `Evidence index failed: ${redactText(errorMessage(error)).text}`;
           state.recordScanError(adapter.source, reference.locator, message);
           summary.results[summary.results.length - 1] = { source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: "error", error: message };
@@ -281,17 +307,38 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     } finally { await session.cleanup().catch(() => undefined); }
   }
 
-  if (!options.inventoryOnly && options.limit === undefined && options.offset === undefined && !options.sessionIds) {
-    for (const adapter of adapters) {
-      if (!healthy.get(adapter.source) || !(await exists(sourceRoot(adapter, config)))) continue;
-      state.clearMissingScanErrors(adapter.source, new Set(discovered.filter((item) => item.adapter.source === adapter.source).map((item) => item.reference.locator)));
+  const unrestricted = options.limit === undefined && options.offset === undefined && !options.sessionIds;
+  if (!options.inventoryOnly && unrestricted) {
+    for (const adapter of enumerated) {
+      options.signal?.throwIfAborted();
+      if (unhealthy.has(adapter)) continue;
+      const root = sourceRoot(adapter, config);
+      const stableRoot = adapter.locatorRoot ?? root;
+      const unchangedRoot = stableRoot === root ? await exists(root) : await fs.realpath(stableRoot).then((current) => current === root, () => false);
+      options.signal?.throwIfAborted();
+      if (!unchangedRoot) {
+        unhealthy.add(adapter);
+        state.recordScanError(adapter.source, discoveryErrorLocator(adapter, config), "Source became unavailable or changed generation during the scan; existing evidence was retained");
+        summary.errors += 1;
+        continue;
+      }
+      const origin = adapter.origin ?? config.localOrigin;
+      const owns = (locator: string) => ownsLocator(adapter, config, locator)
+        && !adapters.some((other) => other !== adapter && other.source === adapter.source && ownsLocator(other, config, locator));
+      const references = discovered.filter((item) => item.adapter === adapter).map((item) => item.reference);
+      const observed = seen.get(adapter) ?? new Set<string>();
+      const locators = new Set(references.map((reference) => reference.locator));
+      state.clearMissingScanErrors(adapter.source, locators, owns);
+      state.clearMissingScanCandidates(adapter.source, origin, observed, locators, owns);
       for (const old of state.listSessions(adapter.source)) {
-        if (!seen.get(adapter.source)?.has(old.nativeSessionId) && !["source_missing", "excluded_subagent", "excluded_ambiguous", "excluded_configured", "ambiguous_preserved", "cleanup_pending"].includes(old.status)) { state.markSourceMissing(old.source, old.nativeSessionId, new Date().toISOString()); summary.sourceMissing += 1; }
+        if (old.sourceOrigin === origin && !observed.has(old.nativeSessionId) && !["source_missing", "excluded_subagent", "excluded_ambiguous", "excluded_configured", "ambiguous_preserved", "cleanup_pending"].includes(old.status)) { state.markSourceMissing(old.source, old.nativeSessionId, new Date().toISOString()); summary.sourceMissing += 1; }
       }
     }
   }
-  if (options.limit === undefined && options.offset === undefined && !options.sessionIds) {
-    for (const adapter of adapters) if (healthy.get(adapter.source)) state.markScanCompleted(adapter.source, new Date().toISOString());
+  if (unrestricted) {
+    for (const source of new Set(adapters.map((adapter) => adapter.source))) {
+      if (![...unhealthy].some((adapter) => adapter.source === source)) state.markScanCompleted(source, new Date().toISOString());
+    }
   }
   return summary;
 }

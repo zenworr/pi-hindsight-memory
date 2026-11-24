@@ -308,6 +308,12 @@ export class StateDatabase {
         this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (5,?)").run(new Date().toISOString());
       });
     }
+    if (!this.db.prepare("SELECT version FROM schema_migrations WHERE version=6").get()) {
+      this.transaction(() => {
+        this.db.exec("ALTER TABLE scan_candidates ADD COLUMN source_origin TEXT");
+        this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (6,?)").run(new Date().toISOString());
+      });
+    }
   }
 
   close(): void { this.db.close(); }
@@ -342,10 +348,10 @@ export class StateDatabase {
     this.db.prepare("DELETE FROM scan_errors WHERE source=? AND locator=?").run(source, locator);
   }
 
-  clearMissingScanErrors(source: Source, discoveredLocators: ReadonlySet<string>): void {
+  clearMissingScanErrors(source: Source, discoveredLocators: ReadonlySet<string>, ownsLocator: (locator: string) => boolean): void {
     const rows = this.db.prepare("SELECT locator FROM scan_errors WHERE source=?").all(source) as { locator: string }[];
     for (const { locator } of rows) {
-      if (!discoveredLocators.has(locator)) this.clearScanError(source, locator);
+      if (!discoveredLocators.has(locator) && ownsLocator(locator)) this.clearScanError(source, locator);
     }
   }
 
@@ -357,20 +363,45 @@ export class StateDatabase {
     this.db.prepare("UPDATE sessions SET acknowledged_hash=?,acknowledged_policy=?,status=CASE WHEN canonical_hash=? AND status IN ('discovered','imported') THEN 'imported' ELSE status END WHERE source=? AND native_session_id=?").run(generation.canonicalHash, generation.retainPolicyVersion ?? RETAIN_POLICY_VERSION, generation.canonicalHash, generation.source, generation.nativeSessionId);
   }
 
-  observeScanCandidate(source: Source, nativeSessionId: string, fingerprint: string, observedAt: string, settleMs: number): boolean {
+  observeScanCandidate(source: Source, nativeSessionId: string, fingerprint: string, observedAt: string, settleMs: number, origin: string): boolean {
     return this.transaction(() => {
-      const row = this.db.prepare("SELECT fingerprint, first_observed_at FROM scan_candidates WHERE source=? AND native_session_id=?").get(source, nativeSessionId) as { fingerprint: string; first_observed_at: string } | undefined;
-      if (!row || row.fingerprint !== fingerprint) {
-        this.db.prepare(`INSERT INTO scan_candidates(source,native_session_id,fingerprint,first_observed_at) VALUES (?,?,?,?)
-          ON CONFLICT(source,native_session_id) DO UPDATE SET fingerprint=excluded.fingerprint, first_observed_at=excluded.first_observed_at`).run(source, nativeSessionId, fingerprint, observedAt);
+      const row = this.db.prepare("SELECT fingerprint, first_observed_at, source_origin FROM scan_candidates WHERE source=? AND native_session_id=?").get(source, nativeSessionId) as { fingerprint: string; first_observed_at: string; source_origin: string | null } | undefined;
+      if (!row || row.fingerprint !== fingerprint || row.source_origin !== null && row.source_origin !== origin) {
+        this.db.prepare(`INSERT INTO scan_candidates(source,native_session_id,fingerprint,first_observed_at,source_origin) VALUES (?,?,?,?,?)
+          ON CONFLICT(source,native_session_id) DO UPDATE SET fingerprint=excluded.fingerprint, first_observed_at=excluded.first_observed_at, source_origin=excluded.source_origin`).run(source, nativeSessionId, fingerprint, observedAt, origin);
         return false;
       }
+      if (row.source_origin === null) this.db.prepare("UPDATE scan_candidates SET source_origin=? WHERE source=? AND native_session_id=?").run(origin, source, nativeSessionId);
       return Date.parse(observedAt) - Date.parse(row.first_observed_at) >= settleMs;
     });
   }
 
   clearScanCandidate(source: Source, nativeSessionId: string): void {
     this.db.prepare("DELETE FROM scan_candidates WHERE source=? AND native_session_id=?").run(source, nativeSessionId);
+  }
+
+  clearMissingScanCandidates(source: Source, origin: string, seen: ReadonlySet<string>, locators: ReadonlySet<string>, ownsLocator: (locator: string) => boolean): void {
+    this.transaction(() => {
+      const rows = this.db.prepare(`SELECT c.native_session_id, c.source_origin, a.locator, s.native_session_id IS NULL AS orphan
+        FROM scan_candidates c LEFT JOIN session_artifacts a ON a.source=c.source AND a.native_session_id=c.native_session_id AND a.classification='primary'
+        LEFT JOIN sessions s ON s.source=c.source AND s.native_session_id=c.native_session_id
+        WHERE c.source=? AND (c.source_origin=? OR c.source_origin IS NULL)`).all(source, origin) as Array<{ native_session_id: string; source_origin: string | null; locator: string | null; orphan: number }>;
+      const candidates = new Map<string, typeof rows>();
+      for (const row of rows) {
+        if (seen.has(row.native_session_id)) continue;
+        const artifacts = candidates.get(row.native_session_id) ?? [];
+        artifacts.push(row);
+        candidates.set(row.native_session_id, artifacts);
+      }
+      const deleteArtifact = this.db.prepare("DELETE FROM session_artifacts WHERE source=? AND locator=?");
+      for (const [id, artifacts] of candidates) {
+        const absent = ({ locator }: typeof rows[number]) => locator !== null && ownsLocator(locator) && !locators.has(locator);
+        // A legacy candidate has no recorded origin. Only a single inventory can establish its absence.
+        if (artifacts[0]!.source_origin === null && !artifacts.every(absent)) continue;
+        this.clearScanCandidate(source, id);
+        for (const artifact of artifacts) if (artifact.orphan && absent(artifact)) deleteArtifact.run(source, artifact.locator);
+      }
+    });
   }
 
   getSession(source: Source, nativeSessionId: string): SessionStateRecord | undefined {

@@ -59,7 +59,7 @@ A small file is sufficient. Omitted settings retain their defaults.
 | Key | Default | Purpose |
 | --- | --- | --- |
 | `scanIntervalSeconds` | 900 | Interval between successful full scans. |
-| `sessionSettleSeconds` | 3600 | Time a source fingerprint must remain stable before import. Zero disables settling. |
+| `sessionSettleSeconds` | 3600 | Time a source fingerprint must remain stable before import. Zero disables settling. A scan clears a missing session's settling record only after a complete, error-free scan of its source and origin. |
 | `maxInflightDocuments` | 4 | Maximum concurrent document workers. This does not set server-side LLM concurrency. |
 | `maxCanonicalBytes` | 104857600 | Maximum normalized document size in bytes (100 MiB). |
 | `requireImportApproval` | true | Require provider, privacy, and budget approval before import. Keep enabled for normal use. |
