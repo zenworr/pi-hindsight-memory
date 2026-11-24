@@ -5,6 +5,10 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=scripts/lib/importer-runtime.sh
 source "$ROOT/scripts/lib/importer-runtime.sh"
 [[ $# -eq 1 && $(uname -s) == Linux ]] || { echo "Usage (Linux): deploy-importer.sh REVISION" >&2; exit 1; }
+ROLLOUT_TIMEOUT=${PI_HINDSIGHT_ROLLOUT_TIMEOUT_SECONDS-600}
+[[ "$ROLLOUT_TIMEOUT" =~ ^[1-9][0-9]{0,8}$ ]] || {
+  echo 'PI_HINDSIGHT_ROLLOUT_TIMEOUT_SECONDS must be a positive integer with at most nine digits' >&2; exit 1;
+}
 select_importer_node /usr/local/bin/node
 CONFIG=${PI_HINDSIGHT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/pi-hindsight-memory/config.json}
 CONFIG=$(cd -- "$(dirname -- "$CONFIG")" && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$CONFIG")")
@@ -142,24 +146,53 @@ SWITCHED=1
 mv -fT -- "$TEMP/next" "$DROP"
 svc daemon-reload
 STARTED=$("$NODE" -p 'Date.now()')
-DEADLINE=$((SECONDS + 120))
+DEADLINE=$((SECONDS + ROLLOUT_TIMEOUT))
 svc start "$UNIT"
+PID=$(svc show -p MainPID --value "$UNIT")
+check_main_pid() {
+  if ! [[ "$PID" =~ ^[1-9][0-9]*$ ]] || [[ $(svc show -p MainPID --value "$UNIT") != "$PID" ]] || ! kill -0 "$PID" 2>/dev/null; then
+    echo 'New importer exited or its main PID changed' >&2
+    exit 1
+  fi
+}
 while true; do
-  PID=$(svc show -p MainPID --value "$UNIT")
+  check_main_pid
   if probe heartbeat "$PID" "$STARTED" 2>/dev/null; then break; fi
   (( SECONDS < DEADLINE )) || { echo 'Timed out waiting for a fresh heartbeat from the new importer' >&2; exit 1; }
   sleep 1
 done
-REMAINING=$((DEADLINE - SECONDS))
-(( REMAINING > 0 )) || { echo 'No time remains for document verification' >&2; exit 1; }
-VERIFY_STATUS=0
-NODE_ENV=production timeout -k 2 "${REMAINING}s" "$NODE" "$CLI" verify-import --config "$CONFIG" > "$TEMP/verify.json" || VERIFY_STATUS=$?
-# verify-import can exit 1 for readiness conditions unrelated to document accounting.
-if (( VERIFY_STATUS > 1 )) || ! "$NODE" -e '
-  const report = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8"));
-  if (report.documentAccountingReady !== true || report.failedGenerations !== 0 || report.pendingWork !== 0) process.exit(1);
-' "$TEMP/verify.json" || [[ $(svc show -p MainPID --value "$UNIT") != "$PID" ]]; then
-  echo 'New importer did not pass document verification' >&2
+
+verify_accounting() {
+  local status=0
+  NODE_ENV=production timeout -k 2 "${1}s" "$NODE" "$CLI" verify-import --config "$CONFIG" > "$TEMP/verify.json" || status=$?
+  # verify-import can exit 1 for readiness conditions unrelated to document accounting.
+  (( status <= 1 )) || return 1
+  "$NODE" -e '
+    let report;
+    try { report = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
+    if (!report) process.exit(1);
+    const hardFailures = [report.failedGenerations, report.missingDocumentCount, report.unexpectedDocumentCount, report.documentHashMismatchCount];
+    if (hardFailures.some(count => count > 0)) {
+      console.error("New importer did not pass document verification (failed updates, missing, unexpected, hash mismatches): " + hardFailures.join(", "));
+      process.exit(2);
+    }
+    if (report.documentAccountingReady !== true || report.failedGenerations !== 0 || report.pendingWork !== 0) process.exit(1);
+  ' "$TEMP/verify.json"
+}
+VERIFY_STATUS=1
+while (( (REMAINING = DEADLINE - SECONDS) > 0 )); do
+  check_main_pid
+  VERIFY_STATUS=0
+  verify_accounting "$REMAINING" || VERIFY_STATUS=$?
+  check_main_pid
+  case "$VERIFY_STATUS" in
+    0) break ;;
+    2) exit 1 ;;
+  esac
+  if (( SECONDS < DEADLINE )); then sleep 1; fi
+done
+if (( VERIFY_STATUS != 0 )); then
+  echo 'Timed out waiting for the new importer to pass document accounting' >&2
   exit 1
 fi
 echo "Deployed importer revision $REVISION"

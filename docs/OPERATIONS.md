@@ -34,7 +34,9 @@ The rollout uses `/usr/local/bin/node` by default. It exports the commit, instal
 
 Use the same configuration and settings as the running service. Set `PI_HINDSIGHT_CONFIG` if the service uses a non-default config and `PI_HINDSIGHT_SSH_HOST` if PostgreSQL is remote. Keep other Hindsight writers idle during the rollout. The script stops the unit before it takes a coordinated backup. If there is unresolved remote work or the backup fails, the script does not switch runtimes.
 
-The rollout replaces only the `90-runtime.conf` user-unit drop-in. It gives the new importer up to two minutes to report a fresh idle heartbeat and pass document accounting. Settling sessions alone do not block deployment. If the rollout fails, it restores the previous runtime configuration and does not restore SQLite or PostgreSQL. If a SQLite schema changed or cannot be read, it leaves the importer stopped. Check compatibility before restarting it. Check the journal after a rollback.
+The rollout replaces only the `90-runtime.conf` user-unit drop-in. The new importer has 600 seconds by default to report a fresh idle heartbeat and pass document accounting. Set `PI_HINDSIGHT_ROLLOUT_TIMEOUT_SECONDS` to a positive whole number of seconds (up to nine digits) to change this limit. The rollout checks again while queued or submitted work finishes. Settling sessions alone do not block deployment. A failed update, a missing or unexpected document, a hash mismatch, or a change to the importer's main process ends the rollout without another check.
+
+If the rollout fails, it restores the previous runtime configuration and does not restore SQLite or PostgreSQL. If a SQLite schema changed or cannot be read, it leaves the importer stopped. Check compatibility before restarting it. Check the journal after a rollback.
 
 The inventory lists local unit, Pi settings, and user script references that the rollout can find. It does not delete snapshots. Check other hosts and external scripts before removing a snapshot manually. On macOS, installation still uses the LaunchAgent; the rollout script is Linux-only.
 

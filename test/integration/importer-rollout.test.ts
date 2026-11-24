@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
@@ -15,7 +15,7 @@ import { StateDatabase } from "../../src/importer/state-db.js";
 const exec = promisify(execFile);
 const linux = { skip: process.platform !== "linux" };
 
-async function fixture(t: TestContext, failure?: "build" | "verify" | "migrate", legacyUnit = false) {
+async function fixture(t: TestContext, scenario?: "build" | "verify" | "migrate" | "pending", legacyUnit = false) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-rollout-"));
   const repo = path.join(dir, "repo");
   const bin = path.join(dir, "bin");
@@ -32,13 +32,14 @@ async function fixture(t: TestContext, failure?: "build" | "verify" | "migrate",
   const pid = path.join(dir, "pid");
   const log = path.join(dir, "log");
   const launched = path.join(dir, "launched");
+  const drain = path.join(dir, "drain");
   const ready = path.join(dir, "ready");
   const env = {
     HOME: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir,
     PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_NODE: process.execPath, PI_HINDSIGHT_CONFIG: config,
     PI_HINDSIGHT_BACKUP_DIR: backups, PI_HINDSIGHT_CONTAINER_ENGINE: "fixture-engine",
-    ROLLOUT_ROOT: process.cwd(), ROLLOUT_FAILURE: failure ?? "", ROLLOUT_STATE: state, ROLLOUT_EVIDENCE: evidence,
-    ROLLOUT_DROP: drop, ROLLOUT_BASE: base, ROLLOUT_LOG: log, ROLLOUT_PID: pid, ROLLOUT_LAUNCHED: launched, ROLLOUT_READY: ready,
+    ROLLOUT_ROOT: process.cwd(), ROLLOUT_SCENARIO: scenario ?? "", ROLLOUT_STATE: state, ROLLOUT_EVIDENCE: evidence,
+    ROLLOUT_DROP: drop, ROLLOUT_BASE: base, ROLLOUT_LOG: log, ROLLOUT_PID: pid, ROLLOUT_LAUNCHED: launched, ROLLOUT_DRAIN: drain, ROLLOUT_READY: ready,
     PI_HINDSIGHT_TELEMETRY_FILE: "/dev/null",
   };
   const ctl = (...args: string[]) => exec(path.join(bin, "systemctl"), ["--user", ...args], { env, timeout: 5_000 });
@@ -63,12 +64,16 @@ async function fixture(t: TestContext, failure?: "build" | "verify" | "migrate",
   const index = new DatabaseSync(evidence);
   index.exec("CREATE TABLE documents(id TEXT PRIMARY KEY)");
   index.close();
+  let verificationPolls = 0;
   const server = createServer((req, res) => {
     const target = new URL(req.url ?? "/", "http://localhost").pathname.split("/").at(-1);
     switch (target) {
-      case "stats": res.end('{"pending_operations":0,"total_documents":0}'); break;
+      case "stats":
+        if (existsSync(launched) && ++verificationPolls === 3 && scenario === "pending") writeFileSync(drain, "");
+        res.end('{"pending_operations":0,"total_documents":0}');
+        break;
       case "operations": res.end('{"operations":[]}'); break;
-      case "documents": res.end(failure && existsSync(launched) ? '{"total":1,"items":[{"id":"unexpected","content_hash":"different"}]}' : '{"total":0,"items":[]}'); break;
+      case "documents": res.end((scenario === "verify" || scenario === "migrate") && existsSync(launched) ? '{"total":1,"items":[{"id":"unexpected","content_hash":"different"}]}' : '{"total":0,"items":[]}'); break;
       case "config": res.end('{"config":{"enable_auto_consolidation":true}}'); break;
       default: res.writeHead(404).end("{}");
     }
@@ -78,26 +83,38 @@ async function fixture(t: TestContext, failure?: "build" | "verify" | "migrate",
   const apiTokenFile = path.join(dir, "token");
   await fs.writeFile(apiTokenFile, "fixture-token\n", { mode: 0o600 });
   await fs.writeFile(config, JSON.stringify({ stateDatabase: state, evidenceDatabase: evidence, hindsight: { apiTokenFile, bankId: "rollout-fixture", apiUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, httpMaxAttempts: 1 } }));
-  const daemon = `import { writeFileSync } from 'node:fs';
+  const daemon = `import { existsSync, writeFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { withWriterLock } from ${JSON.stringify(path.resolve("dist/src/importer/lock.js"))};
 const env = process.env;
 await withWriterLock(env.ROLLOUT_STATE, async () => {
   const db = new DatabaseSync(env.ROLLOUT_STATE);
   db.prepare("INSERT OR REPLACE INTO daemon_status (id,pid,heartbeat_at,phase) VALUES (1,?,?,'idle')").run(process.pid, new Date().toISOString());
-  if (process.argv[1] !== ${JSON.stringify(previous)}) {
+  const newRuntime = process.argv[1] !== ${JSON.stringify(previous)};
+  let pending = newRuntime && env.ROLLOUT_SCENARIO === 'pending';
+  if (newRuntime) {
     const evidence = new DatabaseSync(env.ROLLOUT_EVIDENCE);
     evidence.exec("INSERT INTO documents VALUES ('new-write')");
-    if (env.ROLLOUT_FAILURE === 'migrate') db.exec('CREATE TABLE new_schema(id INTEGER)');
+    if (env.ROLLOUT_SCENARIO === 'migrate') db.exec('CREATE TABLE new_schema(id INTEGER)');
+    if (pending) db.exec(\`
+      INSERT INTO sessions (source,native_session_id,document_id,source_locator,source_size,source_mtime,source_fingerprint,status,last_seen_at)
+      VALUES ('pi','pending','agent-session:pi:pending','fixture',1,1,'fixture','queued','now');
+      INSERT INTO generations (source,native_session_id,canonical_hash,operation_id,state,queued_at)
+      VALUES ('pi','pending','hash','operation','queued','now');
+    \`);
     evidence.close();
     writeFileSync(env.ROLLOUT_LAUNCHED, '');
   }
-  db.close();
   await new Promise((resolve) => {
-    const keepAlive = setInterval(() => {}, 1000);
+    const keepAlive = setInterval(() => {
+      if (!pending || !existsSync(env.ROLLOUT_DRAIN)) return;
+      db.exec("DELETE FROM sessions WHERE native_session_id='pending'");
+      pending = false;
+    }, 50);
     process.on('SIGTERM', () => { clearInterval(keepAlive); resolve(); });
     writeFileSync(env.ROLLOUT_READY, '');
   });
+  db.close();
 });
 `;
   await fs.writeFile(previous, daemon);
@@ -106,7 +123,7 @@ await withWriterLock(env.ROLLOUT_STATE, async () => {
 set -eu
 [[ $1 == ci ]]
 printf 'build\n' >> "$ROLLOUT_LOG"
-[[ $ROLLOUT_FAILURE != build ]]
+[[ $ROLLOUT_SCENARIO != build ]]
 cp -R "$ROLLOUT_ROOT/dist" .
 ln -s "$ROLLOUT_ROOT/node_modules" node_modules
 mv dist/src/importer/cli.js dist/src/importer/real-cli.js
@@ -164,8 +181,8 @@ esac
   await ctl("start");
   const previousPid = await fs.readFile(pid, "utf8");
   await fs.writeFile(log, "");
-  const run = () => exec("bash", [path.join(repo, "scripts", "deploy-importer.sh"), rev], { env, timeout: 20_000 });
-  return { run, rev, runtime, evidence, backups, drop, oldDrop, telemetry, previous, previousPid, pid, log };
+  const run = (seconds?: string) => exec("bash", [path.join(repo, "scripts", "deploy-importer.sh"), rev], { env: { ...env, PI_HINDSIGHT_ROLLOUT_TIMEOUT_SECONDS: seconds }, timeout: 20_000 });
+  return { run, rev, runtime, evidence, backups, drop, oldDrop, telemetry, previous, previousPid, pid, log, verificationPolls: () => verificationPolls };
 }
 
 test("rollout stops the writer before coordinated backup and verifies a fresh snapshot heartbeat with settling work", linux, async (t) => {
@@ -184,9 +201,25 @@ test("rollout stops the writer before coordinated backup and verifies a fresh sn
   assert.ok(manifest.includes(`"revision": "${f.rev}"`));
 });
 
+test("rollout waits for queued work to clear across verification polls", linux, async (t) => {
+  const f = await fixture(t, "pending");
+  const result = await f.run("15");
+  assert.match(result.stdout, /Deployed importer revision/);
+  assert.ok(f.verificationPolls() >= 3);
+  assert.equal((await fs.readFile(f.log, "utf8")).split("\n").filter(line => line === "stop").length, 1);
+});
+
+test("rollout rejects invalid timeouts before building or stopping the importer", linux, async (t) => {
+  const f = await fixture(t);
+  for (const invalid of ["0", "-5", "", "1.5", "999999999999999999999"]) await assert.rejects(f.run(invalid), /must be a positive integer/);
+  assert.equal(await fs.readFile(f.log, "utf8"), "");
+  assert.equal(await fs.readFile(f.pid, "utf8"), f.previousPid);
+});
+
 test("failed document verification rolls back only the runtime and preserves later SQLite writes", linux, async (t) => {
   const f = await fixture(t, "verify", true);
   await assert.rejects(f.run(), /did not pass document verification/);
+  assert.equal(f.verificationPolls(), 1);
   assert.equal(existsSync(f.drop), false);
   assert.ok((await fs.readFile(f.log, "utf8")).endsWith(`stop\nreload\nstart ${f.previous}\n`));
   const db = new DatabaseSync(f.evidence, { readOnly: true });
