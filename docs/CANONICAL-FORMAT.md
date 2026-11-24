@@ -57,7 +57,22 @@ Canonical output is bounded before it is handed to the Hindsight client. The def
 
 ## Redaction
 
-A redacted copy is sent to Hindsight. Native source data stays unchanged. The policy detects common API keys, bearer headers, cookies, private-key blocks, URL/database passwords, cloud keys, and secret-like shell/JSON/YAML assignments, quoted and escaped values, and signed-URL credentials. Outbound session metadata uses the same redactor. Replacement markers identify the rule. Logs contain only a count.
+A redacted copy is sent to Hindsight. Native source data stays unchanged. The policy detects common API keys, bearer headers, cookies, private-key blocks, URL/database passwords, cloud keys, secret-like assignments, and signed-URL credentials. It also detects Pi-style OAuth JSON objects with `access`, `refresh`, and `expires` in the same object, named OAuth secrets such as `id_token` and `client_secret`, and authorization codes in callback or OAuth URLs and URLs with both `code` and `state`. A replacement marker exempts only a complete value, not a value that contains a marker and additional text. Outbound session metadata uses the same redactor. This policy does not detect every possible credential format or encoded copy of a credential.
+
+### Policy release gate
+
+Before deployment, stop the importer and make a consistent set of private copies. Do not point the report at live state, live source directories, or symlinks to them. Put a standalone SQLite backup of the importer state in a mode-`0600` file. In a mode-`0700` source directory, make one subdirectory for each source origin in the copied state (for example, `desktop`). Under each origin, preserve the relative layouts of the copied Pi sessions in `pi/`, Claude projects in `claude/`, and Codex sessions in `codex/`. Put the standalone Codex label backup at `state_5.sqlite` and the standalone OpenCode backup at `opencode.db` in that origin directory. Use SQLite backups that do not need WAL or rollback-journal files.
+
+```sh
+npm run build
+node scripts/checks/redaction-impact.mjs --state-copy /path/to/state-copy.sqlite3 --sources-copy /path/to/sources-copy
+```
+
+The report uses only the named copies and a private temporary spool. It does not load runtime configuration, contact Hindsight, or queue work. It reports counts of acknowledged documents with changed and unchanged canonical bytes, preserved ambiguous documents that it did not normalize, unavailable sources or unmatched IDs, and errors. It returns a nonzero exit status if the comparison is incomplete. The comparison is against the acknowledged hash, so source edits or other normalization changes in the checkout can contribute to the changed count. Renamed artifacts without a matching native ID are unavailable. Resolve incomplete comparisons and review any nonzero changed count before deployment. The report does not authorize historical replay.
+
+Redaction policy version 4 identifies newly normalized payloads. The importer keeps the existing source scan signature for this redaction change. Unchanged acknowledged source snapshots retain their remote hashes and operation IDs, including when the local evidence index is rebuilt. Sessions already marked as preserved ambiguous are not requeued. New or changed source snapshots use the new rules. A stored payload with an unsupported version remains unresolved if the importer would need to send it again. The importer preserves its files and operation ID, does not retry it, and holds other imports for the same session. It can still acknowledge already completed remote work without resending its payload. Review unresolved operations before any retry or replacement.
+
+This release does not remove existing copies from Hindsight, backups, or the local index. Treat known exposed credentials as compromised and rotate them. Review any historical remote cleanup separately. To refresh the local evidence index without sending documents, use `index-evidence --force`.
 
 ## Source cleanup policy
 

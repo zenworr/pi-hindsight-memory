@@ -5,8 +5,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { CLASSIFICATION_POLICY_VERSION, RETAIN_POLICY_VERSION } from "../common/types.js";
 import type { GenerationState, SessionClassification, Source, SourceFingerprint } from "../common/types.js";
+import { STALE_REDACTION_PAYLOAD } from "./pending-payload.js";
 
 const SOURCE_ERROR_MAX_CHARS = 2_000;
+const RUNNABLE_GENERATIONS = `(state IN ('queued','submitted','processing') OR state='failed' AND attempt_count<?)
+  AND NOT EXISTS (SELECT 1 FROM generations AS held
+    WHERE held.source=generations.source AND held.native_session_id=generations.native_session_id AND held.state='submitted' AND held.error=?)`;
 
 export interface SessionStateRecord {
   source: Source;
@@ -707,11 +711,14 @@ export class StateDatabase {
   }
 
   listWorkCandidates(limit: number, maxAttempts: number): GenerationRecord[] {
-    const rows = this.db.prepare(`SELECT * FROM generations
-      WHERE state IN ('queued','submitted','processing') OR state='failed' AND attempt_count<?
+    const rows = this.db.prepare(`SELECT * FROM generations WHERE ${RUNNABLE_GENERATIONS}
       ORDER BY CASE state WHEN 'processing' THEN 0 WHEN 'submitted' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, queued_at
-      LIMIT ?`).all(maxAttempts, limit) as Record<string, unknown>[];
+      LIMIT ?`).all(maxAttempts, STALE_REDACTION_PAYLOAD, limit) as Record<string, unknown>[];
     return rows.map((row) => this.toGeneration(row));
+  }
+
+  hasRunnableWork(maxAttempts: number): boolean {
+    return Boolean(this.db.prepare(`SELECT 1 FROM generations WHERE ${RUNNABLE_GENERATIONS} LIMIT 1`).get(maxAttempts, STALE_REDACTION_PAYLOAD));
   }
 
   hasActiveOperations(): boolean {

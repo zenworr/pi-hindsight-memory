@@ -86,4 +86,52 @@ test("common shell, JSON, and signed URL secrets are removed before actions leav
   assert.equal(redactText("token count: 120; password policy: strong; normal=value").text, "token count: 120; password policy: strong; normal=value");
 });
 
+test("credential markers only exempt a complete value, including in shell assignments and URL parameters", () => {
+  const inputs = [
+    'TOKEN="[REDACTED:SECRET]CANARY"',
+    'TOKEN="[REDACTED:SECRET]"CANARY',
+    "TOKEN=before[REDACTED:SECRET]CANARY",
+    "TOKEN=[REDACTED:SECRET][CANARY]",
+    "TOKEN=[REDACTED:SECRET]]CANARY",
+    "Authorization: Bearer [REDACTED:AUTH_TOKEN]CANARY",
+    "https://example.invalid/?token=[REDACTED:URL_SECRET]CANARY",
+    "https://example.invalid/?id_token=CANARY",
+    "https://example.invalid/auth/callback?code=[REDACTED:OAUTH_CODE]CANARY&state=ok",
+    "http://localhost/?code=CANARY&state=ok",
+    "https://example.invalid/callback?code=CANARY",
+    '{"id_token":"test-CANARY","client_secret":"[REDACTED:SECRET]CANARY"}',
+  ];
+  for (const input of inputs) {
+    const result = redactText(input);
+    assert.doesNotMatch(result.text, /CANARY/, input);
+    assert.deepEqual(redactText(result.text), { text: result.text, count: 0, rules: [] });
+  }
+  for (const input of [
+    "TOKEN=[REDACTED:SECRET]",
+    '{"password":"[REDACTED:SECRET]"}',
+    "https://example.invalid/?token=[REDACTED:URL_SECRET]",
+    "https://example.invalid/?code=HTTP_OK",
+    "Use code=ok and access: public",
+    '{"access":"public","refresh":"manual","expiresIn":3600}',
+    '{"access":"public","refresh":"manual","child":{"expires":123}}',
+  ]) assert.deepEqual(redactText(input), { text: input, count: 0, rules: [] });
+});
+
+test("canonical turns remove OAuth token pairs only within the same credential object", async (t) => {
+  const directory = await tempDirectory();
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const credentials = { provider: { type: "oauth", access: '[REDACTED:OAUTH_TOKEN]CANARY"', profile: { scope: "read" }, refresh: "CANARY-refresh", expires: 123 }, settings: { access: "public", refresh: "manual" } };
+  const input = JSON.stringify(credentials);
+  const spool = await CanonicalSpool.create(directory, "agent-session:pi:oauth", "2026-01-01T00:00:00.000Z");
+  await spool.add({ role: "user", content: input, timestamp: "2026-01-01T00:00:00.000Z" });
+  await spool.finalize();
+  const canonical = await fs.readFile(spool.path, "utf8");
+  assert.doesNotMatch(canonical, /CANARY/);
+  const turn = JSON.parse(canonical.split("\n")[1]!);
+  const expected = { ...credentials, provider: { ...credentials.provider, access: "[REDACTED:OAUTH_TOKEN]", refresh: "[REDACTED:OAUTH_TOKEN]" } };
+  assert.deepEqual(JSON.parse(turn.content), expected);
+  assert.deepEqual(redactText(turn.content), { text: turn.content, count: 0, rules: [] });
+  assert.equal(spool.stats.redactions, 2);
+});
+
 test("hash helper is stable", () => { assert.equal(sha256("abc"), sha256("abc")); });

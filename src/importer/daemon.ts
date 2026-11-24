@@ -75,7 +75,7 @@ async function runLockedDaemon(config: AppConfig, state: StateDatabase, options:
       const paused = await isPaused(config);
       phase = paused ? "paused" : lastError ? "error" : "idle";
       const scanDue = options.scanFirst !== false && Date.now() >= nextFullScan;
-      if (!paused && Date.now() >= retryAt && (scanDue || lastError || state.pendingWorkCount(config.importer.maxAttempts) > 0)) {
+      if (!paused && Date.now() >= retryAt && (scanDue || lastError || state.hasRunnableWork(config.importer.maxAttempts))) {
         phase = "working";
         state.heartbeat(phase, lastError);
         try {

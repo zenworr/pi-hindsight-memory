@@ -4,8 +4,14 @@ import { createReadStream } from "node:fs";
 import { createHash } from "node:crypto";
 import { PRIVATE_FILE_MODE } from "../common/limits.js";
 import type { CanonicalSession } from "../common/types.js";
+import { REDACTION_POLICY_VERSION } from "../common/types.js";
 
 type PayloadMetadata = Omit<CanonicalSession, "readContent" | "cleanup" | "contentPath">;
+
+export const STALE_REDACTION_PAYLOAD = "Pending payload uses an unsupported redaction policy; reconcile it before retrying";
+export class StaleRedactionPayloadError extends Error {
+  constructor() { super(STALE_REDACTION_PAYLOAD); }
+}
 
 function paths(directory: string, operationId: string) {
   if (!/^[a-zA-Z0-9-]+$/.test(operationId)) throw new Error("Invalid pending operation identifier");
@@ -36,9 +42,10 @@ export async function savePendingPayload(directory: string, operationId: string,
 
 export async function loadPendingPayload(directory: string, operationId: string, expectedHash: string): Promise<CanonicalSession | undefined> {
   const files = paths(directory, operationId);
-  let metadata: PayloadMetadata;
-  try { metadata = JSON.parse(await fs.readFile(files.metadata, "utf8")) as PayloadMetadata; }
+  let metadata: PayloadMetadata | null;
+  try { metadata = JSON.parse(await fs.readFile(files.metadata, "utf8")) as PayloadMetadata | null; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  if (metadata?.metadata?.redaction_policy_version !== REDACTION_POLICY_VERSION) throw new StaleRedactionPayloadError();
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(files.text)) hash.update(chunk as Buffer);
   if (metadata.canonicalHash !== expectedHash || hash.digest("hex") !== expectedHash) throw new Error("Pending payload hash does not match the submitted generation");

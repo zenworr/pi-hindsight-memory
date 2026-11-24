@@ -144,8 +144,9 @@ test("retain sends the canonical document with a caller-owned stable operation I
   assert.equal(body.items[0].update_mode, "replace");
   assert.equal(body.items[0].observation_scopes, "shared");
   assert.equal(body.items[0].metadata.canonical_hash, "hash");
-  session.metadata.title = "API_KEY=CANARY_DO_NOT_RETAIN";
-  session.metadata.cwd = "https://example.invalid/?token=CANARY_DO_NOT_RETAIN";
+  session.metadata.title = JSON.stringify({ provider: { access: "CANARY-access", refresh: "[REDACTED:OAUTH_TOKEN]CANARY-refresh", expires: 123 } });
+  session.metadata.cwd = "https://example.invalid/auth/callback?code=CANARY-code&state=ok";
+  session.metadata.project_id = 'API_KEY="[REDACTED:SECRET]CANARY"';
   await client.retainWithOperationId(session, "stable-op");
   assert.doesNotMatch(JSON.stringify(body), /CANARY/);
   await fs.rm(contentPath, { force: true });

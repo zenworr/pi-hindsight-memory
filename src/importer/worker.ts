@@ -18,7 +18,7 @@ import type { StateDatabase } from "./state-db.js";
 import { configuredExclusion } from "./exclusions.js";
 import { nextOperationId } from "./queue.js";
 import { removeEvidence } from "./evidence.js";
-import { loadPendingPayload, removePendingPayload, savePendingPayload } from "./pending-payload.js";
+import { loadPendingPayload, removePendingPayload, savePendingPayload, StaleRedactionPayloadError } from "./pending-payload.js";
 
 export interface WorkerSummary { selected: number; completed: number; failed: number; deferred: number; }
 const OPERATION_POLL_SLICE_MS = 30_000;
@@ -61,7 +61,7 @@ export class ImportWorker {
       if (Date.now() - started >= maxMs) throw new Error(`Importer still has pending work after ${maxMs} ms`);
       const batch = await this.runOnce(this.config.importer.workBatchSize, signal);
       total.selected += batch.selected; total.completed += batch.completed; total.failed += batch.failed; total.deferred += batch.deferred;
-      if (batch.selected === 0) break;
+      if (batch.selected === 0 && !signal?.aborted && this.state.pendingWorkCount(this.config.importer.maxAttempts) > 0) throw new Error("Importer has unresolved generations; inspect status before retrying");
       if (batch.completed === 0 && batch.failed === 0 && this.state.pendingWorkCount(this.config.importer.maxAttempts) > 0) {
         if (!this.state.hasActiveOperations()) throw new Error("Queued work is blocked; inspect session classification and cleanup state");
         await sleep(BLOCKED_QUEUE_RETRY_MS, signal);
@@ -169,7 +169,7 @@ export class ImportWorker {
         }
       }
       if (session.emptyAfterNormalization) throw new Error("Refusing to retain an empty generation");
-      if (session.metadata.redaction_policy_version !== REDACTION_POLICY_VERSION) throw new Error("Pending payload uses an older redaction policy; reconcile it before submitting new work");
+      if (session.metadata.redaction_policy_version !== REDACTION_POLICY_VERSION) throw new StaleRedactionPayloadError();
       const approval = await this.preflight(operationSignal);
       if (approval) {
         if (approval.minFreeBytes !== undefined) {
@@ -218,6 +218,12 @@ export class ImportWorker {
     } catch (error) {
       if (shutdownSignal?.aborted) {
         this.logger.info("Session import interrupted by shutdown", { source: generation.source, session: generation.nativeSessionId });
+        return "deferred";
+      }
+      if (error instanceof StaleRedactionPayloadError) {
+        this.state.durableTransaction(() => {
+          this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { error: error.message });
+        });
         return "deferred";
       }
       const operation = this.state.getOperation(generation.operationId);

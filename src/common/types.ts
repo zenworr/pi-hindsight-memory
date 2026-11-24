@@ -3,7 +3,7 @@ export type Source = (typeof SOURCES)[number];
 
 export const CANONICAL_SCHEMA = "agent-session-v1" as const;
 export const ADAPTER_VERSION = "0.2.0" as const;
-export const REDACTION_POLICY_VERSION = "3" as const;
+export const REDACTION_POLICY_VERSION = "4" as const;
 export const CLASSIFICATION_POLICY_VERSION = "3" as const;
 export const RETAIN_POLICY_VERSION = "2" as const;
 

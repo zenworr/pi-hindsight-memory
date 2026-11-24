@@ -4,7 +4,7 @@ import { inSpan, telemetryCount } from "../common/telemetry.js";
 import { MS_PER_SECOND } from "../common/limits.js";
 
 import type { AppConfig, Source, SourceFingerprint, SessionReference, InventorySessionResult, CanonicalSession } from "../common/types.js";
-import { ADAPTER_VERSION, CANONICAL_SCHEMA, CLASSIFICATION_POLICY_VERSION, REDACTION_POLICY_VERSION, RETAIN_POLICY_VERSION, SOURCES } from "../common/types.js";
+import { ADAPTER_VERSION, CANONICAL_SCHEMA, CLASSIFICATION_POLICY_VERSION, RETAIN_POLICY_VERSION, SOURCES } from "../common/types.js";
 import { documentIdFor } from "../common/hashing.js";
 import { createAdapters } from "../adapters/index.js";
 import type { SessionAdapter } from "../adapters/adapter.js";
@@ -16,6 +16,8 @@ import { configuredExclusion, normalizeSessionLabel } from "./exclusions.js";
 import { indexedDocumentHashes, indexEvidence, removeEvidence } from "./evidence.js";
 
 const SOURCE_READ_ATTEMPTS = 2;
+// Redaction changes apply to new normalization, not to the identity of a source snapshot.
+const SCAN_REDACTION_BASELINE = "3";
 
 export interface ScanOptions {
   inventoryOnly?: boolean;
@@ -44,7 +46,7 @@ export interface ScanSummary {
 
 function processingSignature(config: AppConfig): string {
   const exclusions = [...config.sessionExclusions.exactLabels].map(normalizeSessionLabel).sort();
-  return `${CANONICAL_SCHEMA}|${ADAPTER_VERSION}|${REDACTION_POLICY_VERSION}|classification:${CLASSIFICATION_POLICY_VERSION}|retain:${RETAIN_POLICY_VERSION}|exclusions:${JSON.stringify(exclusions)}`;
+  return `${CANONICAL_SCHEMA}|${ADAPTER_VERSION}|${SCAN_REDACTION_BASELINE}|classification:${CLASSIFICATION_POLICY_VERSION}|retain:${RETAIN_POLICY_VERSION}|exclusions:${JSON.stringify(exclusions)}`;
 }
 
 interface Discovered { adapter: SessionAdapter; reference: SessionReference; }
@@ -229,7 +231,8 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
     const tracked = previous?.canonicalHash ? state.getGeneration(adapter.source, reference.nativeSessionId, previous.canonicalHash) : undefined;
     const acknowledged = previous?.canonicalHash && previous.acknowledgedHash === previous.canonicalHash && previous.acknowledgedPolicy === RETAIN_POLICY_VERSION;
     const knownEmpty = previous?.status === "empty_after_normalization";
-    const unchanged = previous && !options.inventoryOnly && !options.force && previous.canonicalHash && (knownEmpty || indexed.get(previous.documentId) === previous.canonicalHash && (acknowledged || tracked && ["queued", "submitted", "processing", "failed"].includes(tracked.state))) && fingerprintSignature(previous.sourceFingerprint) === fingerprintSignature(fingerprint);
+    const sameFingerprint = previous && fingerprintSignature(previous.sourceFingerprint) === fingerprintSignature(fingerprint);
+    const unchanged = previous && !options.inventoryOnly && !options.force && sameFingerprint && previous.canonicalHash && (knownEmpty || acknowledged && indexed.has(previous.documentId) || indexed.get(previous.documentId) === previous.canonicalHash && tracked && ["queued", "submitted", "processing", "failed"].includes(tracked.state));
     if (unchanged) {
       state.clearScanError(adapter.source, reference.locator);
       state.clearScanCandidate(adapter.source, reference.nativeSessionId);
@@ -241,7 +244,7 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       summary.results.push({ source: adapter.source, nativeSessionId: reference.nativeSessionId, locator: reference.locator, status: knownEmpty ? "empty_after_normalization" : "eligible", canonicalBytes: previous.canonicalBytes, canonicalTurns: previous.canonicalTurns, startedAt: previous.sessionStartedAt, updatedAt: previous.sessionUpdatedAt });
       continue;
     }
-    const settled = options.force || config.sessionSettleSeconds === 0 || state.observeScanCandidate(
+    const settled = options.force || sameFingerprint && acknowledged || config.sessionSettleSeconds === 0 || state.observeScanCandidate(
       adapter.source,
       reference.nativeSessionId,
       fingerprintSignature(fingerprint),
@@ -297,7 +300,9 @@ async function scanSources(config: AppConfig, state: StateDatabase, options: Sca
       }
       state.clearScanError(adapter.source, reference.locator);
       if (session.emptyAfterNormalization) summary.empty += 1;
-      if (!options.inventoryOnly) {
+      if (!options.inventoryOnly && previous && acknowledged && fingerprintSignature(previous.sourceFingerprint) === fingerprintSignature(fingerprint)) {
+        state.markSessionSeen(adapter.source, reference.nativeSessionId, fingerprint, fingerprint.size, fingerprint.mtimeMs, previous.status === "source_missing" ? "imported" : previous.status, reference.locator, adapter.origin ?? config.localOrigin);
+      } else if (!options.inventoryOnly) {
         state.upsertSession({ source: session.source, sourceOrigin: adapter.origin ?? config.localOrigin, nativeSessionId: session.nativeSessionId, documentId: session.documentId, sourceLocator: session.sourceLocator, sourceSize: fingerprint.size, sourceMtime: fingerprint.mtimeMs, sourceFingerprint: fingerprint, canonicalHash: session.canonicalHash, canonicalBytes: session.canonicalBytes, canonicalTurns: session.canonicalTurns, canonicalSchema: CANONICAL_SCHEMA, sessionStartedAt: session.sessionStartedAt, sessionUpdatedAt: session.sessionUpdatedAt, status: session.emptyAfterNormalization ? "empty_after_normalization" : "discovered", lastSeenAt: new Date().toISOString(), classification: session.classification ?? classification });
         state.addAlias(session.source, reference.locator, session.nativeSessionId);
         const generation = options.indexOnly ? undefined : queueGeneration(state, session, config.hindsight.bankId);
