@@ -89,6 +89,7 @@ case $(svc show -p ActiveState --value "$UNIT") in
   inactive|failed) ;;
   *) echo 'Importer unit is not in a stable state; retry after it settles' >&2; exit 1 ;;
 esac
+NODE_ENV=production PI_HINDSIGHT_CONFIG="$CONFIG" timeout -k 2 60 "$RUNTIME/scripts/backup.sh" --check
 mkdir -p -- "$DROP_DIR"
 TEMP=$(mktemp -d "$DROP_DIR/.rollout.XXXXXX")
 QUIESCING=0
@@ -171,15 +172,18 @@ verify_accounting() {
     let report;
     try { report = JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")); } catch { process.exit(1); }
     if (!report) process.exit(1);
-    const hardFailures = [report.failedGenerations, report.missingDocumentCount, report.unexpectedDocumentCount, report.documentHashMismatchCount];
-    if (hardFailures.some(count => count > 0)) {
-      console.error("New importer did not pass document verification (failed updates, missing, unexpected, hash mismatches): " + hardFailures.join(", "));
+    if (report.failedGenerations > 0) {
+      console.error("New importer did not pass document verification: " + report.failedGenerations + " failed updates");
       process.exit(2);
     }
-    if (report.documentAccountingReady !== true || report.failedGenerations !== 0 || report.pendingWork !== 0) process.exit(1);
+    if (report.failedGenerations !== 0 || report.pendingWork !== 0 || report.activeHindsightOperations !== 0) process.exit(1);
+    const discrepancies = [report.missingDocumentCount, report.unexpectedDocumentCount, report.excludedDocumentsPresentCount, report.documentHashMismatchCount];
+    if (discrepancies.some(count => count > 0)) process.exit(3);
+    if (report.documentAccountingReady !== true) process.exit(1);
   ' "$TEMP/verify.json"
 }
 VERIFY_STATUS=1
+QUIET_DISCREPANCY=0
 while (( (REMAINING = DEADLINE - SECONDS) > 0 )); do
   check_main_pid
   VERIFY_STATUS=0
@@ -188,6 +192,14 @@ while (( (REMAINING = DEADLINE - SECONDS) > 0 )); do
   case "$VERIFY_STATUS" in
     0) break ;;
     2) exit 1 ;;
+    3)
+      if (( QUIET_DISCREPANCY )); then
+        echo 'New importer did not pass document verification in two consecutive idle checks' >&2
+        exit 1
+      fi
+      QUIET_DISCREPANCY=1
+      ;;
+    *) QUIET_DISCREPANCY=0 ;;
   esac
   if (( SECONDS < DEADLINE )); then sleep 1; fi
 done

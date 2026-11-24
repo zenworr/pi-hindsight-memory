@@ -15,7 +15,7 @@ import { StateDatabase } from "../../src/importer/state-db.js";
 const exec = promisify(execFile);
 const linux = { skip: process.platform !== "linux" };
 
-async function fixture(t: TestContext, scenario?: "build" | "verify" | "migrate" | "pending", legacyUnit = false) {
+async function fixture(t: TestContext, scenario?: "build" | "preflight" | "verify" | "migrate" | "pending" | "in-flight", legacyUnit = false) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-rollout-"));
   const repo = path.join(dir, "repo");
   const bin = path.join(dir, "bin");
@@ -58,22 +58,45 @@ async function fixture(t: TestContext, scenario?: "build" | "verify" | "migrate"
   const rev = (await git("rev-parse", "HEAD")).stdout.trim();
   const runtime = path.join(snapshots, rev);
 
+  const documentId = "agent-session:pi:in-flight";
+  const oldHash = "a".repeat(64);
+  const newHash = "b".repeat(64);
   const local = new StateDatabase(state);
+  if (scenario === "in-flight") {
+    local.db.prepare(`INSERT INTO sessions (source,native_session_id,document_id,source_locator,source_size,source_mtime,source_fingerprint,status,last_seen_at,acknowledged_hash)
+      VALUES ('pi','in-flight',?,'fixture',1,1,'fixture','imported','now',?)`).run(documentId, oldHash);
+    local.db.prepare(`INSERT INTO generations (source,native_session_id,canonical_hash,operation_id,state,queued_at)
+      VALUES ('pi','in-flight',?,'old-operation','completed','now')`).run(oldHash);
+  }
   local.db.prepare("INSERT INTO scan_candidates (source, native_session_id, fingerprint, first_observed_at) VALUES ('pi','settling','fixture','now')").run();
   local.close();
   const index = new DatabaseSync(evidence);
   index.exec("CREATE TABLE documents(id TEXT PRIMARY KEY)");
   index.close();
   let verificationPolls = 0;
+  let documentPolls = 0;
   const server = createServer((req, res) => {
     const target = new URL(req.url ?? "/", "http://localhost").pathname.split("/").at(-1);
     switch (target) {
       case "stats":
         if (existsSync(launched) && ++verificationPolls === 3 && scenario === "pending") writeFileSync(drain, "");
-        res.end('{"pending_operations":0,"total_documents":0}');
+        res.end(JSON.stringify({ pending_operations: 0, pending_consolidation: 0, total_documents: scenario === "in-flight" ? 1 : 0 }));
         break;
       case "operations": res.end('{"operations":[]}'); break;
-      case "documents": res.end((scenario === "verify" || scenario === "migrate") && existsSync(launched) ? '{"total":1,"items":[{"id":"unexpected","content_hash":"different"}]}' : '{"total":0,"items":[]}'); break;
+      case "documents": {
+        if (scenario === "in-flight") {
+          const started = existsSync(launched);
+          if (started && ++documentPolls === 2) {
+            const db = new DatabaseSync(state);
+            try { db.prepare("UPDATE sessions SET acknowledged_hash=? WHERE document_id=?").run(newHash, documentId); }
+            finally { db.close(); }
+          }
+          res.end(JSON.stringify({ total: 1, items: [{ id: documentId, content_hash: started ? newHash : oldHash }] }));
+        } else {
+          res.end((scenario === "verify" || scenario === "migrate") && existsSync(launched) ? '{"total":1,"items":[{"id":"unexpected","content_hash":"different"}]}' : '{"total":0,"items":[]}');
+        }
+        break;
+      }
       case "config": res.end('{"config":{"enable_auto_consolidation":true}}'); break;
       default: res.writeHead(404).end("{}");
     }
@@ -131,9 +154,12 @@ cp ${JSON.stringify(path.join(dir, "fixture-cli.mjs"))} dist/src/importer/cli.js
 `, { mode: 0o700 });
   await fs.writeFile(path.join(bin, "fixture-engine"), `#!/usr/bin/env bash
 set -eu
-[[ ! -f $ROLLOUT_PID ]]
 case " $* " in
-  *' pg_dump '*) printf 'backup\n' >> "$ROLLOUT_LOG"; printf 'database archive\n' ;;
+  *' pg_dump '*' --schema-only '*)
+    [[ -f $ROLLOUT_PID ]]; printf 'preflight\n' >> "$ROLLOUT_LOG"
+    [[ $ROLLOUT_SCENARIO != preflight ]]; printf 'database archive\n' ;;
+  *' pg_dump '*) [[ ! -f $ROLLOUT_PID ]]; printf 'backup\n' >> "$ROLLOUT_LOG"; printf 'database archive\n' ;;
+  *' pg_restore -l '*) read -r archive; [[ $archive == 'database archive' ]]; printf ';     dbname: hindsight\n' ;;
   *' pg_restore '*) read -r archive; [[ $archive == 'database archive' ]] ;;
   *) exit 1 ;;
 esac
@@ -191,7 +217,7 @@ test("rollout stops the writer before coordinated backup and verifies a fresh sn
   assert.match(result.stdout, new RegExp(`Deployed importer revision ${f.rev}`));
   assert.match(result.stdout, /effective ExecStart: pi-hindsight-importer.service/);
   const cli = path.join(f.runtime, "dist/src/importer/cli.js");
-  assert.deepEqual((await fs.readFile(f.log, "utf8")).trim().split("\n"), ["build", "stop", "backup", "reload", `start ${cli}`]);
+  assert.deepEqual((await fs.readFile(f.log, "utf8")).trim().split("\n"), ["build", "preflight", "stop", "backup", "reload", `start ${cli}`]);
   assert.ok((await fs.readFile(f.drop, "utf8")).includes(cli));
   assert.match(await fs.readFile(f.telemetry, "utf8"), /FIXTURE=untouched/);
   assert.equal((await fs.stat(cli)).mode & 0o222, 0);
@@ -209,6 +235,23 @@ test("rollout waits for queued work to clear across verification polls", linux, 
   assert.equal((await fs.readFile(f.log, "utf8")).split("\n").filter(line => line === "stop").length, 1);
 });
 
+test("rollout does not roll back when a new remote hash precedes its local acknowledgement", linux, async (t) => {
+  const f = await fixture(t, "in-flight");
+  const result = await f.run("15");
+  assert.match(result.stdout, /Deployed importer revision/);
+  assert.equal(f.verificationPolls(), 2);
+  assert.equal((await fs.readFile(f.log, "utf8")).split("\n").filter(line => line === "stop").length, 1);
+});
+
+test("failed PostgreSQL preflight leaves the previous importer running", linux, async (t) => {
+  const f = await fixture(t, "preflight");
+  await assert.rejects(f.run(), /PostgreSQL preflight snapshot failed/);
+  assert.equal(await fs.readFile(f.log, "utf8"), "build\npreflight\n");
+  assert.equal(await fs.readFile(f.pid, "utf8"), f.previousPid);
+  assert.equal(await fs.readFile(f.drop, "utf8"), f.oldDrop);
+  assert.equal(existsSync(f.backups), false);
+});
+
 test("rollout rejects invalid timeouts before building or stopping the importer", linux, async (t) => {
   const f = await fixture(t);
   for (const invalid of ["0", "-5", "", "1.5", "999999999999999999999"]) await assert.rejects(f.run(invalid), /must be a positive integer/);
@@ -219,7 +262,7 @@ test("rollout rejects invalid timeouts before building or stopping the importer"
 test("failed document verification rolls back only the runtime and preserves later SQLite writes", linux, async (t) => {
   const f = await fixture(t, "verify", true);
   await assert.rejects(f.run(), /did not pass document verification/);
-  assert.equal(f.verificationPolls(), 1);
+  assert.equal(f.verificationPolls(), 2);
   assert.equal(existsSync(f.drop), false);
   assert.ok((await fs.readFile(f.log, "utf8")).endsWith(`stop\nreload\nstart ${f.previous}\n`));
   const db = new DatabaseSync(f.evidence, { readOnly: true });

@@ -124,6 +124,15 @@ See [Backups](OPERATIONS.md#backups) for verification and restore instructions.
 
 The SSH account must be able to run Docker without an interactive password. Set `PI_HINDSIGHT_REMOTE_ENGINE=podman` when the service host uses Podman. `PI_HINDSIGHT_DB_USER` and `PI_HINDSIGHT_DB_NAME` override the PostgreSQL defaults.
 
+If you reach PostgreSQL through a hypervisor, set `PI_HINDSIGHT_CONTAINER_ENGINE` to the path of an executable wrapper and leave `PI_HINDSIGHT_SSH_HOST` unset. For example, create a wrapper with this content, and replace the SSH host and container ID with your values:
+
+```bash
+#!/usr/bin/env bash
+exec ssh -o BatchMode=yes hypervisor-host pct exec 100 -- docker "$@"
+```
+
+Do not allocate a TTY or disable SSH host-key checking. The wrapper must pass standard input and standard output unchanged. Run `scripts/backup.sh --check` with the same environment before stopping the importer. The check streams a schema-only archive and verifies its database name. Use the same environment for `--coordinated` or `scripts/deploy-importer.sh`.
+
 Also keep logical PostgreSQL backups on the service host, so consolidation data remains protected while the workstation is off. Keep a copy outside the service host or use verified host-level backups.
 
 ## Security

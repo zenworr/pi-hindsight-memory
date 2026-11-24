@@ -36,9 +36,9 @@ scripts/deploy-importer.sh REVISION
 
 The rollout uses `/usr/local/bin/node` by default. It exports the commit, installs locked dependencies, builds, and checks the configuration before it stops the user unit. It does not change the checkout or reuse an unmanaged directory with the same revision name. Snapshots are under `${XDG_DATA_HOME:-$HOME/.local/share}/pi-hindsight-memory-cutover`.
 
-Use the same configuration and settings as the running service. Set `PI_HINDSIGHT_CONFIG` if the service uses a non-default config and `PI_HINDSIGHT_SSH_HOST` if PostgreSQL is remote. Keep other Hindsight writers idle during the rollout. The script stops the unit before it takes a coordinated backup. If there is unresolved remote work or the backup fails, the script does not switch runtimes.
+Use the same configuration and settings as the running service. Set `PI_HINDSIGHT_CONFIG` if the service uses a non-default config. For remote PostgreSQL, use the SSH host or the engine wrapper described in [Remote deployment](REMOTE-DEPLOYMENT.md#backups). Keep other Hindsight writers idle during the rollout. The script checks the PostgreSQL backup route and database name before it stops the unit, then takes a coordinated backup. If the check or backup fails, the script does not switch runtimes.
 
-The rollout replaces only the `90-runtime.conf` user-unit drop-in. The new importer has 600 seconds by default to report a fresh idle heartbeat and pass document accounting. Set `PI_HINDSIGHT_ROLLOUT_TIMEOUT_SECONDS` to a positive whole number of seconds (up to nine digits) to change this limit. The rollout checks again while queued or submitted work finishes. Settling sessions alone do not block deployment. A failed update, a missing or unexpected document, a hash mismatch, or a change to the importer's main process ends the rollout without another check.
+The rollout replaces only the `90-runtime.conf` user-unit drop-in. The new importer has 600 seconds by default to report a fresh idle heartbeat and pass document accounting. Set `PI_HINDSIGHT_ROLLOUT_TIMEOUT_SECONDS` to a positive whole number of seconds (up to nine digits) to change this limit. The rollout checks again while queued or submitted work finishes. Settling sessions alone do not block deployment. A failed update or a change to the importer's main process ends the rollout without another check. Document discrepancies end the rollout only after two consecutive checks find discrepancies with no pending importer work or active Hindsight operations.
 
 This rollout does not change the Hindsight image. For an image change, use the [Hindsight upgrade gate](DEPLOYMENT.md#hindsight-upgrade-gate).
 
@@ -97,6 +97,7 @@ Run without `--apply` to preview the cleanup. The command reports eligible, kept
 Stop the importer before a coordinated capture. Keep other Hindsight writers (including manual UI writes) idle until capture ends. Use a known query and the exact document ID that supports the expected answer.
 
 ```bash
+scripts/backup.sh --check
 scripts/importer-service.sh stop
 scripts/backup.sh --coordinated
 scripts/importer-service.sh start
@@ -104,9 +105,9 @@ scripts/restore-test.sh /path/to/backup-TIMESTAMP-ID/manifest.json \
   'known query' 'agent-session:pi:KNOWN_SESSION_ID'
 ```
 
-Set `PI_HINDSIGHT_BACKUP_DIR` to use another persistent location. To select a non-default app config, set `PI_HINDSIGHT_CONFIG`. The backup resolves source paths from the merged app config. Each set contains a PostgreSQL dump, SQLite online backups of importer state and local evidence, and a copy of the reviewed facts file if present. The versioned manifest records file checksums, source paths, Git revision, document counts, and the consistency label. The script publishes the set as one directory after verification. It does not delete older backups. Treat the directory and manifest as sensitive.
+Set `PI_HINDSIGHT_BACKUP_DIR` to use another persistent location. To select a non-default app config, set `PI_HINDSIGHT_CONFIG`. The backup resolves source paths from the merged app config. Each set contains a PostgreSQL dump, SQLite online backups of importer state and local evidence, and a copy of the reviewed facts file if present. The versioned manifest records file checksums, source paths, Git revision, document counts, and the consistency label. The script publishes the set as one directory after verification. There is no automatic retention. Check disk use with `du -sh` on the backup directory and manage retention separately. Treat the directory and manifest as sensitive.
 
-Coordinated mode holds the importer writer lock. It refuses unresolved local operations and checks for idle remote operations and matching document IDs and hashes before and after the dump. If these checks fail, reconcile the outstanding work before you retry. This mode does not lock other Hindsight clients. For a split-host deployment, see [REMOTE-DEPLOYMENT.md](REMOTE-DEPLOYMENT.md).
+`--check` verifies a schema-only PostgreSQL dump and its database name without stopping the importer. Coordinated mode holds the importer writer lock and rejects state under `remote-mirror`, including paths that resolve there. It refuses unresolved writes and checks for idle remote operations, idle consolidation, and matching document IDs and hashes before and after the dump. If these checks fail, reconcile the outstanding work before you retry. This mode does not lock other Hindsight clients. For a split-host deployment, see [REMOTE-DEPLOYMENT.md](REMOTE-DEPLOYMENT.md).
 
 `scripts/install-backup-schedule.sh` installs weekly **uncoordinated** captures. These do not stop the importer or assert that the two databases represent the same generation. An SSH backup without a mode flag is also uncoordinated, to support read-only mirrors. The manifest gives no verified Hindsight document count for these sets.
 

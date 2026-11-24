@@ -12,23 +12,27 @@ function count(value: unknown): number {
 export async function verifyFullImport(config: AppConfig, client = new HindsightClient(config.hindsight), options: { signal?: AbortSignal } = {}) {
   const state = new StateDatabase(config.stateDatabase, { readOnly: true });
   try {
+    const [documents, stats, bankConfig, disk] = await Promise.all([client.listDocuments(options.signal), client.getBankStats(options.signal), client.getBankConfig(options.signal), inspectImportDisk(config)]);
+    // Read acknowledgements after the remote inventory, with the same snapshot as the pending count.
+    state.db.exec("BEGIN");
     const sessions = state.listSessions();
     const generations = state.listGenerations();
     const completedKeys = new Set(generations.filter((generation) => generation.state === "completed").map((generation) => `${generation.source}:${generation.nativeSessionId}`));
     const expected = new Set(sessions.filter((session) => completedKeys.has(`${session.source}:${session.nativeSessionId}`)).map((session) => session.documentId));
     const excluded = new Set(sessions.filter((session) => session.status !== "ambiguous_preserved" && (session.classification?.kind !== "primary" || session.status.startsWith("excluded_"))).map((session) => session.documentId));
     for (const generation of generations.filter((generation) => generation.state === "excluded")) excluded.add(`agent-session:${generation.source}:${generation.nativeSessionId}`);
-    const [documents, stats, bankConfig] = await Promise.all([client.listDocuments(options.signal), client.getBankStats(options.signal), client.getBankConfig(options.signal)]);
     const actual = new Set(documents.map((document) => document.id));
     const local = new Map(sessions.map((session) => [session.documentId, session]));
     const hashMismatches = documents.filter((document) => local.get(document.id)?.acknowledgedHash !== document.content_hash).map((document) => document.id);
-    const importer = importerHealth(config, state.db, await inspectImportDisk(config));
+    const importer = importerHealth(config, state.db, disk);
     const missing = [...expected].filter((id) => !actual.has(id));
     const excludedPresent = [...excluded].filter((id) => actual.has(id));
     const unexpected = [...actual].filter((id) => !expected.has(id));
     const imported = sessions.filter((session) => session.status === "imported").length;
     const preservedAmbiguous = sessions.filter((session) => session.status === "ambiguous_preserved").length;
     const pending = state.pendingWorkCount(config.importer.maxAttempts);
+    const budget = state.budget();
+    state.db.exec("COMMIT");
     const failedGenerations = importer.failureReasons.reduce((total, failure) => total + failure.count, 0);
     const activeOperations = Math.max(count(stats.pending_operations), count(stats.operations_by_status?.pending) + count(stats.operations_by_status?.processing));
     const failedOperations = Math.max(count(stats.failed_operations), count(stats.operations_by_status?.failed));
@@ -79,7 +83,7 @@ export async function verifyFullImport(config: AppConfig, client = new Hindsight
       idempotencyReady,
       activationReady: idempotencyReady && sourceCoverageReady && autoConsolidationEnabled,
       continuousReady: idempotencyReady && sourceCoverageReady && autoConsolidationEnabled && importer.running && !importer.paused && !importer.lastError && !importer.blocked,
-      budget: state.budget(),
+      budget,
     };
   } finally { state.close(); }
 }
