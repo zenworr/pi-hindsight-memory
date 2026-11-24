@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = process.cwd();
+const fakeNpmCi = "#!/usr/bin/env bash\nset -e\n[[ $1 == ci ]]\nmkdir -p dist/src/importer\ntouch dist/src/importer/cli.js\n";
 
 function run(script: string, args: string[], env: NodeJS.ProcessEnv) {
   return spawnSync("bash", [path.join(root, "scripts", script), ...args], { cwd: root, env, encoding: "utf8" });
@@ -125,23 +126,33 @@ test("Linux importer service can depend on a remote tunnel", async () => {
   await fs.writeFile(path.join(configHome, "pi-hindsight-memory", "config.json"), "{}\n", { mode: 0o600 });
   await fs.writeFile(path.join(bin, "uname"), "#!/usr/bin/env bash\necho Linux\n", { mode: 0o700 });
   await fs.symlink(process.execPath, path.join(bin, "node"));
-  for (const name of ["npm", "systemctl"]) await fs.writeFile(path.join(bin, name), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
-  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_IMPORTER_DEPENDENCY: "pi-hindsight-tunnel.service" };
+  await fs.writeFile(path.join(bin, "npm"), fakeNpmCi, { mode: 0o700 });
+  await fs.writeFile(path.join(bin, "systemctl"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
+  const env = { ...process.env, HOME: home, XDG_DATA_HOME: home, XDG_CONFIG_HOME: configHome, PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_NODE: process.execPath, PI_HINDSIGHT_IMPORTER_DEPENDENCY: "pi-hindsight-tunnel.service" };
   try {
     const result = run("install-importer-service.sh", [], env);
     assert.equal(result.status, 0, result.stderr);
-    const unit = await fs.readFile(path.join(home, ".config", "systemd", "user", "pi-hindsight-importer.service"), "utf8");
+    const unitPath = path.join(configHome, "systemd", "user", "pi-hindsight-importer.service");
+    const unit = await fs.readFile(unitPath, "utf8");
     assert.match(unit, /^Wants=network-online\.target pi-hindsight-tunnel\.service$/m);
     assert.match(unit, /^After=network-online\.target pi-hindsight-tunnel\.service$/m);
     assert.match(unit, /^TimeoutStopSec=300$/m);
-    assert.ok(unit.includes(`ExecStart=${await fs.realpath(process.execPath)} `));
+    assert.ok(unit.includes(`ExecStart="${await fs.realpath(process.execPath)}" `));
+    assert.match(unit, /pi-hindsight-memory-cutover\/[a-f0-9]{40}\/dist\/src\/importer\/cli\.js/);
 
+    const refused = run("install-importer-service.sh", [], { ...env, PI_HINDSIGHT_IMPORTER_DEPENDENCY: "" });
+    assert.notEqual(refused.status, 0);
+    assert.equal(await fs.readFile(unitPath, "utf8"), unit);
+    await fs.unlink(unitPath);
     const direct = run("install-importer-service.sh", [], { ...env, PI_HINDSIGHT_IMPORTER_DEPENDENCY: "" });
     assert.equal(direct.status, 0, direct.stderr);
-    const directUnit = await fs.readFile(path.join(home, ".config", "systemd", "user", "pi-hindsight-importer.service"), "utf8");
+    const directUnit = await fs.readFile(unitPath, "utf8");
     assert.match(directUnit, /^Wants=network-online\.target$/m);
     assert.match(directUnit, /^After=network-online\.target$/m);
-  } finally { await fs.rm(home, { recursive: true, force: true }); }
+  } finally {
+    spawnSync("chmod", ["-R", "u+w", home]);
+    await fs.rm(home, { recursive: true, force: true });
+  }
 });
 
 test("macOS backup schedule supports a remote host without local Docker", async () => {
@@ -191,8 +202,9 @@ test("macOS importer service stays staged until explicit activation", async () =
   await fs.writeFile(path.join(configHome, "pi-hindsight-memory", "config.json"), "{}\n", { mode: 0o600 });
   await fs.writeFile(path.join(bin, "uname"), "#!/usr/bin/env bash\necho Darwin\n", { mode: 0o700 });
   await fs.symlink(process.execPath, path.join(bin, "node"));
-  for (const name of ["npm", "plutil"]) await fs.writeFile(path.join(bin, name), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
-  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: stateHome, PATH: `${bin}:${process.env.PATH}` };
+  await fs.writeFile(path.join(bin, "npm"), fakeNpmCi, { mode: 0o700 });
+  await fs.writeFile(path.join(bin, "plutil"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
+  const env = { ...process.env, HOME: home, XDG_DATA_HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: stateHome, PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_NODE: process.execPath };
   try {
     const result = run("install-importer-service.sh", [], env);
     assert.equal(result.status, 0, result.stderr);
@@ -204,10 +216,13 @@ test("macOS importer service stays staged until explicit activation", async () =
     const plist = await fs.readFile(staged, "utf8");
     assert.match(plist, /<string>--config<\/string>/);
     assert.match(plist, new RegExp(path.join(configHome, "pi-hindsight-memory", "config.json").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  } finally { await fs.rm(home, { recursive: true, force: true }); }
+  } finally {
+    spawnSync("chmod", ["-R", "u+w", home]);
+    await fs.rm(home, { recursive: true, force: true });
+  }
 });
 
-test("Pi installer preserves unrelated packages and restores settings on failure", async () => {
+test("Pi installer uses a read-only check and preserves unrelated packages and restores settings on failure", async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-portable-pi-install-"));
   const agent = path.join(home, "agent");
   const bin = path.join(home, "bin");
@@ -217,7 +232,7 @@ test("Pi installer preserves unrelated packages and restores settings on failure
   await fs.mkdir(bin, { recursive: true });
   await fs.writeFile(settings, original, { mode: 0o600 });
   await fs.writeFile(path.join(bin, "npm"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
-  await fs.writeFile(path.join(bin, "node"), "#!/usr/bin/env bash\nif [[ ${1:-} == -e ]]; then echo relative-package; fi\nexit 0\n", { mode: 0o700 });
+  await fs.writeFile(path.join(bin, "node"), "#!/usr/bin/env bash\nif [[ ${1:-} == -e ]]; then echo relative-package; else [[ $* == 'dist/src/importer/cli.js config --check' ]]; fi\n", { mode: 0o700 });
   await fs.writeFile(path.join(bin, "pi"), `#!/usr/bin/env bash
 set -euo pipefail
 case "$1" in

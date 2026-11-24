@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-NODE="${PI_HINDSIGHT_NODE:-$(command -v node || true)}"
-[[ -n "$NODE" ]] || { echo "node is required" >&2; exit 1; }
-NODE=$("$NODE" -p 'require("node:fs").realpathSync(process.execPath)')
-"$NODE" -e 'const [major,minor]=process.versions.node.split(".").map(Number);if(major<22||(major===22&&minor<19))throw new Error("Node.js 22.19 or newer is required")'
-cd "$ROOT"
-npm run build
+# shellcheck source=scripts/lib/importer-runtime.sh
+source "$ROOT/scripts/lib/importer-runtime.sh"
 START=0
-[[ "${1:-}" == "--start" ]] && START=1
-CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/pi-hindsight-memory/config.json"
+case "${1:-}" in
+  --start) [[ $# -eq 1 ]] || exit 1; START=1 ;;
+  '') [[ $# -eq 0 ]] || exit 1 ;;
+  *) echo 'Usage: install-importer-service.sh [--start]' >&2; exit 1 ;;
+esac
+CONFIG_FILE="${PI_HINDSIGHT_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/pi-hindsight-memory/config.json}"
 [[ -r "$CONFIG_FILE" ]] || { echo "Missing $CONFIG_FILE" >&2; exit 1; }
+CONFIG_FILE=$(cd -- "$(dirname -- "$CONFIG_FILE")" && printf '%s/%s\n' "$(pwd -P)" "$(basename -- "$CONFIG_FILE")")
+PLATFORM=$(uname -s)
+if [[ "$PLATFORM" == Darwin ]]; then
+  select_importer_node "$(command -v node || true)"
+else
+  select_importer_node /usr/local/bin/node
+fi
+REVISION=$(git -C "$ROOT" rev-parse --verify HEAD)
+RUNTIME=$(prepare_importer_runtime "$ROOT" "$REVISION" "${XDG_DATA_HOME:-$HOME/.local/share}/pi-hindsight-memory-cutover" "$CONFIG_FILE")
 DEPENDENCY="${PI_HINDSIGHT_IMPORTER_DEPENDENCY-pi-hindsight-stack.service}"
 [[ -z "$DEPENDENCY" || "$DEPENDENCY" =~ ^[A-Za-z0-9@_.:-]+\.service$ ]] || { echo "Invalid PI_HINDSIGHT_IMPORTER_DEPENDENCY" >&2; exit 1; }
 
-if [[ "$(uname -s)" == Darwin ]]; then
+if [[ "$PLATFORM" == Darwin ]]; then
+  xml() { "$NODE" -e 'console.log(process.argv[1].replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"))' "$1"; }
   LABEL=dev.pi-hindsight-memory.importer
   PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
   STAGED_PLIST="${XDG_CONFIG_HOME:-$HOME/.config}/pi-hindsight-memory/$LABEL.plist"
@@ -28,13 +38,13 @@ if [[ "$(uname -s)" == Darwin ]]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$NODE</string><string>$ROOT/dist/src/importer/cli.js</string><string>daemon</string><string>--config</string><string>$CONFIG_FILE</string></array>
-  <key>WorkingDirectory</key><string>$ROOT</string>
+  <key>ProgramArguments</key><array><string>$(xml "$NODE")</string><string>$(xml "$RUNTIME/dist/src/importer/cli.js")</string><string>daemon</string><string>--config</string><string>$(xml "$CONFIG_FILE")</string></array>
+  <key>WorkingDirectory</key><string>$(xml "$RUNTIME")</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
-  <key>StandardOutPath</key><string>$LOG_DIR/importer.log</string>
-  <key>StandardErrorPath</key><string>$LOG_DIR/importer-error.log</string>
+  <key>StandardOutPath</key><string>$(xml "$LOG_DIR/importer.log")</string>
+  <key>StandardErrorPath</key><string>$(xml "$LOG_DIR/importer-error.log")</string>
   <key>Umask</key><integer>63</integer>
 </dict></plist>
 EOF
@@ -46,16 +56,19 @@ EOF
   echo "Installed $TARGET_PLIST"
   [[ "$START" -eq 1 ]] || echo "Staged only; it will not start at login. After Pi activation, run: scripts/install-importer-service.sh --start"
 else
-  UNIT_DIR="$HOME/.config/systemd/user"
+  UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   UNIT="$UNIT_DIR/pi-hindsight-importer.service"
   mkdir -p "$UNIT_DIR"
+  TEMP=$(mktemp "$UNIT_DIR/.importer.XXXXXX")
+  trap 'rm -f -- "$TEMP"' EXIT
+  EXEC_START=$(importer_exec_start "$RUNTIME" "$CONFIG_FILE")
   dependency_wants=""
   dependency_after=""
   if [[ -n "$DEPENDENCY" ]]; then
     dependency_wants=" $DEPENDENCY"
     dependency_after=" $DEPENDENCY"
   fi
-  cat > "$UNIT" <<EOF
+  cat > "$TEMP" <<EOF
 [Unit]
 Description=Global coding-agent session importer for Hindsight
 Wants=network-online.target$dependency_wants
@@ -63,7 +76,7 @@ After=network-online.target$dependency_after
 
 [Service]
 Type=simple
-ExecStart=$NODE $ROOT/dist/src/importer/cli.js daemon --config $CONFIG_FILE
+$EXEC_START
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=300
@@ -75,6 +88,12 @@ Environment=NODE_ENV=production
 [Install]
 WantedBy=default.target
 EOF
+  if [[ -e "$UNIT" || -L "$UNIT" ]]; then
+    cmp -s "$UNIT" "$TEMP" || { echo 'Refusing to replace an existing unit; use scripts/deploy-importer.sh REVISION to change its runtime' >&2; exit 1; }
+  else
+    chmod 644 "$TEMP"
+    ln -- "$TEMP" "$UNIT"
+  fi
   systemctl --user daemon-reload
   [[ "$START" -eq 1 ]] && systemctl --user enable --now pi-hindsight-importer.service
   echo "Installed $UNIT"

@@ -341,16 +341,7 @@ Install this extension:
 scripts/install-pi-extension.sh
 ```
 
-The installer performs one last source scan and refuses to continue unless document accounting, Hindsight operations, consolidation, and bank configuration are ready. It changes no unrelated package entry and restores the previous Pi settings if installation fails.
-
-If the final scan finds a changed session, restore bulk bank mode, process the new work, and repeat finalization:
-
-```bash
-scripts/configure-bank.sh --file deploy/compose/bank-config.json
-scripts/import-all.sh
-scripts/finalize-bank.sh
-scripts/install-pi-extension.sh
-```
+The installer checks the configuration without scanning sources or writing to the importer or Hindsight. It does not require import readiness. It changes no unrelated Pi package entry and restores the previous Pi settings if installation fails.
 
 Install and start continuous processing:
 
@@ -360,7 +351,7 @@ scripts/importer-service.sh status
 scripts/install-backup-schedule.sh
 ```
 
-The service installer records the resolved physical Node executable, not a mutable shell alias or symlink. Set `PI_HINDSIGHT_NODE=/absolute/path/to/node` before installation to select a specific runtime. Reinstall the service deliberately after changing that runtime.
+The service installer runs a built snapshot of the committed Git revision, not the working checkout. It records the resolved Node executable. Linux uses `/usr/local/bin/node` by default; macOS uses Node from `PATH`. Set `PI_HINDSIGHT_NODE=/absolute/path/to/node` to select an executable explicitly. On Linux, use the [rollout procedure](OPERATIONS.md#linux-importer-rollout) to change an installed runtime.
 
 Fully exit and restart each existing Pi process. Do not rely on `/reload` after installing or upgrading the package because a process that started with an older Pi runtime can keep stale extension state. Verify that exactly one active tool is named `memory_search` and that it comes from `pi-hindsight-memory`. The extension checks for that tool-name collision before registration.
 
