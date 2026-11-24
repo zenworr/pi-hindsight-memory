@@ -46,7 +46,7 @@ scripts/importer-service.sh start
 
 `daemon --no-scan` processes only existing queued work and does not discover source sessions, including in continuous mode. Use the normal daemon for scheduled source scanning.
 
-`process-queued` supports continuous-mode auto-consolidation. Unknown remote outcomes stay submitted and are polled before any source reread. Known terminal failures receive a fresh retry identity. Do not edit state rows by hand.
+`process-queued` supports continuous-mode auto-consolidation. Known terminal failures can receive a new operation ID. `retry-failed` does not reset unresolved submissions.
 
 ## Backups
 
@@ -94,7 +94,9 @@ Operations and queue state are durable. After Hindsight returns:
 node dist/src/importer/cli.js process-queued --max-ms 86400000
 ```
 
-The importer polls a known operation before resubmission and reuses caller-owned operation IDs with the original immutable payload. Stop the importer service first if you use the manual command; otherwise the running daemon performs recovery itself.
+Stop the importer service before you use the manual command. Otherwise, the daemon performs recovery. For a retain that may have reached Hindsight, the importer polls the original operation ID. If Hindsight no longer has the operation, the importer accepts a matching remote document hash as proof of completion, except when the prior document already had that hash. A matching hash alone cannot prove that a policy-only rewrite ran.
+
+An invalid receipt, unknown operation status, or missing operation without proof of completion causes an `unresolved-submission` hold. The importer keeps the operation ID and payload and does not send a new retain for that document. To investigate, record the operation ID and compare Hindsight's operation and document records with the generation's expected hash. For a conflicting receipt, also check server records for the ID returned by Hindsight. Keep the document on hold until an operator reviews whether the previous write can still run. Do not edit state rows, reset retry timestamps, or send another retain to clear the hold.
 
 ## Retrieval quality and policy repairs
 

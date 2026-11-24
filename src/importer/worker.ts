@@ -3,11 +3,11 @@ import path from "node:path";
 import { SpanKind } from "@opentelemetry/api";
 import { inSpan, telemetryCount, telemetryQueueWait } from "../common/telemetry.js";
 import { HTTP_STATUS, isRetryableStatus } from "../hindsight/http.js";
-import type { AppConfig, CanonicalSession, CanonicalSessionMetadata, HindsightOperation, ImportApproval, ImportBlockReason, SessionReference } from "../common/types.js";
+import type { AppConfig, CanonicalSession, CanonicalSessionMetadata, ImportApproval, ImportBlockReason, SessionReference } from "../common/types.js";
 import { CANONICAL_SCHEMA, ADAPTER_VERSION, REDACTION_POLICY_VERSION } from "../common/types.js";
 import { createAdapters } from "../adapters/index.js";
 import type { HindsightClient} from "../hindsight/client.js";
-import { HindsightBankPolicyError, HindsightHttpError, HindsightOperationError, HindsightPollTimeoutError } from "../hindsight/client.js";
+import { HindsightBankPolicyError, HindsightHttpError, HindsightOperationError, HindsightOperationNotFoundError, HindsightPollTimeoutError, HindsightUnresolvedOperationError } from "../hindsight/client.js";
 import { errorMessage, Logger } from "../common/logging.js";
 import { assertImportApproval, estimateCostUsd, estimateInputTokens, ImportApprovalError } from "../common/approval.js";
 import { redactText } from "../canonical/redact.js";
@@ -15,7 +15,7 @@ import { Semaphore } from "./scheduler.js";
 import { sleep } from "../common/async.js";
 import { ERROR_MESSAGE_MAX_CHARS, MS_PER_SECOND } from "../common/limits.js";
 import type { GenerationRecord, ImportBlock, SessionStateRecord, StateDatabase } from "./state-db.js";
-import { canPollOperation, TERMINAL_OPERATION_FAILURES } from "./state-db.js";
+import { canPollOperation, TERMINAL_OPERATION_FAILURES, UNRESOLVED_SUBMISSION } from "./state-db.js";
 import { configuredExclusion } from "./exclusions.js";
 import { nextOperationId } from "./queue.js";
 import { removeEvidence } from "./evidence.js";
@@ -103,9 +103,10 @@ export class ImportWorker {
   }
 
   async runOnce(limit = this.config.importer.workBatchSize, signal?: AbortSignal, options: { continuous?: boolean; admission?: Admission } = {}): Promise<WorkerSummary> {
-    const candidates = this.state.listWorkCandidates(limit, this.config.importer.maxAttempts);
+    const maxAttempts = this.config.importer.maxAttempts;
+    const admission = options.admission ?? (limit > 0 && !signal?.aborted && this.state.hasRunnableWork(maxAttempts) ? await this.checkAdmission(signal) : {});
+    const candidates = this.state.listWorkCandidates(limit, maxAttempts, admission.blocked !== undefined);
     const summary: WorkerSummary = { selected: candidates.length, completed: 0, failed: 0, deferred: 0 };
-    const admission = options.admission ?? (candidates.length && !signal?.aborted ? await this.checkAdmission(signal) : {});
     if (admission.blocked) summary.blocked = admission.blocked;
     await Promise.all(candidates.map((generation) => this.limiter.run(async () => {
       if (signal?.aborted) { summary.deferred += 1; return; }
@@ -141,13 +142,39 @@ export class ImportWorker {
     return total;
   }
 
-  private complete(generation: GenerationRecord, operation: HindsightOperation): void {
-    const session = this.state.getSession(generation.source, generation.nativeSessionId)!;
+  private async pollSubmission(generation: GenerationRecord, session: SessionStateRecord, signal: AbortSignal): Promise<"completed"> {
+    let reconciled = false;
+    try {
+      await this.client.waitForOperation(generation.operationId, signal, Math.min(OPERATION_POLL_SLICE_MS, this.config.hindsight.retainWallTimeoutMs), ({ status, progressKey }) => {
+        this.state.recordOperationPoll(generation.operationId, status, progressKey);
+      });
+    } catch (error) {
+      if (!(error instanceof HindsightOperationNotFoundError)) throw error;
+      // An unchanged document does not prove that a policy-only rewrite ran.
+      const remote = session.acknowledgedHash === generation.canonicalHash ? undefined : await this.client.getDocument(session.documentId, signal);
+      if (remote?.id !== session.documentId || remote.content_hash !== generation.canonicalHash) {
+        throw new HindsightUnresolvedOperationError("Hindsight no longer has the operation and the document does not prove that the retain succeeded");
+      }
+      reconciled = true;
+    }
+    const operation = this.state.getOperation(generation.operationId)!;
     this.state.durableTransaction(() => {
-      this.state.upsertOperation({ operationId: generation.operationId, documentId: session.documentId, canonicalHash: generation.canonicalHash, hindsightStatus: "completed", lastPolledAt: new Date().toISOString(), retryCount: Math.max(0, generation.attemptCount - 1), responseSummary: JSON.stringify({ operation_id: generation.operationId, status: operation.status }) });
+      this.state.upsertOperation({ ...operation, hindsightStatus: "completed", responseSummary: JSON.stringify({ reconciled }) });
       this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "completed", { completedAt: new Date().toISOString() });
     });
+    await this.cleanupPayload(generation.operationId);
     this.logger.info("Imported session", { source: generation.source, session: generation.nativeSessionId });
+    return "completed";
+  }
+
+  private holdSubmission(generation: GenerationRecord, session: SessionStateRecord, reason: string): "deferred" {
+    const operation = this.state.getOperation(generation.operationId) ?? { ...generation, documentId: session.documentId, retryCount: 0 };
+    this.state.durableTransaction(() => {
+      this.state.upsertOperation({ ...operation, hindsightStatus: UNRESOLVED_SUBMISSION });
+      this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { error: `${UNRESOLVED_SUBMISSION}: ${reason}` });
+    });
+    this.logger.error("Submission requires review", { source: generation.source, session: generation.nativeSessionId, operation: generation.operationId });
+    return "deferred";
   }
 
   private async cleanupPayload(operationId: string): Promise<void> {
@@ -169,9 +196,11 @@ export class ImportWorker {
   private async processGeneration(generation: GenerationRecord, admission: Admission, shutdownSignal?: AbortSignal): Promise<WorkOutcome> {
     if (generation.state === "failed" && generation.attemptCount >= this.config.importer.maxAttempts) return "deferred";
     let persisted = this.state.getOperation(generation.operationId);
+    if (persisted?.hindsightStatus === UNRESOLVED_SUBMISSION) return "deferred";
     const polling = canPollOperation(persisted);
     const sessionState = this.state.getSession(generation.source, generation.nativeSessionId);
     if (!sessionState) return "deferred";
+    if (!persisted && generation.state === "submitted") return this.holdSubmission(generation, sessionState, "Submitted generation has no local operation record");
     if (!polling) {
       if (admission.blocked) return "deferred";
       let approval: ImportApproval | undefined;
@@ -200,19 +229,7 @@ export class ImportWorker {
         generation = { ...generation, operationId: nextOperationId(this.state, this.config.hindsight.bankId, sessionState.documentId, generation.canonicalHash, generation.operationId), submittedAt: undefined, completedAt: undefined };
         persisted = undefined;
       }
-      // A submitted payload belongs to the operation, not to the source file's current contents.
-      if (polling) {
-        try {
-          const operation = await this.client.waitForOperation(generation.operationId, operationSignal, Math.min(OPERATION_POLL_SLICE_MS, this.config.hindsight.retainWallTimeoutMs));
-          this.complete(generation, operation);
-          await this.cleanupPayload(generation.operationId);
-          return "completed";
-        } catch (error) {
-          if (!(error instanceof HindsightHttpError) || error.status !== HTTP_STATUS.NOT_FOUND) throw error;
-        }
-        if (admission.blocked) return "deferred";
-        await this.localApproval();
-      }
+      if (polling) return await this.pollSubmission(generation, sessionState, operationSignal);
       if (persisted) session = await loadPendingPayload(this.config.spoolDirectory, generation.operationId, generation.canonicalHash);
       const origin = sessionState.sourceOrigin ?? this.config.localOrigin;
       const adapter = createAdapters(this.config, origin).find((item) => item.source === generation.source);
@@ -284,18 +301,17 @@ export class ImportWorker {
         }
         this.state.durableTransaction(() => { this.state.upsertOperation({ ...persisted!, hindsightStatus: "ready" }); });
       }
+      operationSignal.throwIfAborted();
+      const submittedAt = new Date().toISOString();
       this.state.durableTransaction(() => {
-        this.state.upsertOperation({ ...persisted!, hindsightStatus: "submitting", submittedAt: new Date().toISOString() });
-        this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { submittedAt: new Date().toISOString() });
+        this.state.upsertOperation({ ...persisted!, hindsightStatus: "submitting", submittedAt });
+        this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "submitted", { submittedAt });
       });
-      const response = await inSpan("hindsight.retain.submit", { source: generation.source, "hindsight.canonical.bytes": session.canonicalBytes, "hindsight.canonical.turns": session.canonicalTurns }, () => this.client.retainWithOperationId(session!, generation.operationId, operationSignal));
-      if (response.operation_id && response.operation_id !== generation.operationId) throw new Error("Hindsight did not honor the requested operation identifier");
-      this.state.upsertOperation({ ...persisted, hindsightStatus: "pending", submittedAt: new Date().toISOString() });
-      const operation = await this.client.waitForOperation(generation.operationId, operationSignal, Math.min(OPERATION_POLL_SLICE_MS, this.config.hindsight.retainWallTimeoutMs));
-      this.complete(generation, operation);
-      await this.cleanupPayload(generation.operationId);
-      return "completed";
+      await inSpan("hindsight.retain.submit", { source: generation.source, "hindsight.canonical.bytes": session.canonicalBytes, "hindsight.canonical.turns": session.canonicalTurns }, () => this.client.retainWithOperationId(session!, generation.operationId, operationSignal));
+      this.state.upsertOperation({ ...persisted, hindsightStatus: "pending" });
+      return await this.pollSubmission(generation, sessionState, operationSignal);
     } catch (error) {
+      if (error instanceof HindsightUnresolvedOperationError) return this.holdSubmission(generation, sessionState, error.message);
       if (shutdownSignal?.aborted) {
         this.logger.info("Session import interrupted by shutdown", { source: generation.source, session: generation.nativeSessionId });
         return "deferred";
@@ -319,7 +335,7 @@ export class ImportWorker {
         return "deferred";
       }
       this.state.durableTransaction(() => {
-        if (operation) this.state.upsertOperation({ ...operation, hindsightStatus: error instanceof HindsightOperationError ? error.status : "rejected", lastPolledAt: new Date().toISOString() });
+        if (operation) this.state.upsertOperation({ ...operation, hindsightStatus: error instanceof HindsightOperationError ? error.status : "rejected" });
         this.state.setGenerationState(generation.source, generation.nativeSessionId, generation.canonicalHash, "failed", { error: message });
       });
       this.logger.error("Session import failed", { source: generation.source, session: generation.nativeSessionId, error: message });

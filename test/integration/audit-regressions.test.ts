@@ -10,7 +10,8 @@ import { scan } from "../../src/importer/scanner.js";
 import { ImportWorker } from "../../src/importer/worker.js";
 import { verifyFullImport } from "../../src/importer/verify.js";
 import { runImportCycle } from "../../src/importer/daemon.js";
-import { HindsightHttpError, HindsightOperationError } from "../../src/hindsight/client.js";
+import { HindsightOperationError, HindsightOperationNotFoundError } from "../../src/hindsight/client.js";
+import { savePendingPayload } from "../../src/importer/pending-payload.js";
 import { buildRepairPlan, repairHistory } from "../../src/importer/repair.js";
 
 const header = { type: "session", version: 3, id: "audit-session", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/synthetic" };
@@ -167,36 +168,28 @@ test("idle verification distinguishes failed updates from document mismatches", 
   } finally { await f.close(); }
 });
 
-test("an uncertain submission retries its immutable payload after the source changes", async () => {
+test("an unresolved retain holds newer generations of the same document", async () => {
   const f = await fixture();
   try {
     await scan(f.config, f.state, { source: "pi" });
     const original = f.state.listGenerations()[0]!;
-    const bodies: string[] = [];
     const ids: string[] = [];
-    let lost = false;
     const client: any = {
       ensureBank: async () => undefined, assertBankConfiguration: async () => ({}), assertExtractionAvailable: async () => undefined,
-      retainWithOperationId: async (session: any, id: string) => {
-        bodies.push(await session.readContent()); ids.push(id);
-        if (!lost) { lost = true; throw new Error("lost response"); }
-        return { operation_id: id };
-      },
-      waitForOperation: async () => {
-        if (bodies.length === 1) throw new HindsightHttpError(404, "GET", "http://test/operation", "");
-        return { status: "completed" };
-      },
+      retainWithOperationId: async (_session: unknown, id: string) => { ids.push(id); throw new Error("lost response"); },
+      waitForOperation: async (id: string) => { throw new HindsightOperationNotFoundError(id); },
+      getDocument: async () => undefined,
     };
     assert.equal((await new ImportWorker(f.config, f.state, client).runOnce(1)).deferred, 1);
     await fs.writeFile(f.file, beta);
     await scan(f.config, f.state, { source: "pi" });
-    await new ImportWorker(f.config, f.state, client).runOnce(1);
-    assert.equal(ids[0], original.operationId);
-    assert.equal(ids[1], original.operationId);
-    assert.equal(bodies[0], bodies[1]);
-    await new ImportWorker(f.config, f.state, client).runOnce(1);
-    assert.notEqual(ids[2], original.operationId);
-    assert.match(bodies[2]!, /Correction: use beta/);
+    const worker = new ImportWorker(f.config, f.state, client);
+    await worker.runOnce(1);
+    assert.equal(f.state.unresolvedOperationCount(), 1);
+    assert.equal(f.state.resetFailed(), 0);
+    assert.equal((await worker.runOnce(1)).selected, 0);
+    assert.deepEqual(ids, [original.operationId]);
+    assert.deepEqual(f.state.listGenerations().map((g) => g.state), ["submitted", "queued"]);
   } finally { await f.close(); }
 });
 
@@ -228,7 +221,7 @@ test("reviewed repair resumes after deletion without deleting a submitted replac
       getDocument: async () => remoteHash ? { id: "agent-session:pi:audit-session", content_hash: remoteHash } : undefined,
       deleteDocument: async () => { deletions += 1; remoteHash = undefined; controller.abort(); },
       retainWithOperationId: async (session: any, id: string, signal?: AbortSignal) => { signal?.throwIfAborted(); remoteHash = session.canonicalHash; completed.add(id); return { operation_id: id }; },
-      waitForOperation: async (id: string) => { if (!completed.has(id)) throw new HindsightHttpError(404, "GET", "http://test/operation", ""); return { status: "completed" }; },
+      waitForOperation: async (id: string) => { if (!completed.has(id)) throw new HindsightOperationNotFoundError(id); return { status: "completed" }; },
     };
     await scan(f.config, f.state, { source: "pi" });
     await new ImportWorker(f.config, f.state, client).runOnce(1);
@@ -257,14 +250,19 @@ test("a cached payload cannot bypass a new configured exclusion", async () => {
     f.config.sessionExclusions.exactLabels = ["private-session"];
     let submissions = 0;
     const client: any = { ensureBank: async () => undefined, assertBankConfiguration: async () => ({}), assertExtractionAvailable: async () => undefined,
-      retainWithOperationId: async () => { submissions += 1; throw new Error("lost response"); },
-      waitForOperation: async () => { throw new HindsightHttpError(404, "GET", "http://test/operation", ""); },
+      retainWithOperationId: async () => { submissions += 1; throw new Error("Unexpected retain"); },
     };
     await scan(f.config, f.state, { source: "pi" });
-    await new ImportWorker(f.config, f.state, client).runOnce(1);
+    const generation = f.state.listGenerations()[0]!;
+    const adapter = new PiAdapter(f.config.sourceRoots.pi);
+    const reference = (await adapter.discover()[Symbol.asyncIterator]().next()).value!;
+    const canonical = await adapter.load(reference, { spoolDirectory: f.config.spoolDirectory, maxCanonicalBytes: f.config.maxCanonicalBytes });
+    try { await savePendingPayload(f.config.spoolDirectory, generation.operationId, canonical); }
+    finally { await canonical.cleanup(); }
+    f.state.upsertOperation({ ...generation, documentId: canonical.documentId, hindsightStatus: "prepared", retryCount: 0 });
     await fs.appendFile(f.file, lines([{ type: "session_info", name: "private-session" }]));
     await new ImportWorker(f.config, f.state, client).runOnce(1);
-    assert.equal(submissions, 1);
+    assert.equal(submissions, 0);
     assert.equal(f.state.getSession("pi", "audit-session")?.status, "excluded_configured");
     assert.equal(f.state.getLatestGeneration("pi", "audit-session")?.state, "cleanup_pending");
   } finally { await f.close(); }

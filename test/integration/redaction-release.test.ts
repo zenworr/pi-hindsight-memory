@@ -154,7 +154,8 @@ test("stale pending payloads stay unresolved without submission, while already c
   for (const id of ["prepared", "lost", "failed"]) {
     const generation = state.getLatestGeneration("pi", id)!;
     assert.equal(generation.state, "submitted");
-    assert.equal(generation.error, STALE_REDACTION_PAYLOAD);
+    if (id === "lost") assert.match(generation.error!, /^unresolved-submission:/);
+    else assert.equal(generation.error, STALE_REDACTION_PAYLOAD);
     await fs.access(path.join(config.spoolDirectory, "pending", `${generation.operationId}.jsonl`));
   }
   assert.equal(importerHealth(config, state.db).uncertain, 3);
@@ -164,5 +165,5 @@ test("stale pending payloads stay unresolved without submission, while already c
   assert.equal(state.hasRunnableWork(config.importer.maxAttempts), false);
   assert.equal((await worker.runOnce()).selected, 0);
   await assert.rejects(() => worker.drain(), /unresolved generations/);
-  assert.deepEqual(requests.sort(), [`GET ${completedId}`, `GET ${missingId}`].sort());
+  assert.deepEqual(requests.sort(), [`GET ${completedId}`, `GET ${missingId}`, "GET agent-session%3Api%3Alost"].sort());
 });

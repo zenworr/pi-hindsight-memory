@@ -1,0 +1,221 @@
+import test from "node:test";
+import type { TestContext } from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import http from "node:http";
+import { once } from "node:events";
+import { defaultConfig } from "../../src/common/config.js";
+import { HindsightClient } from "../../src/hindsight/client.js";
+import { scan } from "../../src/importer/scanner.js";
+import { StateDatabase, UNRESOLVED_SUBMISSION } from "../../src/importer/state-db.js";
+import { ImportWorker } from "../../src/importer/worker.js";
+
+async function fixture(t: TestContext) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-receipts-"));
+  const config = defaultConfig(root);
+  config.requireImportApproval = false;
+  config.sessionSettleSeconds = 0;
+  config.hindsight.operationPollMs = 10;
+  await fs.mkdir(config.sourceRoots.pi, { recursive: true });
+  const transcript = await fs.readFile(path.resolve("test/fixtures/pi/session.jsonl"), "utf8");
+  let state = new StateDatabase(config.stateDatabase);
+  const add = async (id: string) => {
+    await fs.writeFile(path.join(config.sourceRoots.pi, `${id}.jsonl`), transcript.replaceAll("pi-fixture-001", id));
+    await scan(config, state, { source: "pi" });
+    return state.getLatestGeneration("pi", id)!;
+  };
+  const calls: string[] = [];
+  const posts: string[] = [];
+  const remote = {
+    receipt: (id: string): unknown => ({ operation_id: id }),
+    poll: (_id: string, res: http.ServerResponse) => { reply(res, 200, { status: "completed" }); },
+    hash: undefined as string | undefined,
+    loseReceipt: false,
+  };
+  const bank = `/v1/default/banks/${config.hindsight.bankId}`;
+  const server = http.createServer((req, res) => {
+    const route = decodeURIComponent(req.url!.slice(bank.length));
+    calls.push(`${req.method} ${route}`);
+    if (req.method === "POST" && route === "/memories") {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => { chunks.push(chunk); });
+      req.on("end", () => {
+        const id: string = JSON.parse(Buffer.concat(chunks).toString()).operation_id;
+        posts.push(id);
+        if (remote.loseReceipt) res.destroy();
+        else reply(res, 202, remote.receipt(id));
+      });
+    } else if (route.startsWith("/operations/")) remote.poll(route.split("/").at(-1)!, res);
+    else if (route.startsWith("/documents/") && remote.hash) reply(res, 200, { id: route.slice("/documents/".length), content_hash: remote.hash });
+    else reply(res, 404, {});
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  config.hindsight.apiUrl = `http://127.0.0.1:${address.port}`;
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => { server.close(() => { resolve(); }); });
+    state.close();
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  return {
+    add, config, calls, posts, remote,
+    get state() { return state; },
+    restart() { state.close(); state = new StateDatabase(config.stateDatabase); },
+    run(limit = 1, signal?: AbortSignal, repair = false) {
+      return new ImportWorker(config, state, new HindsightClient(config.hindsight, undefined, "fixture-token"), undefined, false, repair).runOnce(limit, signal, { admission: {} });
+    },
+  };
+}
+
+function reply(res: http.ServerResponse, status: number, body: unknown) {
+  res.writeHead(status, { "Content-Type": "application/json" }).end(JSON.stringify(body));
+}
+
+for (const receipt of ["absent", "conflicting"] as const) test(`a ${receipt} receipt ID holds the submission without polling or retrying`, async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("receipt");
+  f.remote.receipt = () => receipt === "absent" ? {} : { operation_id: "unrelated-id" };
+  assert.equal((await f.run()).deferred, 1);
+  f.restart();
+  assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, UNRESOLVED_SUBMISSION);
+  assert.equal(f.state.unresolvedOperationCount(), 1);
+  assert.equal(f.state.hasRunnableWork(f.config.importer.maxAttempts), false);
+  assert.equal((await f.run()).selected, 0);
+  assert.deepEqual(f.calls, ["POST /memories"]);
+  assert.deepEqual(f.posts, [g.operationId]);
+});
+
+test("a submitted generation missing its operation journal does not send a retain", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("missing-journal");
+  f.state.upsertGeneration({ ...g, state: "submitted", submittedAt: new Date().toISOString(), attemptCount: 1 });
+  assert.equal((await f.run()).deferred, 1);
+  assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, UNRESOLVED_SUBMISSION);
+  assert.deepEqual(f.calls, []);
+});
+
+test("a lost POST receipt polls the original ID after restart without replaying POST", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("lost-receipt");
+  f.remote.loseReceipt = true;
+  assert.ok(f.config.hindsight.httpMaxAttempts > 1);
+  assert.equal((await f.run()).deferred, 1);
+  const submitted = f.state.getOperation(g.operationId)!;
+  assert.equal(submitted.hindsightStatus, "submitting");
+  assert.ok(submitted.submittedAt);
+  f.restart();
+  assert.equal((await f.run()).completed, 1);
+  assert.deepEqual(f.calls, ["POST /memories", `GET /operations/${g.operationId}`]);
+  assert.equal(f.state.getOperation(g.operationId)?.submittedAt, submitted.submittedAt);
+  assert.equal(f.state.getOperation(g.operationId)?.lastObservedStatus, "completed");
+});
+
+for (const [outcome, status] of [["matching hash", 200], ["mismatching hash", 200], ["no document", 404]] as const) test(`operation ${status} not_found with ${outcome} never replays`, async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("expired");
+  const match = outcome === "matching hash";
+  f.remote.poll = (id, res) => { reply(res, status, { operation_id: id, status: "not_found" }); };
+  f.remote.hash = match ? g.canonicalHash : outcome === "mismatching hash" ? "different" : undefined;
+  assert.equal((await f.run()).completed, Number(match));
+  f.restart();
+  assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, match ? "completed" : UNRESOLVED_SUBMISSION);
+  assert.equal(f.state.getOperation(g.operationId)?.lastObservedStatus, "not_found");
+  assert.equal(f.state.getSession("pi", "expired")?.acknowledgedHash, match ? g.canonicalHash : undefined);
+  assert.equal((await f.run()).selected, 0);
+  assert.deepEqual(f.posts, [g.operationId]);
+});
+
+for (const status of ["prepared", "ready"] as const) test(`a ${status} operation can submit even if its ID is absent remotely`, async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("prepared-local");
+  const documentId = f.state.getSession("pi", "prepared-local")!.documentId;
+  f.state.upsertOperation({ ...g, documentId, hindsightStatus: status, retryCount: 0 });
+  f.remote.poll = (id, res) => { if (f.posts.includes(id)) reply(res, 200, { status: "completed" }); else reply(res, 404, {}); };
+  const client = new HindsightClient(f.config.hindsight, undefined, "fixture-token");
+  await assert.rejects(() => client.getOperation(g.operationId), { status: 404 });
+  assert.equal((await f.run()).completed, 1);
+  assert.deepEqual(f.calls.slice(1), ["POST /memories", `GET /operations/${g.operationId}`]);
+  assert.deepEqual(f.posts, [g.operationId]);
+});
+
+test("an expired same-hash policy rewrite still needs review", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("policy-only");
+  f.state.acknowledgeGeneration({ ...g, retainPolicyVersion: "1" });
+  const session = f.state.getSession("pi", "policy-only")!;
+  assert.equal(session.acknowledgedHash, g.canonicalHash);
+  f.state.upsertGeneration({ ...g, repair: true, state: "submitted", attemptCount: 1 });
+  f.state.upsertOperation({ ...g, documentId: session.documentId, hindsightStatus: "pending", retryCount: 0 });
+  f.remote.hash = g.canonicalHash;
+  f.remote.poll = (_id, res) => { reply(res, 200, { status: "not_found" }); };
+  assert.equal((await f.run(1, undefined, true)).completed, 0);
+  assert.equal(f.state.getSession("pi", "policy-only")?.acknowledgedPolicy, "1");
+  assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, UNRESOLVED_SUBMISSION);
+  assert.deepEqual(f.posts, []);
+});
+
+test("an unknown operation status stops polling and quarantines the submission", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("unknown-status");
+  f.remote.poll = (_id, res) => { reply(res, 200, { status: "new-status" }); };
+  assert.equal((await f.run()).deferred, 1);
+  assert.equal(f.state.getOperation(g.operationId)?.lastObservedStatus, "unknown");
+  assert.equal(f.state.getOperation(g.operationId)?.hindsightStatus, UNRESOLVED_SUBMISSION);
+  assert.equal((await f.run()).selected, 0);
+  assert.deepEqual(f.calls, ["POST /memories", `GET /operations/${g.operationId}`]);
+});
+
+test("a delayed child persists poll time separately from progress across shutdown and restart", async (t) => {
+  const f = await fixture(t);
+  const g = await f.add("delayed-child");
+  const pollThenStop = async (retryAt: string, childStatus: string) => {
+    const controller = new AbortController();
+    let observed = false;
+    f.remote.poll = (id, res) => {
+      if (observed) { controller.abort(); return; }
+      observed = true;
+      reply(res, 200, { operation_id: id, status: "pending", operation_type: "batch_retain", child_operations: [{ status: childStatus, next_retry_at: retryAt }] });
+    };
+    assert.equal((await f.run(1, controller.signal)).deferred, 1);
+    f.restart();
+    return f.state.getOperation(g.operationId)!;
+  };
+  const first = await pollThenStop("2099-10-22T06:13:12Z", "pending");
+  assert.ok(first.submittedAt && first.lastPolledAt && first.lastProgressAt);
+  assert.equal(first.lastObservedStatus, "pending");
+  assert.deepEqual(f.state.listActiveOperations(), [first]);
+  assert.equal(f.state.getLatestGeneration("pi", "delayed-child")?.state, "submitted");
+  const again = await pollThenStop("2099-10-23T06:13:12Z", "pending");
+  assert.ok(again.lastPolledAt! > first.lastPolledAt);
+  assert.equal(again.lastProgressAt, first.lastProgressAt);
+  assert.equal(again.submittedAt, first.submittedAt);
+  const advanced = await pollThenStop("2099-10-23T06:13:12Z", "processing");
+  assert.ok(advanced.lastProgressAt! > again.lastProgressAt);
+  assert.deepEqual(f.posts, [g.operationId]);
+});
+
+test("stalled polls leave batch space for unrelated queued documents", async (t) => {
+  const f = await fixture(t);
+  const first = await f.add("stalled-first");
+  const second = await f.add("stalled-second");
+  const queued = await f.add("unrelated");
+  for (const g of [first, second]) {
+    const submittedAt = "2020-01-01T00:00:00.000Z";
+    f.state.upsertGeneration({ ...g, state: "submitted", submittedAt, attemptCount: 1 });
+    f.state.upsertOperation({ ...g, documentId: f.state.getSession("pi", g.nativeSessionId)!.documentId, hindsightStatus: "pending", submittedAt, retryCount: 0 });
+  }
+  const stalled = new Set([first.operationId, second.operationId]);
+  const pollIds = f.state.listWorkCandidates(2, f.config.importer.maxAttempts).map((g) => g.operationId);
+  assert.equal(pollIds[0], queued.operationId);
+  assert.equal(stalled.has(pollIds[1]!), true);
+  assert.equal(stalled.has(f.state.listWorkCandidates(1, f.config.importer.maxAttempts, true)[0]!.operationId), true);
+  f.remote.poll = (id, res) => { reply(res, 200, { status: stalled.has(id) ? "pending" : "completed" }); };
+  assert.equal((await f.run(1)).completed, 1);
+  assert.deepEqual(f.posts, [queued.operationId]);
+  assert.equal(f.state.listWorkCandidates(2, f.config.importer.maxAttempts).length, 2);
+});

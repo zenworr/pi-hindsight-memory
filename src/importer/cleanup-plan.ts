@@ -8,7 +8,7 @@ import { HTTP_STATUS } from "../hindsight/http.js";
 import { configuredExclusion, normalizeSessionLabel } from "./exclusions.js";
 import { effectiveReference, ownsLocator, selectSourceOwners, sourceRoot } from "./scanner.js";
 import type { Discovered } from "./scanner.js";
-import { StateDatabase } from "./state-db.js";
+import { StateDatabase, UNRESOLVED_SUBMISSION } from "./state-db.js";
 import type { CleanupJobRecord, GenerationRecord, SessionStateRecord } from "./state-db.js";
 
 interface CleanupGeneration {
@@ -148,6 +148,7 @@ async function buildTarget(config: AppConfig, state: StateDatabase, client: Hind
       continue;
     }
     if (stored.documentId !== documentId || version && stored.canonicalHash !== version.canonicalHash) return "conflicting-operation";
+    if (stored.hindsightStatus === UNRESOLVED_SUBMISSION) return "unresolved-operation";
     const status = await operationStatus(client, operationId, stored.hindsightStatus);
     const knownLocalOnly = status === stored.hindsightStatus && LOCAL_ONLY.has(status) && (status === "rejected" || !stored.submittedAt && !version?.submittedAt);
     if (!TERMINAL.has(status) && !knownLocalOnly) return "unresolved-operation";

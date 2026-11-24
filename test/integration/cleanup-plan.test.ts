@@ -206,6 +206,16 @@ test("cleanup plans only settled operations and binds the observed result", asyn
   assert.equal(f.state.listCleanupJobs().length, 0);
 });
 
+test("cleanup cannot resolve a held submission by polling the requested ID", async (t) => {
+  const f = await fixture(t);
+  const { documentId, canonicalHash, operationId } = f.seed("child", await f.write("child", "subagent"));
+  f.state.upsertOperation({ documentId, canonicalHash, operationId, hindsightStatus: "unresolved-submission", retryCount: 0 });
+  f.operations.set(operationId, "completed");
+  const plan = await buildCleanupPlan(f.config, f.client);
+  assert.equal(plan.jobs.length, 0);
+  assert.equal(plan.blocked[0]?.reason, "unresolved-operation");
+});
+
 test("cleanup rejects a conflicting persisted job", async (t) => {
   const f = await fixture(t);
   const { documentId, canonicalHash, operationId } = f.seed("child", await f.write("child", "subagent"));

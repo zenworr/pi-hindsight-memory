@@ -9,10 +9,16 @@ import { STALE_REDACTION_PAYLOAD } from "./pending-payload.js";
 
 const SOURCE_ERROR_MAX_CHARS = 2_000;
 export const TERMINAL_OPERATION_FAILURES = ["failed", "cancelled", "error", "rejected"];
-const NON_POLLABLE_OPERATIONS = ["prepared", "ready", ...TERMINAL_OPERATION_FAILURES];
+export const UNRESOLVED_SUBMISSION = "unresolved-submission";
+const NON_POLLABLE_OPERATIONS = ["prepared", "ready", "completed", "not_submitted", UNRESOLVED_SUBMISSION, ...TERMINAL_OPERATION_FAILURES];
+const POLLABLE_OPERATION_SQL = `o.operation_id IS NOT NULL AND COALESCE(o.hindsight_status,'') NOT IN (${NON_POLLABLE_OPERATIONS.map(() => "?").join(",")})`;
+const OPERATION_STALL_MS = 60_000;
 const RUNNABLE_GENERATIONS = `(state IN ('queued','submitted','processing') OR state='failed' AND attempt_count<?)
-  AND NOT EXISTS (SELECT 1 FROM generations AS held
-    WHERE held.source=generations.source AND held.native_session_id=generations.native_session_id AND held.state='submitted' AND held.error=?)`;
+  AND NOT EXISTS (SELECT 1 FROM generations AS held LEFT JOIN operations AS held_op ON held_op.operation_id=held.operation_id
+    WHERE held.source=generations.source AND held.native_session_id=generations.native_session_id
+      AND (held_op.hindsight_status=?
+        OR held.state='submitted' AND held.error=?
+        OR held.state IN ('submitted','processing') AND held.operation_id<>generations.operation_id AND generations.state IN ('queued','failed')))`;
 
 export interface SessionStateRecord {
   source: Source;
@@ -99,6 +105,8 @@ export interface OperationRecord {
   hindsightStatus?: string;
   submittedAt?: string;
   lastPolledAt?: string;
+  lastObservedStatus?: string;
+  lastProgressAt?: string;
   retryCount: number;
   responseSummary?: string;
 }
@@ -330,6 +338,16 @@ export class StateDatabase {
       this.transaction(() => {
         this.db.exec("ALTER TABLE daemon_status ADD COLUMN blocked_json TEXT");
         this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (7,?)").run(new Date().toISOString());
+      });
+    }
+    if (!this.db.prepare("SELECT version FROM schema_migrations WHERE version=8").get()) {
+      this.transaction(() => {
+        this.db.exec(`
+          ALTER TABLE operations ADD COLUMN last_observed_status TEXT;
+          ALTER TABLE operations ADD COLUMN last_progress_at TEXT;
+          ALTER TABLE operations ADD COLUMN last_progress_key TEXT;
+        `);
+        this.db.prepare("INSERT INTO schema_migrations(version,applied_at) VALUES (8,?)").run(new Date().toISOString());
       });
     }
   }
@@ -717,7 +735,7 @@ export class StateDatabase {
   claimGeneration(generation: GenerationRecord): boolean {
     return this.transaction(() => {
       const current = this.db.prepare("SELECT * FROM generations WHERE source=? AND native_session_id=? AND canonical_hash=?").get(generation.source, generation.nativeSessionId, generation.canonicalHash) as Record<string, unknown> | undefined;
-      if (!current) return false;
+      if (!current || this.getOperation(String(current.operation_id))?.hindsightStatus === UNRESOLVED_SUBMISSION) return false;
       const currentState = String(current.state) as GenerationState;
       if (!["queued", "failed", "submitted", "processing"].includes(currentState)) return false;
       const session = this.db.prepare("SELECT classification,status FROM sessions WHERE source=? AND native_session_id=?").get(generation.source, generation.nativeSessionId) as Record<string, unknown> | undefined;
@@ -746,17 +764,25 @@ export class StateDatabase {
     return row ? this.toGeneration(row) : undefined;
   }
 
-  listWorkCandidates(limit: number, maxAttempts: number): GenerationRecord[] {
-    const rows = this.db.prepare(`SELECT * FROM generations WHERE ${RUNNABLE_GENERATIONS}
-      ORDER BY CASE
-        WHEN EXISTS (SELECT 1 FROM operations o WHERE o.operation_id=generations.operation_id AND COALESCE(o.hindsight_status,'') NOT IN (${NON_POLLABLE_OPERATIONS.map(() => "?").join(",")})) THEN 0
-        WHEN state IN ('submitted','processing') THEN 1 WHEN state='queued' THEN 2 ELSE 3 END, queued_at
-      LIMIT ?`).all(maxAttempts, STALE_REDACTION_PAYLOAD, ...NON_POLLABLE_OPERATIONS, limit) as Record<string, unknown>[];
+  listWorkCandidates(limit: number, maxAttempts: number, pollOnly = false): GenerationRecord[] {
+    const stalledBefore = new Date(Date.now() - OPERATION_STALL_MS).toISOString();
+    // Alternate lanes so stalled polls cannot use the slots needed by unrelated generations.
+    const rows = this.db.prepare(`WITH candidates AS (
+      SELECT generations.*, (${POLLABLE_OPERATION_SQL}) AS polling, o.last_polled_at,
+        COALESCE(o.last_progress_at,o.submitted_at,generations.submitted_at,queued_at) AS progress_at
+      FROM generations LEFT JOIN operations o USING (operation_id) WHERE ${RUNNABLE_GENERATIONS}
+    ), lanes AS (
+      SELECT *, polling AND progress_at < ? AS stalled FROM candidates WHERE NOT ? OR polling
+    ), ranked AS (
+      SELECT *, ROW_NUMBER() OVER (PARTITION BY stalled ORDER BY
+        CASE WHEN polling THEN 0 WHEN state IN ('submitted','processing') THEN 1 WHEN state='queued' THEN 2 ELSE 3 END,
+        CASE WHEN stalled THEN COALESCE(last_polled_at,progress_at) END, queued_at, operation_id) AS lane_position FROM lanes
+    ) SELECT * FROM ranked ORDER BY lane_position, stalled LIMIT ?`).all(...NON_POLLABLE_OPERATIONS, maxAttempts, UNRESOLVED_SUBMISSION, STALE_REDACTION_PAYLOAD, stalledBefore, Number(pollOnly), limit) as Record<string, unknown>[];
     return rows.map((row) => this.toGeneration(row));
   }
 
   hasRunnableWork(maxAttempts: number): boolean {
-    return Boolean(this.db.prepare(`SELECT 1 FROM generations WHERE ${RUNNABLE_GENERATIONS} LIMIT 1`).get(maxAttempts, STALE_REDACTION_PAYLOAD));
+    return Boolean(this.db.prepare(`SELECT 1 FROM generations WHERE ${RUNNABLE_GENERATIONS} LIMIT 1`).get(maxAttempts, UNRESOLVED_SUBMISSION, STALE_REDACTION_PAYLOAD));
   }
 
   hasActiveOperations(): boolean {
@@ -822,7 +848,7 @@ export class StateDatabase {
   upsertOperation(record: OperationRecord): void {
     this.db.prepare(`INSERT INTO operations(operation_id,document_id,canonical_hash,hindsight_status,submitted_at,last_polled_at,retry_count,response_summary)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(operation_id) DO UPDATE SET hindsight_status=excluded.hindsight_status, submitted_at=COALESCE(excluded.submitted_at,operations.submitted_at), last_polled_at=COALESCE(excluded.last_polled_at,operations.last_polled_at), retry_count=excluded.retry_count, response_summary=excluded.response_summary`).run(
+      ON CONFLICT(operation_id) DO UPDATE SET hindsight_status=excluded.hindsight_status, submitted_at=COALESCE(operations.submitted_at,excluded.submitted_at), last_polled_at=COALESCE(excluded.last_polled_at,operations.last_polled_at), retry_count=excluded.retry_count, response_summary=excluded.response_summary`).run(
       record.operationId, record.documentId, record.canonicalHash, record.hindsightStatus ?? null, record.submittedAt ?? null, record.lastPolledAt ?? null, record.retryCount, record.responseSummary ?? null,
     );
   }
@@ -830,7 +856,28 @@ export class StateDatabase {
   getOperation(operationId: string): OperationRecord | undefined {
     const row = this.db.prepare("SELECT * FROM operations WHERE operation_id=?").get(operationId) as Record<string, unknown> | undefined;
     if (!row) return undefined;
-    return { operationId: String(row.operation_id), documentId: String(row.document_id), canonicalHash: String(row.canonical_hash), hindsightStatus: nullableString(row.hindsight_status), submittedAt: nullableString(row.submitted_at), lastPolledAt: nullableString(row.last_polled_at), retryCount: Number(row.retry_count), responseSummary: nullableString(row.response_summary) };
+    return this.toOperation(row);
+  }
+
+  private toOperation(row: Record<string, unknown>): OperationRecord {
+    return { operationId: String(row.operation_id), documentId: String(row.document_id), canonicalHash: String(row.canonical_hash), hindsightStatus: nullableString(row.hindsight_status), submittedAt: nullableString(row.submitted_at), lastPolledAt: nullableString(row.last_polled_at), lastObservedStatus: nullableString(row.last_observed_status), lastProgressAt: nullableString(row.last_progress_at), retryCount: Number(row.retry_count), responseSummary: nullableString(row.response_summary) };
+  }
+
+  recordOperationPoll(operationId: string, status: string, progressKey?: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare(`UPDATE operations SET last_polled_at=?1, last_observed_status=?2,
+      last_progress_at=CASE WHEN ?3 IS NOT NULL AND last_progress_key IS NOT ?3 THEN ?1 ELSE last_progress_at END,
+      last_progress_key=COALESCE(?3,last_progress_key) WHERE operation_id=?4`).run({ "?1": now, "?2": status, "?3": progressKey ?? null, "?4": operationId });
+  }
+
+  listActiveOperations(): OperationRecord[] {
+    const rows = this.db.prepare("SELECT o.* FROM operations o JOIN generations g USING (operation_id) WHERE g.state IN ('submitted','processing') OR o.hindsight_status=?").all(UNRESOLVED_SUBMISSION) as Record<string, unknown>[];
+    return rows.map((row) => this.toOperation(row));
+  }
+
+  unresolvedOperationCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM operations o JOIN generations g USING (operation_id) WHERE o.hindsight_status=?").get(UNRESOLVED_SUBMISSION) as { count: number };
+    return row.count;
   }
 
   counts(): Record<string, number> {

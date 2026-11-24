@@ -41,6 +41,34 @@ export class HindsightOperationError extends Error {
 
 export class HindsightPollTimeoutError extends Error {}
 
+export class HindsightOperationNotFoundError extends Error {
+  constructor(operationId: string) { super(`Hindsight operation ${operationId} was not found`); }
+}
+
+export class HindsightUnresolvedOperationError extends Error {}
+
+class HindsightJsonError extends Error {}
+
+const KNOWN_OPERATION_STATUSES = ["pending", "processing", "completed", "failed", "cancelled"] as const;
+type KnownOperationStatus = typeof KNOWN_OPERATION_STATUSES[number];
+type OperationPollStatus = KnownOperationStatus | "not_found" | "unknown";
+export interface OperationPoll { status: OperationPollStatus; progressKey?: string; }
+
+function operationStatus(status: unknown): OperationPollStatus {
+  if (status === "not_found") return status;
+  return KNOWN_OPERATION_STATUSES.find((known) => known === status) ?? "unknown";
+}
+
+function describeOperationPoll(operation: HindsightOperation | undefined, operationId: string): OperationPoll {
+  const id = operation?.operation_id ?? operation?.id;
+  if (id !== undefined && id !== operationId) return { status: "unknown" };
+  const status = operationStatus(operation?.status);
+  if (status === "not_found" || status === "unknown") return { status };
+  const children = Array.isArray(operation?.child_operations) ? operation.child_operations.map((child: unknown) =>
+    child && typeof child === "object" && "status" in child ? operationStatus(child.status) : "unknown").sort() : [];
+  return { status, progressKey: JSON.stringify([status, ...children]) };
+}
+
 export class HindsightBankPolicyError extends Error {}
 
 export interface HindsightDocument {
@@ -181,7 +209,7 @@ export class HindsightClient {
       if (response.ok) {
         if (!responseBody) return undefined as T;
         try { return JSON.parse(responseBody) as T; }
-        catch { throw new Error(`${method} ${url}: server returned invalid JSON`); }
+        catch { throw new HindsightJsonError(`${method} ${url}: server returned invalid JSON`); }
       }
       const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
       if (isRetryableStatus(response.status) && attempt + 1 < maxAttempts && !signal?.aborted && Date.now() < deadline) {
@@ -279,7 +307,15 @@ export class HindsightClient {
       observation_scopes: "shared",
       metadata,
     };
-    return this.requestJson<RetainResponse>("POST", this.bankUrl("/memories"), { items: [item], async: true, operation_id: operationId }, signal);
+    let receipt: RetainResponse | undefined;
+    try {
+      receipt = await this.requestJson<RetainResponse>("POST", this.bankUrl("/memories"), { items: [item], async: true, operation_id: operationId }, signal, undefined, false);
+    } catch (error) {
+      if (!(error instanceof HindsightJsonError)) throw error;
+      throw new HindsightUnresolvedOperationError("Hindsight returned an invalid retain receipt", { cause: error });
+    }
+    if (receipt?.operation_id !== operationId) throw new HindsightUnresolvedOperationError("Hindsight retain receipt did not confirm the requested operation identifier");
+    return receipt;
   }
 
   async getOperation(operationId: string, signal?: AbortSignal): Promise<HindsightOperation> {
@@ -300,19 +336,28 @@ export class HindsightClient {
     return operations;
   }
 
-  async waitForOperation(operationId: string, signal?: AbortSignal, timeoutMs = this.config.operationPollTimeoutMs): Promise<HindsightOperation> {
+  async waitForOperation(operationId: string, signal?: AbortSignal, timeoutMs = this.config.operationPollTimeoutMs, onPoll?: (poll: OperationPoll) => void): Promise<HindsightOperation> {
     const started = Date.now();
     for (;;) {
-      const operation = await this.getOperation(operationId, signal);
-      const status = String(operation.status ?? "").toLowerCase();
-      if (["not_found", "not found", "404"].includes(status)) {
-        throw new HindsightHttpError(HTTP_STATUS.NOT_FOUND, "GET", this.bankUrl(`/operations/${encodeURIComponent(operationId)}`), "");
+      let operation: HindsightOperation | undefined;
+      let poll: OperationPoll;
+      try {
+        operation = await this.getOperation(operationId, signal);
+        poll = describeOperationPoll(operation, operationId);
+      } catch (error) {
+        if (error instanceof HindsightHttpError && error.status === HTTP_STATUS.NOT_FOUND) poll = { status: "not_found" };
+        else if (error instanceof HindsightJsonError) poll = { status: "unknown" };
+        else throw error;
       }
-      if (["completed", "failed", "cancelled", "error"].includes(status)) {
-        if (status !== "completed") throw new HindsightOperationError(status, operationId);
-        return operation;
+      onPoll?.(poll);
+      switch (poll.status) {
+        case "completed": return operation!;
+        case "failed":
+        case "cancelled": throw new HindsightOperationError(poll.status, operationId);
+        case "not_found": throw new HindsightOperationNotFoundError(operationId);
+        case "unknown": throw new HindsightUnresolvedOperationError("Hindsight returned an unknown operation status or mismatched identifier");
       }
-      if (signal?.aborted) throw new Error(`Hindsight operation ${operationId} was aborted`);
+      signal?.throwIfAborted();
       if (Date.now() - started >= timeoutMs) throw new HindsightPollTimeoutError(`Hindsight operation ${operationId} is still pending after ${timeoutMs} ms`);
       await sleep(Math.min(this.config.operationPollMs, Math.max(1, timeoutMs - (Date.now() - started))), signal);
     }

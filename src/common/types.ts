@@ -267,6 +267,7 @@ export interface HindsightOperation {
   error_message?: string | null;
   progress?: Record<string, unknown> | null;
   result_metadata?: Record<string, unknown> | null;
+  child_operations?: unknown[] | null;
 }
 
 export interface HindsightBankConfigResponse {
