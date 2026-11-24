@@ -27,7 +27,6 @@ export function defaultRuntimePaths(home = homeDirectory()) {
     stateDatabase: path.join(stateDirectory, "state.sqlite3"),
     reportDirectory: path.join(stateDirectory, "reports"),
     spoolDirectory: path.join(stateDirectory, "canonical"),
-    lockPath: path.join(stateDirectory, "daemon.lock"),
   };
 }
 

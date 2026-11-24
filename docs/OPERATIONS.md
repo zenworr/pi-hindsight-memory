@@ -85,6 +85,14 @@ For changes to parser, redaction, or extraction policy, follow [Historical repai
 
 Pause the importer and wait for active operations. Change the provider with `configure-provider.sh` or coordinated limits with `configure-concurrency.sh`. Run provider, retain, recall, and consolidation smoke tests before resuming.
 
+## Importer writer lock
+
+Stop the old importer service and let all old writer commands finish before you switch between the PID-file and SQLite-lock versions. The two versions do not share a lock.
+
+The importer takes an exclusive lock on `<resolved-stateDatabase>.writer-lock`, not on the state database. Read-only status, retrieval, and verification can still read the state database. Keep the sidecar on a local filesystem with SQLite locking support. Do not delete, move, or replace the sidecar, and do not use hard links for the state database. A sidecar left on disk does not mean a writer is running; the operating system releases the lock when the process exits.
+
+Maintenance code can import `withWriterLock(databasePath, callback)` from `dist/src/importer/lock.js`. It does not open or migrate the state database. Await all work inside the callback, including any child process. If you handle termination signals, stop and wait for that work before you let the callback return or the lock owner exit. For a lock-busy error, stop `pi-hindsight-importer` or wait for the other writer to finish. Pausing the daemon does not release the lock.
+
 ## Upgrades
 
 Do not update Hindsight automatically:
