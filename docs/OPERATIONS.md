@@ -50,16 +50,23 @@ scripts/importer-service.sh start
 
 ## Backups
 
+Stop the importer before a coordinated capture. Keep other Hindsight writers (including manual UI writes) idle until capture ends. Use a known query and the exact document ID that supports the expected answer.
+
 ```bash
-scripts/backup.sh
-scripts/restore-test.sh \
-  ~/.local/state/pi-hindsight-memory/backups/hindsight-TIMESTAMP.dump
-scripts/install-backup-schedule.sh
+scripts/importer-service.sh stop
+scripts/backup.sh --coordinated
+scripts/importer-service.sh start
+scripts/restore-test.sh /path/to/backup-TIMESTAMP-ID/manifest.json \
+  'known query' 'agent-session:pi:KNOWN_SESSION_ID'
 ```
 
-Set `PI_HINDSIGHT_BACKUP_DIR` to use another persistent location. PostgreSQL uses `pg_dump`; importer state uses SQLite `.backup`. The script retains four backup pairs and checksum files. For a split-host deployment, set `PI_HINDSIGHT_SSH_HOST` as described in [REMOTE-DEPLOYMENT.md](REMOTE-DEPLOYMENT.md).
+Set `PI_HINDSIGHT_BACKUP_DIR` to use another persistent location. To select a non-default app config, set `PI_HINDSIGHT_CONFIG`. The backup resolves source paths from the merged app config. Each set contains a PostgreSQL dump, SQLite online backups of importer state and local evidence, and a copy of the reviewed facts file if present. The versioned manifest records file checksums, source paths, Git revision, document counts, and the consistency label. The script publishes the set as one directory after verification. It does not delete older backups. Treat the directory and manifest as sensitive.
 
-The two database snapshots are not atomic. Keep the importer stopped and remote work idle when you need a consistent pair. The existing restore helper checks counts and API availability, not generation hashes or semantic correctness. After a real restore, run `verify-ready` and check a known result with its original source before enabling normal operation.
+Coordinated mode holds the importer writer lock. It refuses unresolved local operations and checks for idle remote operations and matching document IDs and hashes before and after the dump. If these checks fail, reconcile the outstanding work before you retry. This mode does not lock other Hindsight clients. For a split-host deployment, see [REMOTE-DEPLOYMENT.md](REMOTE-DEPLOYMENT.md).
+
+`scripts/install-backup-schedule.sh` installs weekly **uncoordinated** captures. These do not stop the importer or assert that the two databases represent the same generation. An SSH backup without a mode flag is also uncoordinated, to support read-only mirrors. The manifest gives no verified Hindsight document count for these sets.
+
+The restore test uses a temporary database, application, and loopback port. It checks file checksums, SQLite integrity, the full document ID and acknowledged-hash mapping, and whether the known query returns the specified document directly or through linked source facts. Strict verification rejects uncoordinated captures. Use `--allow-uncoordinated` to test a new uncoordinated set without accepting it as coordinated. Legacy dumps lack a manifest and evidence snapshot and cannot pass this test. After a real restore, run `verify-ready` and check the expected answer against its original source before enabling normal operation.
 
 ## Source missing
 

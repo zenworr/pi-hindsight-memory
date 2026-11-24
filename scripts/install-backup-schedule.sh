@@ -16,11 +16,11 @@ if [[ "$(uname -s)" == Darwin ]]; then
   BACKUP_DIR=$(backup_dir)
   ENGINE=""
   if [[ -z "$REMOTE_HOST" ]]; then ENGINE=$(container_engine); fi
-  command -v sqlite3 >/dev/null || { echo "sqlite3 is required" >&2; exit 1; }
-  command -v ssh >/dev/null || { echo "ssh is required" >&2; exit 1; }
+  command -v node >/dev/null || { echo "Node.js is required" >&2; exit 1; }
+  if [[ -n "$REMOTE_HOST" ]]; then command -v ssh >/dev/null || { echo "ssh is required" >&2; exit 1; }; fi
   TOOL_DIR=$(dirname "$(command -v "${ENGINE:-ssh}")")
-  SQLITE_DIR=$(dirname "$(command -v sqlite3)")
-  PATH_VALUE="$TOOL_DIR:$SQLITE_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  NODE_DIR=$(dirname "$(command -v node)")
+  PATH_VALUE="$NODE_DIR:$TOOL_DIR:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR" "$BACKUP_DIR"
   chmod 700 "$LOG_DIR"
   cat > "$PLIST" <<EOF
@@ -28,7 +28,7 @@ if [[ "$(uname -s)" == Darwin ]]; then
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>$LABEL</string>
-  <key>ProgramArguments</key><array><string>$ROOT/scripts/backup.sh</string></array>
+  <key>ProgramArguments</key><array><string>$ROOT/scripts/backup.sh</string><string>--uncoordinated</string></array>
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>$PATH_VALUE</string>
     <key>XDG_CONFIG_HOME</key><string>$CONFIG_HOME</string>
@@ -47,7 +47,7 @@ EOF
   plutil -lint "$PLIST" >/dev/null
   launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST"
-  echo "Installed weekly backup schedule: $PLIST"
+  echo "Installed weekly uncoordinated backup schedule: $PLIST"
 else
   UNIT_DIR="$HOME/.config/systemd/user"
   mkdir -p "$UNIT_DIR"
@@ -60,19 +60,19 @@ Environment=PI_HINDSIGHT_REMOTE_ENGINE=$REMOTE_ENGINE"
   fi
   cat > "$UNIT_DIR/pi-hindsight-backup.service" <<EOF
 [Unit]
-Description=Back up Hindsight and importer state
+Description=Capture an uncoordinated Hindsight backup
 Wants=network-online.target
 After=$backup_after
 
 [Service]
 Type=oneshot
 $backup_environment
-ExecStart=$ROOT/scripts/backup.sh
+ExecStart=$ROOT/scripts/backup.sh --uncoordinated
 UMask=0077
 EOF
   cat > "$UNIT_DIR/pi-hindsight-backup.timer" <<'EOF'
 [Unit]
-Description=Weekly Hindsight backup
+Description=Weekly uncoordinated Hindsight backup
 
 [Timer]
 OnCalendar=Sun *-*-* 03:00:00
@@ -84,5 +84,5 @@ WantedBy=timers.target
 EOF
   systemctl --user daemon-reload
   systemctl --user enable --now pi-hindsight-backup.timer
-  echo "Installed weekly pi-hindsight-backup.timer"
+  echo "Installed weekly uncoordinated pi-hindsight-backup.timer"
 fi

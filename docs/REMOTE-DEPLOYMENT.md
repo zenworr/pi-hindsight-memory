@@ -107,12 +107,20 @@ Do not copy the importer state to the service host when the importer continues t
 
 ## Backups
 
-The workstation state database and remote PostgreSQL database form one recovery set. `scripts/backup.sh` can stream `pg_dump` over SSH while it backs up local SQLite state:
+The workstation databases and remote PostgreSQL database form one recovery set. On the importer host, stop the importer and keep other Hindsight writers idle. Then stream `pg_dump` over SSH while the backup holds the local writer lock:
 
 ```bash
-PI_HINDSIGHT_SSH_HOST=hindsight-host scripts/backup.sh
+PI_HINDSIGHT_SSH_HOST=hindsight-host scripts/backup.sh --coordinated
+```
+
+Restart the importer when capture ends. A read-only mirror must not claim this coordination; its default SSH backup and the weekly schedule are uncoordinated:
+
+```bash
+PI_HINDSIGHT_SSH_HOST=hindsight-host scripts/backup.sh --uncoordinated
 PI_HINDSIGHT_SSH_HOST=hindsight-host scripts/install-backup-schedule.sh
 ```
+
+See [Backups](OPERATIONS.md#backups) for verification and restore instructions.
 
 The SSH account must be able to run Docker without an interactive password. Set `PI_HINDSIGHT_REMOTE_ENGINE=podman` when the service host uses Podman. `PI_HINDSIGHT_DB_USER` and `PI_HINDSIGHT_DB_NAME` override the PostgreSQL defaults.
 

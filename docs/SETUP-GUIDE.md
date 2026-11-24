@@ -305,13 +305,15 @@ pending or failed consolidation:                0
 
 Test several known queries and at least one invented query. Known answers must include provenance. An invented query should abstain.
 
-Create and restore-test a backup:
+With the importer stopped and other Hindsight writers idle, create a coordinated backup. Use the printed manifest path and a known query with its expected document ID:
 
 ```bash
-scripts/backup.sh
-scripts/restore-test.sh \
-  "$HOME/.local/state/pi-hindsight-memory/backups/hindsight-TIMESTAMP.dump"
+scripts/backup.sh --coordinated
+scripts/restore-test.sh /path/to/backup-TIMESTAMP-ID/manifest.json \
+  'known query' 'agent-session:pi:KNOWN_SESSION_ID'
 ```
+
+For a remote database, set `PI_HINDSIGHT_SSH_HOST`. See [Backups](OPERATIONS.md#backups).
 
 ## 10. Activate the Pi extension after verification
 

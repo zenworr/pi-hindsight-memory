@@ -5,9 +5,9 @@ import { defineConfig } from "eslint/config";
 export default defineConfig(
   { ignores: ["dist/**", "node_modules/**"] },
   {
-    files: ["*.js", "scripts/checks/*.mjs"],
+    files: ["*.js", "scripts/checks/*.mjs", "scripts/lib/*.mjs"],
     extends: [js.configs.recommended],
-    languageOptions: { globals: { process: "readonly" } },
+    languageOptions: { globals: { AbortController: "readonly", console: "readonly", process: "readonly" } },
   },
   {
     files: ["src/**/*.ts", "test/**/*.ts"],

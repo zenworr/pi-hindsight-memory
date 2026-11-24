@@ -1,53 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BACKUP=${1:?Usage: restore-test.sh POSTGRES_DUMP [QUERY]}
-QUERY=${2:-PostgreSQL}
+mode=strict
+if [[ ${1:-} == --allow-uncoordinated ]]; then mode=allow; shift; fi
+if [[ $# -ne 3 || -z $2 || -z $3 ]]; then
+  echo 'Usage: restore-test.sh [--allow-uncoordinated] MANIFEST KNOWN_QUERY EXPECTED_DOCUMENT_ID' >&2
+  exit 1
+fi
+MANIFEST=$1
+QUERY=$2
+EXPECTED_DOCUMENT=$3
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 # shellcheck source=scripts/lib/runtime.sh
 source "$ROOT/scripts/lib/runtime.sh"
-CONFIG_DIR=$(config_dir)
+helper="$ROOT/scripts/lib/backup.mjs"
+node "$helper" inspect "$MANIFEST" "$mode"
+BACKUP="$(dirname -- "$MANIFEST")/hindsight.dump"
 ENGINE=$(container_engine)
 COMPOSE_ENV="$ROOT/deploy/compose/.env"
-CONFIG_FILE="$CONFIG_DIR/config.json"
-for command in curl jq openssl sqlite3; do command -v "$command" >/dev/null || { echo "Missing command: $command" >&2; exit 1; }; done
-backup_name=$(basename "$BACKUP")
-case "$backup_name" in
-  hindsight-*.dump) stamp=${backup_name#hindsight-}; stamp=${stamp%.dump} ;;
-  *) echo "Backup name must be hindsight-TIMESTAMP.dump" >&2; exit 1 ;;
-esac
-backup_directory=$(cd -- "$(dirname -- "$BACKUP")" && pwd)
-BACKUP="$backup_directory/$backup_name"
-STATE_BACKUP="$backup_directory/state-$stamp.sqlite3"
-CHECKSUMS="$backup_directory/SHA256SUMS-$stamp"
-for file in "$BACKUP" "$STATE_BACKUP" "$CHECKSUMS" "$COMPOSE_ENV" "$CONFIG_FILE"; do [[ -r "$file" ]] || { echo "Missing readable file: $file" >&2; exit 1; }; done
-(
-  cd "$backup_directory"
-  verify_sha256_manifest "$(basename "$CHECKSUMS")" >/dev/null
-)
-STATE_URI="file:$STATE_BACKUP?immutable=1"
-[[ "$(sqlite3 -readonly "$STATE_URI" 'PRAGMA integrity_check;')" == ok ]] || { echo "State backup integrity check failed" >&2; exit 1; }
-expected_documents=$(sqlite3 -readonly -noheader "$STATE_URI" "SELECT count(DISTINCT s.document_id) FROM sessions s JOIN generations g ON g.source=s.source AND g.native_session_id=s.native_session_id WHERE g.state='completed';")
-[[ "$expected_documents" =~ ^[1-9][0-9]*$ ]] || { echo "State backup has no completed documents" >&2; exit 1; }
 value() { awk -F= -v key="$1" '$1==key {sub(/^[^=]*=/, ""); print; exit}' "$2"; }
-POSTGRES_IMAGE=$(value POSTGRES_IMAGE "$COMPOSE_ENV")
-HINDSIGHT_IMAGE=$(value HINDSIGHT_IMAGE "$COMPOSE_ENV")
+POSTGRES_IMAGE=${POSTGRES_IMAGE:-$(value POSTGRES_IMAGE "$COMPOSE_ENV")}
+HINDSIGHT_IMAGE=${HINDSIGHT_IMAGE:-$(value HINDSIGHT_IMAGE "$COMPOSE_ENV")}
+[[ -n "$POSTGRES_IMAGE" && -n "$HINDSIGHT_IMAGE" ]] || { echo 'Set the restore images in the Compose environment or export POSTGRES_IMAGE and HINDSIGHT_IMAGE.' >&2; exit 1; }
 POSTGRES_USER=restore_user
 POSTGRES_PASSWORD=$(openssl rand -hex 32)
 POSTGRES_DB=restore_test
-BANK_ID=$(jq -r '.hindsight.bankId' "$CONFIG_FILE")
-API_TOKEN=$(<"$CONFIG_DIR/api-token")
-name="pi-hm-restore-$$"
+API_TOKEN=$(openssl rand -hex 32)
+umask 077
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/pi-hm-restore-XXXXXXXX")
+name=$(basename -- "$temporary")
 network="$name-net"
 volume="$name-volume"
-tmpenv=$(mktemp "${TMPDIR:-/tmp}/$name.XXXXXX")
+tmpenv="$temporary/restore.env"
 cleanup() {
-  "$ENGINE" rm -f "$name-db" "$name-app" >/dev/null 2>&1 || true
+  "$ENGINE" rm -f "$name-app" "$name-db" >/dev/null 2>&1 || true
   "$ENGINE" volume rm "$volume" >/dev/null 2>&1 || true
   "$ENGINE" network rm "$network" >/dev/null 2>&1 || true
-  rm -f "$tmpenv"
+  rm -rf -- "$temporary"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+printf '%s\n' "$API_TOKEN" > "$temporary/api-token"
 "$ENGINE" network create "$network" >/dev/null
 "$ENGINE" volume create "$volume" >/dev/null
 "$ENGINE" run -d --name "$name-db" --network "$network" \
@@ -55,8 +49,7 @@ trap cleanup EXIT
   -v "$volume:/var/lib/postgresql" "$POSTGRES_IMAGE" >/dev/null
 for _ in $(seq 1 60); do "$ENGINE" exec "$name-db" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1 && break; sleep 2; done
 "$ENGINE" exec "$name-db" pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null
-"$ENGINE" cp "$BACKUP" "$name-db:/restore.dump"
-"$ENGINE" exec "$name-db" pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --clean --if-exists /restore.dump
+"$ENGINE" exec -i "$name-db" pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --exit-on-error --no-owner --no-privileges --clean --if-exists < "$BACKUP"
 cat > "$tmpenv" <<EOF
 HINDSIGHT_API_DATABASE_URL=postgresql://$POSTGRES_USER:$POSTGRES_PASSWORD@$name-db:5432/$POSTGRES_DB
 HINDSIGHT_API_HOST=0.0.0.0
@@ -81,13 +74,10 @@ HINDSIGHT_API_ENABLE_AUTO_CONSOLIDATION=false
 HINDSIGHT_API_WORKER_MAX_SLOTS=2
 HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS=0
 EOF
-chmod 600 "$tmpenv"
-"$ENGINE" run -d --name "$name-app" --network "$network" -p 127.0.0.1:18888:8888 --env-file "$tmpenv" "$HINDSIGHT_IMAGE" >/dev/null
-for _ in $(seq 1 120); do curl -fsS http://127.0.0.1:18888/health >/dev/null 2>&1 && break; sleep 2; done
-curl -fsS http://127.0.0.1:18888/health >/dev/null
-actual_documents=$("$ENGINE" exec "$name-db" psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM documents WHERE bank_id='$BANK_ID';")
-[[ "$actual_documents" == "$expected_documents" ]] || { echo "Restored document count $actual_documents does not match state count $expected_documents" >&2; exit 1; }
-curl -fsS -H "Authorization: Bearer $API_TOKEN" -H 'content-type: application/json' \
-  -d "{\"query\":$(jq -Rn --arg q "$QUERY" '$q'),\"max_tokens\":200}" \
-  "http://127.0.0.1:18888/v1/default/banks/$BANK_ID/memories/recall" >/dev/null
-echo "Isolated PostgreSQL and SQLite restore verification passed for $actual_documents documents."
+"$ENGINE" run -d --name "$name-app" --network "$network" -p 127.0.0.1::8888 --env-file "$tmpenv" "$HINDSIGHT_IMAGE" >/dev/null
+binding=$("$ENGINE" port "$name-app" 8888/tcp)
+[[ "$binding" =~ ^127\.0\.0\.1:[0-9]+$ ]] || { echo 'Expected an isolated loopback API port.' >&2; exit 1; }
+api="http://$binding"
+for _ in $(seq 1 120); do curl -fsS --max-time 2 "$api/health" >/dev/null 2>&1 && break; sleep 2; done
+curl -fsS --max-time 2 "$api/health" >/dev/null
+node "$helper" verify "$MANIFEST" "$mode" "$api" "$temporary/api-token" "$QUERY" "$EXPECTED_DOCUMENT"
