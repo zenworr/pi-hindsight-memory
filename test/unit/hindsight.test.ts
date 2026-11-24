@@ -80,7 +80,7 @@ test("operation listing filters by status and follows pagination", async () => {
   assert.equal(new URL(urls[1]!).searchParams.get("offset"), "100");
 });
 
-test("configuration and retain use the v0.9.2 request envelopes", async () => {
+test("bank configuration uses the Hindsight 0.10.3 request envelopes", async () => {
   const requests: Array<{ url: string; method: string; body?: any }> = [];
   const client = new HindsightClient(config(), async (url, request) => {
     const body = request?.body === undefined ? undefined : JSON.parse(request.body as string);

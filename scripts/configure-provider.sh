@@ -57,25 +57,38 @@ else
 fi
 [[ -n "$API_KEY" && "$API_KEY" != *$'\n'* && "$API_KEY" != *$'\r'* ]] || { echo "Invalid API key" >&2; exit 1; }
 
+config_file=${PI_HINDSIGHT_CONFIG:-$(config_dir)/config.json}
+api_url=${PI_HINDSIGHT_API_URL:-$(jq -er '.hindsight.apiUrl | strings | select(length > 0)' "$config_file")}
+wait_for_health() {
+  for _ in $(seq 1 120); do
+    if curl -fsS --max-time 5 "${api_url%/}/health" >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+
 umask 077
 mkdir -p "$(state_dir)"
 chmod 700 "$(state_dir)"
-previous="$ENV_FILE.previous"
+previous=$(mktemp "$ENV_FILE.previous.XXXXXX")
+cp "$ENV_FILE" "$previous"
 tmp=$(mktemp "$ENV_FILE.XXXXXX")
 verification=$(mktemp "$(state_dir)/provider-verification.XXXXXX")
-cp "$ENV_FILE" "$previous"
-chmod 600 "$previous"
-committed=0
+rollback=0
 cleanup() {
-  status=$?
-  rm -f "$tmp" "$verification"
-  if [[ "$committed" -ne 1 && -r "$previous" ]]; then
-    cp "$previous" "$ENV_FILE"
-    chmod 600 "$ENV_FILE"
-    compose_project up -d --force-recreate --no-deps hindsight-app >/dev/null 2>&1 || true
-    echo "Provider verification failed; restored the previous Hindsight environment." >&2
+  local status=$?
+  if [[ "$rollback" -eq 1 ]]; then
+    if cp "$previous" "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$ENV_FILE" \
+      && compose_project up -d --force-recreate --no-deps hindsight-app >/dev/null 2>&1 && wait_for_health; then
+      echo "Provider verification failed; restored the previous Hindsight environment." >&2
+      rm -f "$previous"
+    else
+      echo "Provider verification failed and rollback could not be verified. Previous environment saved at $previous." >&2
+    fi
+  else
+    rm -f "$previous"
   fi
-  rm -f "$previous"
+  rm -f "$tmp" "$verification"
   return "$status"
 }
 trap cleanup EXIT
@@ -92,19 +105,16 @@ awk '!/^HINDSIGHT_API_LLM_(PROVIDER|API_KEY|MODEL|BASE_URL|REASONING_EFFORT|TEMP
 } >> "$tmp"
 chmod 600 "$tmp"
 mv "$tmp" "$ENV_FILE"
+rollback=1
 unset API_KEY
 
 compose_project up -d --force-recreate --no-deps hindsight-app
-api_url=$(jq -r '.hindsight.apiUrl' "$(config_dir)/config.json")
-healthy=0
-for _ in $(seq 1 120); do
-  if curl -fsS "$api_url/health" >/dev/null 2>&1; then healthy=1; break; fi
-  sleep 2
-done
-[[ "$healthy" -eq 1 ]] || { echo "Hindsight did not become healthy" >&2; exit 1; }
-printf '%s\n' '{"role":"user","content":"Provider verification sentinel.","timestamp":"2026-01-01T00:00:00.000Z"}' > "$verification"
-chmod 600 "$verification"
-node "$ROOT/dist/src/importer/cli.js" dry-run-extract "$verification" --mode concise >/dev/null
-committed=1
-rm -f "$previous"
+wait_for_health || { echo "Hindsight did not become healthy" >&2; exit 1; }
+printf '%s\n' '{"role":"user","content":"On January 1, 2026, I selected PostgreSQL as the database for the synthetic Acorn inventory project after its transaction recovery test passed.","timestamp":"2026-01-01T00:00:00.000Z"}' > "$verification"
+if ! node "$ROOT/dist/src/importer/cli.js" dry-run-extract "$verification" --mode concise --config "$config_file" 2>/dev/null \
+  | jq -es 'length == 1 and (.[0].facts | type == "array" and any(.[]; (.text | strings | test("\\S"))))' >/dev/null 2>&1; then
+  echo "Provider dry run did not return an extracted fact." >&2
+  exit 1
+fi
+rollback=0
 echo "Configured and verified $PROVIDER / $MODEL${REASONING:+ with reasoning=$REASONING}."

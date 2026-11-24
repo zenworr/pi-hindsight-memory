@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 
 os.environ["HINDSIGHT_OTEL_ADAPTER_ENABLED"] = "0"
+os.environ["HINDSIGHT_OTEL_SERVICE_VERSION"] = "9.8.7"
 os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://127.0.0.1:1"
 shim = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).parents[2] / "deploy/telemetry/sitecustomize.py"
 spec = importlib.util.spec_from_file_location("checked_telemetry", shim)
@@ -58,6 +59,7 @@ meter.create_histogram("check.histogram").record(2, {"tenant": "CANARY", "scope"
 meter.create_observable_gauge("check.observable", callbacks=[lambda _: [Observation(3, {"password": "CANARY", "scope": "retain"})]])
 data = reader.get_metrics_data()
 assert "CANARY" not in str(data)
+assert {resource.resource.attributes["service.version"] for resource in data.resource_metrics} == {"9.8.7"}
 points = {metric.name: metric.data.data_points[0] for resource in data.resource_metrics for scope in resource.scope_metrics for metric in scope.metrics if metric.name.startswith("check.")}
 assert points["check.counter"].value == 42
 assert points["check.histogram"].sum == 2
@@ -65,4 +67,4 @@ assert points["check.observable"].value == 3
 assert all(point.attributes == {"scope": "retain"} for point in points.values())
 metrics.shutdown()
 provider.shutdown()
-print(json.dumps({"sdkAdmissionSafe": True, "parentChildPreserved": True, "numericMetricsPreserved": True}))
+print(json.dumps({"sdkAdmissionSafe": True, "parentChildPreserved": True, "numericMetricsPreserved": True, "serviceVersionPreserved": True}))

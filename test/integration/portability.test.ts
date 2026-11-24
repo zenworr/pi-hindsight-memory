@@ -32,7 +32,7 @@ test("setup configuration uses generic portable defaults and local overrides", a
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 });
 
-test("deployment preparation isolates PostgreSQL from application secrets", async () => {
+test("deployment preparation records the selected release and preserves existing image pins and secret separation", async () => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-split-env-"));
   const project = path.join(temporary, "project");
   const home = path.join(temporary, "home");
@@ -45,24 +45,64 @@ test("deployment preparation isolates PostgreSQL from application secrets", asyn
   await fs.copyFile(path.join(root, "deploy", "compose", "compose.yaml"), path.join(project, "deploy", "compose", "compose.yaml"));
   await fs.writeFile(path.join(bin, "docker"), `#!/usr/bin/env bash
 set -e
-if [[ $1 == info || $1 == pull ]]; then exit 0; fi
+if [[ $1 == pull ]]; then printf '%s\\n' "$2" >> "$TEST_PULL_LOG"; exit 0; fi
 if [[ $1 == image && $2 == inspect ]]; then
-  if [[ $* == *Architecture* ]]; then echo "\${TEST_IMAGE_ARCH:-amd64}"; else echo "$3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; fi
+  case "$*" in
+    *Architecture*) echo "$TEST_IMAGE_ARCH" ;;
+    *RepoDigests*) echo "$3@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ;;
+    *org.opencontainers.image.version*) echo "\${TEST_OCI_VERSION:-}" ;;
+    *) exit 2 ;;
+  esac
   exit 0
 fi
 exit 2
 `, { mode: 0o700 });
   const configHome = path.join(temporary, "config");
-  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: path.join(temporary, "state"), PATH: `${bin}:/usr/bin:/bin`, PI_HINDSIGHT_CONTAINER_ENGINE: "docker", TEST_IMAGE_ARCH: process.arch === "arm64" ? "arm64" : "amd64" };
-  try {
-    const result = spawnSync("bash", [path.join(project, "scripts", "prepare-deployment.sh")], { cwd: project, env, encoding: "utf8" });
+  const pullLog = path.join(temporary, "pull.log");
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: path.join(temporary, "state"), PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_BACKUP_DIR: path.join(temporary, "backup"), PI_HINDSIGHT_CONTAINER_ENGINE: "docker", TEST_IMAGE_ARCH: process.arch === "arm64" ? "arm64" : "amd64", TEST_PULL_LOG: pullLog, HINDSIGHT_TAG: "", POSTGRES_TAG: "", TEST_OCI_VERSION: "", VERIFY_HINDSIGHT_SIGNATURE: "0" };
+  const compose = path.join(project, "deploy", "compose");
+  const composeEnv = path.join(compose, ".env");
+  const versions = path.join(compose, "versions.env");
+  const digest = `sha256:${"a".repeat(64)}`;
+  const originalDigest = `sha256:${"b".repeat(64)}`;
+  function prepare(overrides: NodeJS.ProcessEnv = {}) {
+    const result = spawnSync("bash", [path.join(project, "scripts", "prepare-deployment.sh")], { cwd: project, env: { ...env, ...overrides }, encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr);
+  }
+  async function checkPin(version: string, image: string, databaseImage: string) {
+    for (const file of [composeEnv, versions]) {
+      const settings = (await fs.readFile(file, "utf8")).split("\n");
+      assert.ok(settings.includes(`HINDSIGHT_VERSION=${version}`));
+      assert.ok(settings.includes(`HINDSIGHT_IMAGE=${image}`));
+      assert.ok(settings.includes(`POSTGRES_IMAGE=${databaseImage}`));
+    }
+  }
+  try {
+    prepare();
+    await checkPin("0.10.3", `ghcr.io/vectorize-io/hindsight:0.10.3@${digest}`, `docker.io/pgvector/pgvector:pg18@${digest}`);
     const postgres = await fs.readFile(path.join(configHome, "pi-hindsight-memory", "postgres.env"), "utf8");
     const hindsight = await fs.readFile(path.join(configHome, "pi-hindsight-memory", "hindsight.env"), "utf8");
     assert.deepEqual(postgres.split("\n").filter(Boolean).map((line) => line.split("=")[0]), ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"]);
     assert.doesNotMatch(postgres, /HINDSIGHT|LLM|API/);
     assert.doesNotMatch(hindsight, /^POSTGRES_(?:USER|PASSWORD|DB)=/m);
     assert.equal((await fs.stat(path.join(configHome, "pi-hindsight-memory", "postgres.env"))).mode & 0o777, 0o600);
+
+    const retained = `ghcr.io/vectorize-io/hindsight:0.9.2@${originalDigest}`;
+    const databasePin = `docker.io/pgvector/pgvector:pg18@${originalDigest}`;
+    await fs.writeFile(composeEnv, `HINDSIGHT_VERSION=stale\nHINDSIGHT_IMAGE="${retained}"\nPOSTGRES_IMAGE=${databasePin}\n`);
+    await fs.writeFile(pullLog, "");
+    prepare();
+    await checkPin("0.9.2", retained, databasePin);
+    assert.equal(await fs.readFile(pullLog, "utf8"), `${retained}\n${databasePin}\n`);
+
+    const newTag = "registry.example.invalid:5000/hindsight:0.11.2";
+    prepare({ HINDSIGHT_TAG: newTag });
+    await checkPin("0.11.2", `${newTag}@${digest}`, databasePin);
+    const digestOnly = `registry.example.invalid:5000/hindsight@${originalDigest}`;
+    prepare({ HINDSIGHT_TAG: digestOnly, TEST_OCI_VERSION: "v0.12.0" });
+    await checkPin("0.12.0", digestOnly, databasePin);
+    prepare();
+    await checkPin("unknown", digestOnly, databasePin);
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 });
 
@@ -236,7 +276,7 @@ esac
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 });
 
-test("API-key provider helper verifies changes without exposing the key and rolls back failures", async () => {
+test("API-key provider helper requires a nonblank fact and preserves protected rollback material on failure", async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "pi-hm-portable-provider-"));
   const configHome = path.join(home, "config-root");
   const stateHome = path.join(home, "state-root");
@@ -248,9 +288,17 @@ test("API-key provider helper verifies changes without exposing the key and roll
   await fs.mkdir(bin, { recursive: true });
   await fs.mkdir(directory, { recursive: true });
   await fs.writeFile(path.join(directory, "config.json"), JSON.stringify({ hindsight: { apiUrl: "http://127.0.0.1:8888" } }));
-  for (const name of ["docker", "curl"]) await fs.writeFile(path.join(bin, name), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
-  await fs.writeFile(path.join(bin, "node"), "#!/usr/bin/env bash\n[[ ${TEST_PROVIDER_FAIL:-0} == 1 ]] && exit 9\nexit 0\n", { mode: 0o700 });
-  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: stateHome, PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_CONTAINER_ENGINE: "docker", TEST_PROVIDER_KEY: key };
+  await fs.writeFile(path.join(bin, "curl"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o700 });
+  await fs.writeFile(path.join(bin, "docker"), `#!/usr/bin/env bash
+if [[ \${TEST_ROLLBACK_FAIL:-0} == 1 ]] && grep -q '^HINDSIGHT_API_LLM_PROVIDER=none$' "$TEST_ENV_FILE"; then exit 9; fi
+exit 0
+`, { mode: 0o700 });
+  await fs.writeFile(path.join(bin, "node"), `#!/usr/bin/env bash
+[[ \${TEST_PROVIDER_FAIL:-0} == 1 ]] && exit 9
+printf '%s\\n' "$TEST_EXTRACTION"
+`, { mode: 0o700 });
+  const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: configHome, XDG_STATE_HOME: stateHome, PATH: `${bin}:${process.env.PATH}`, PI_HINDSIGHT_CONFIG: path.join(directory, "config.json"), PI_HINDSIGHT_API_URL: "http://127.0.0.1:8888", PI_HINDSIGHT_CONTAINER_ENGINE: "docker", TEST_PROVIDER_KEY: key, TEST_ENV_FILE: envFile, TEST_PROVIDER_FAIL: "0", TEST_ROLLBACK_FAIL: "0", TEST_EXTRACTION: JSON.stringify({ facts: [{ text: "The synthetic project uses PostgreSQL.", fact_type: "experience" }] }) };
+  const backups = async () => (await fs.readdir(directory)).filter(name => name.startsWith("hindsight.env.previous"));
   try {
     await fs.writeFile(envFile, original, { mode: 0o600 });
     const missingModel = run("configure-provider.sh", ["--api-key-env", "TEST_PROVIDER_KEY"], env);
@@ -268,10 +316,27 @@ test("API-key provider helper verifies changes without exposing the key and roll
     assert.equal(text.includes("old-secret"), false);
     assert.equal((await fs.stat(envFile)).mode & 0o777, 0o600);
 
-    await fs.writeFile(envFile, original, { mode: 0o600 });
-    const failed = run("configure-provider.sh", ["--model", "failing-model", "--api-key-env", "TEST_PROVIDER_KEY"], { ...env, TEST_PROVIDER_FAIL: "1" });
-    assert.notEqual(failed.status, 0);
-    assert.equal(await fs.readFile(envFile, "utf8"), original);
-    assert.equal(`${failed.stdout}${failed.stderr}`.includes(key), false);
+    assert.deepEqual(await backups(), []);
+    const args = ["--model", "failing-model", "--api-key-env", "TEST_PROVIDER_KEY"];
+    for (const overrides of [{ TEST_PROVIDER_FAIL: "1" }, { TEST_EXTRACTION: "" }, { TEST_EXTRACTION: key }, { TEST_EXTRACTION: '{"facts":[]}' }, { TEST_EXTRACTION: '{"facts":[{"text":"  "}]}' }]) {
+      await fs.writeFile(envFile, original, { mode: 0o600 });
+      const failed = run("configure-provider.sh", args, { ...env, ...overrides });
+      assert.notEqual(failed.status, 0);
+      assert.match(failed.stderr, /restored the previous Hindsight environment/);
+      assert.equal(await fs.readFile(envFile, "utf8"), original);
+      assert.equal(`${failed.stdout}${failed.stderr}`.includes(key), false);
+      assert.deepEqual(await backups(), []);
+    }
+
+    const failedRollback = run("configure-provider.sh", args, { ...env, TEST_EXTRACTION: '{"facts":[]}', TEST_ROLLBACK_FAIL: "1" });
+    assert.notEqual(failedRollback.status, 0);
+    assert.match(failedRollback.stderr, /rollback could not be verified/);
+    assert.equal(`${failedRollback.stdout}${failedRollback.stderr}`.includes(key), false);
+    const saved = await backups();
+    assert.equal(saved.length, 1);
+    const savedPath = path.join(directory, saved[0]!);
+    assert.ok(failedRollback.stderr.includes(savedPath));
+    assert.equal((await fs.stat(savedPath)).mode & 0o777, 0o600);
+    assert.equal(await fs.readFile(savedPath, "utf8"), original);
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 });

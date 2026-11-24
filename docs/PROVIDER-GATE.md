@@ -12,7 +12,7 @@ scripts/configure-provider.sh --model MODEL_ID
 
 The provider defaults to `openai-responses`. No reasoning effort is sent unless `--reasoning` is specified. The helper also sets `HINDSIGHT_API_LLM_TEMPERATURE=none` and strict structured output.
 
-Use `--provider openai` for a Chat Completions endpoint and `--base-url` for an OpenAI-compatible gateway. Hindsight startup and extraction verification fail if the selected configuration is unavailable.
+Use `--provider openai` for a Chat Completions endpoint and `--base-url` for an OpenAI-compatible gateway. The helper requires a healthy app and at least one non-blank fact from a synthetic dry run. The dry run stores no facts. If verification fails, the helper restores the previous environment and checks app health again. If it cannot verify rollback, it reports the path to the protected backup and keeps that file.
 
 ## Other providers
 

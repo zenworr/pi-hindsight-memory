@@ -10,7 +10,7 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
       OTEL_EXPORTER_OTLP_TIMEOUT: "3"
-      HINDSIGHT_OTEL_SERVICE_VERSION: "0.9.2"
+      HINDSIGHT_OTEL_SERVICE_VERSION: "${HINDSIGHT_VERSION:-unknown}"
       HINDSIGHT_OTEL_HOST_NAME: ${HINDSIGHT_OTEL_HOST_NAME:-hindsight}
     volumes:
       - ../telemetry:/opt/hindsight-telemetry:ro

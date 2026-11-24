@@ -56,13 +56,13 @@ The regression suite checks invalid CLI/configuration inputs, offline configurat
 
 ## Live contract tests
 
-Run the isolated no-LLM contract test after starting a new deployment:
+Run the isolated no-LLM contract test after starting a new deployment and before and after any Hindsight image change. Use `PI_HINDSIGHT_CONFIG` to select the isolated deployment's configuration when testing an upgrade candidate.
 
 ```bash
 scripts/live-contract-smoke.sh
 ```
 
-It creates a temporary bank, retains and replaces synthetic content, checks recall, and removes the bank.
+It creates a disposable bank, verifies its chunk-only configuration, and retains and replaces synthetic content using caller-supplied operation IDs. It checks both stored document hashes, recalls the synthetic sentinel, verifies document deletion, and removes the bank. It does not read or write the configured bank. See the [Hindsight upgrade gate](DEPLOYMENT.md#hindsight-upgrade-gate) for the other required checks.
 
 ## Corpus evaluation
 

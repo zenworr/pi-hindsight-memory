@@ -28,7 +28,7 @@ docker version
 docker compose version
 ```
 
-The full Hindsight 0.9.2 image and pgvector image have native ARM64 builds. Do not force `linux/amd64` emulation.
+The default Hindsight 0.10.3 image and pgvector image have native ARM64 builds. Do not force `linux/amd64` emulation. For changes to an existing image pin, follow the [Hindsight upgrade gate](DEPLOYMENT.md#hindsight-upgrade-gate).
 
 ### Linux
 

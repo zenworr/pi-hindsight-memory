@@ -95,13 +95,4 @@ Maintenance code can import `withWriterLock(databasePath, callback)` from `dist/
 
 ## Upgrades
 
-Do not update Hindsight automatically:
-
-1. review release and migration notes;
-2. create and restore-test a backup;
-3. pull and pin the new native-platform image digest;
-4. run project and contract tests;
-5. compare recall quality, latency, and storage;
-6. update the live stack only after review.
-
-Do not combine an embedding-model change with a Hindsight version change.
+Do not update Hindsight automatically, including during Proxmox VE maintenance. Use the [Hindsight upgrade gate](DEPLOYMENT.md#hindsight-upgrade-gate). Restore-test the backup and compare recall quality, latency, and storage before cutover. Do not combine an embedding-model change with a Hindsight version change.

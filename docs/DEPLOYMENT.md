@@ -36,11 +36,11 @@ PI_HINDSIGHT_UI_PORT            default: 9999
 PI_HINDSIGHT_WORKER_ID          default: pi-hindsight-worker
 PI_HINDSIGHT_CONCURRENCY        default: 4
 PI_HINDSIGHT_COMPOSE_PROJECT    default: pi-hindsight-memory
-HINDSIGHT_TAG                   default: ghcr.io/vectorize-io/hindsight:0.9.2
+HINDSIGHT_TAG                   first-run default: ghcr.io/vectorize-io/hindsight:0.10.3
 POSTGRES_TAG                    default: docker.io/pgvector/pgvector:pg18
 ```
 
-The script pulls the native image for the host architecture and records immutable image digests. Set `VERIFY_HINDSIGHT_SIGNATURE=1` to require Hindsight's documented keyless Cosign signature. PostgreSQL is digest-pinned but its signature is not asserted by this project.
+The script pulls native images for the host architecture. If `.env` already contains image pins, it keeps them unless you explicitly set `HINDSIGHT_TAG` or `POSTGRES_TAG` for the corresponding image. Both overrides accept either a tag or an immutable image reference. The script records the selected pins in `.env` and `versions.env`. It records the Hindsight release from the pinned image's OCI version label or release tag, or `unknown` if neither supplies a release. Set `VERIFY_HINDSIGHT_SIGNATURE=1` to verify the resolved Hindsight pin with Cosign. PostgreSQL is digest-pinned but this project does not verify its signature.
 
 Generated secrets use mode `0600`. PostgreSQL reads a minimal `postgres.env` containing only its user, password, and database name; it never receives Hindsight API or provider credentials. The separate `hindsight.env` contains the database URL and application settings. The generated runtime configuration uses no extraction LLM, local embeddings, local reranking, stored document text, external PostgreSQL, disabled automatic consolidation, and loopback-only API/UI ports. Set `PI_HINDSIGHT_BIND_ADDRESS` to a trusted LAN address only when a reverse proxy or private network must reach the service.
 
@@ -57,6 +57,23 @@ scripts/verify-deployment.sh
 PostgreSQL has no host port. The API uses bearer authentication even though it is loopback-bound. PostgreSQL 18 stores its versioned data directory below `/var/lib/postgresql`, so the Compose stack mounts the named volume at that parent path and does not create an anonymous parent volume.
 
 For an always-on service host with a workstation-side importer, use the [remote deployment guide](REMOTE-DEPLOYMENT.md).
+
+## Hindsight upgrade gate
+
+Use this gate for any Hindsight image change, including during Proxmox VE maintenance. Treat an OS or PostgreSQL update as a separate change. Do not let it move the Hindsight pin.
+
+1. Before the change, record the running image reference and image ID on the service host. Query the API's `/version`. If telemetry is enabled, record the `service.version` on fresh `hindsight-api` data in your collector backend. Compare the configured pin with the running reference. A local tag lookup is **not** evidence of what the container runs; the tag may point to a different digest.
+
+   ```bash
+   docker inspect --format '{{.Config.Image}} {{.Image}}' hindsight-app
+   curl -fsS "${API_URL%/}/version"
+   ```
+
+   `.Config.Image` is the reference used to create the container; `.Image` is its image ID, not a registry digest. If the running reference is not digest-pinned, recover a verified pin before proceeding. Do not substitute a digest from a mutable tag.
+2. Run `npm run validate` on the importer revision, the [disposable-bank contract smoke](TESTING.md#live-contract-tests) on the current server, and the [telemetry SDK admission and privacy check](TELEMETRY.md#runtime-checks) with the current image's Python runtime. Review the server's migration and recovery instructions; switching the pin back alone may not reverse a database migration.
+3. Test the candidate digest in an isolated deployment with a separate database and configuration. Repeat the contract and SDK checks with the candidate and verify that new telemetry uses the candidate release and contains no private fields. Do not proceed if a check fails.
+4. For the authorized cutover, stop the importer and let active operations finish. Take a coordinated backup of PostgreSQL and importer state. Save the current pin and private Compose and application settings. Set `HINDSIGHT_TAG` to the tested reference when running `scripts/prepare-deployment.sh`. Keep private Compose settings such as the telemetry endpoint when replacing the generated `.env`. Use the same Compose files and local overrides as before. Recreate only `hindsight-app`.
+5. Record the running reference, API version, and fresh `service.version` again. Repeat the checks from step 2. Run `verify-import` on the importer host before starting the importer. If a check fails, keep the importer stopped and use the reviewed recovery procedure.
 
 ## Startup
 

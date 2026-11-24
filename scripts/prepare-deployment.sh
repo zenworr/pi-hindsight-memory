@@ -9,9 +9,16 @@ CONFIG_DIR=$(config_dir)
 STATE_DIR=$(state_dir)
 BACKUP_DIR=$(backup_dir)
 ENGINE=$(container_engine)
-HINDSIGHT_TAG=${HINDSIGHT_TAG:-ghcr.io/vectorize-io/hindsight:0.9.2}
-POSTGRES_TAG=${POSTGRES_TAG:-docker.io/pgvector/pgvector:pg18}
-existing_value() { awk -F= -v key="$1" '$1==key {print $2; exit}' "$DEPLOY/.env" 2>/dev/null || true; }
+existing_value() {
+  local value
+  value=$(awk -F= -v key="$1" '$1==key {sub(/^[^=]*=/, ""); print; exit}' "$DEPLOY/.env" 2>/dev/null || true)
+  case "$value" in \"*\"|\'*\') value=${value:1:${#value}-2} ;; esac
+  printf '%s\n' "$value"
+}
+existing_hindsight_image=$(existing_value HINDSIGHT_IMAGE)
+existing_postgres_image=$(existing_value POSTGRES_IMAGE)
+HINDSIGHT_REF=${HINDSIGHT_TAG:-${existing_hindsight_image:-ghcr.io/vectorize-io/hindsight:0.10.3}}
+POSTGRES_REF=${POSTGRES_TAG:-${existing_postgres_image:-docker.io/pgvector/pgvector:pg18}}
 existing_project=$(existing_value COMPOSE_PROJECT_NAME)
 existing_bind_address=$(existing_value HINDSIGHT_BIND_ADDRESS)
 existing_api_port=$(existing_value HINDSIGHT_API_HOST_PORT)
@@ -42,27 +49,49 @@ mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR"
 chmod 700 "$CONFIG_DIR" "$STATE_DIR" "$BACKUP_DIR"
 
 echo "Pulling Hindsight and PostgreSQL for $ENGINE/$(uname -m)..."
-"$ENGINE" pull "$HINDSIGHT_TAG"
-"$ENGINE" pull "$POSTGRES_TAG"
+"$ENGINE" pull "$HINDSIGHT_REF"
+"$ENGINE" pull "$POSTGRES_REF"
 case "$(uname -m)" in arm64|aarch64) expected_arch=arm64 ;; x86_64|amd64) expected_arch=amd64 ;; *) expected_arch=unknown ;; esac
-for image in "$HINDSIGHT_TAG" "$POSTGRES_TAG"; do
+for image in "$HINDSIGHT_REF" "$POSTGRES_REF"; do
   actual_arch=$(image_architecture "$ENGINE" "$image")
   if [[ "$expected_arch" != unknown && "$actual_arch" != "$expected_arch" && "${PI_HINDSIGHT_ALLOW_EMULATION:-0}" != 1 ]]; then
     echo "Image $image is $actual_arch but this host is $expected_arch; refusing emulation" >&2
     exit 1
   fi
 done
-HINDSIGHT_DIGEST=$(image_digest "$ENGINE" "$HINDSIGHT_TAG")
-POSTGRES_DIGEST=$(image_digest "$ENGINE" "$POSTGRES_TAG")
-[[ "$HINDSIGHT_DIGEST" == sha256:* && "$POSTGRES_DIGEST" == sha256:* ]] || {
+pin_image() {
+  local ref=$1 digest
+  if [[ "$ref" == *@* ]]; then
+    digest=${ref##*@}
+  else
+    digest=$(image_digest "$ENGINE" "$ref") || return 1
+  fi
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  printf '%s@%s\n' "${ref%@*}" "$digest"
+}
+if ! HINDSIGHT_IMAGE=$(pin_image "$HINDSIGHT_REF") || ! POSTGRES_IMAGE=$(pin_image "$POSTGRES_REF"); then
   echo "Could not resolve immutable image digests" >&2
   exit 1
+fi
+
+release_version() {
+  local ref=${1%@*} version
+  local release_pattern='^v?[0-9]+\.[0-9]+\.[0-9]+([._+-][[:alnum:]_.+-]+)?$'
+  version=$("$ENGINE" image inspect "$1" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' 2>/dev/null) || version=
+  ref=${ref##*/}
+  if [[ ! "$version" =~ $release_pattern && "$ref" == *:* ]]; then version=${ref#*:}; fi
+  if [[ "$version" =~ $release_pattern ]]; then
+    printf '%s\n' "${version#v}"
+  else
+    printf 'unknown\n'
+  fi
 }
+HINDSIGHT_VERSION=$(release_version "$HINDSIGHT_IMAGE")
 
 signature_status=not-checked
 if [[ "${VERIFY_HINDSIGHT_SIGNATURE:-0}" == 1 ]]; then
   command -v cosign >/dev/null || { echo "cosign is required for signature verification" >&2; exit 1; }
-  cosign verify "$HINDSIGHT_TAG" \
+  cosign verify "$HINDSIGHT_IMAGE" \
     --certificate-identity-regexp '^https://github\.com/vectorize-io/hindsight/\.github/workflows/(sign-images|release)\.yml@.*' \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null
   signature_status=verified
@@ -155,24 +184,25 @@ mv "$tmp" "$HINDSIGHT_ENV"
 
 cat > "$DEPLOY/versions.env" <<EOF
 # Generated locally by scripts/prepare-deployment.sh.
-HINDSIGHT_VERSION=0.9.2
-HINDSIGHT_IMAGE=$HINDSIGHT_TAG@$HINDSIGHT_DIGEST
-POSTGRES_IMAGE=$POSTGRES_TAG@$POSTGRES_DIGEST
+HINDSIGHT_VERSION=$HINDSIGHT_VERSION
+HINDSIGHT_IMAGE=$HINDSIGHT_IMAGE
+POSTGRES_IMAGE=$POSTGRES_IMAGE
 HINDSIGHT_SIGNATURE_STATUS=$signature_status
 EOF
 cat > "$DEPLOY/.env" <<EOF
 COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME
 HINDSIGHT_ENV_FILE="$HINDSIGHT_ENV"
 POSTGRES_ENV_FILE="$POSTGRES_ENV"
-HINDSIGHT_IMAGE=$HINDSIGHT_TAG@$HINDSIGHT_DIGEST
-POSTGRES_IMAGE=$POSTGRES_TAG@$POSTGRES_DIGEST
+HINDSIGHT_VERSION=$HINDSIGHT_VERSION
+HINDSIGHT_IMAGE=$HINDSIGHT_IMAGE
+POSTGRES_IMAGE=$POSTGRES_IMAGE
 HINDSIGHT_BIND_ADDRESS=$BIND_ADDRESS
 HINDSIGHT_API_HOST_PORT=$API_HOST_PORT
 HINDSIGHT_UI_HOST_PORT=$UI_HOST_PORT
 EOF
 chmod 600 "$DEPLOY/.env" "$DEPLOY/versions.env"
 printf 'Prepared %s deployment for %s.\n' "$ENGINE" "$(uname -m)"
-printf 'Hindsight: %s\nPostgreSQL: %s\n' "$HINDSIGHT_DIGEST" "$POSTGRES_DIGEST"
+printf 'Hindsight: %s (version %s)\nPostgreSQL: %s\n' "$HINDSIGHT_IMAGE" "$HINDSIGHT_VERSION" "$POSTGRES_IMAGE"
 if [[ "$created_environment" -eq 1 ]]; then
   echo "The generated environment starts in no-LLM mode. Configure a provider only after the smoke test passes."
 else

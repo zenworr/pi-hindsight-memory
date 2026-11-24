@@ -172,7 +172,7 @@ def initialize():
     endpoint = os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"].rstrip("/")
     resource = Resource.create({
         "service.name": os.getenv("HINDSIGHT_API_OTEL_SERVICE_NAME", "hindsight-api"),
-        "service.version": os.getenv("HINDSIGHT_OTEL_SERVICE_VERSION", "0.9.2"),
+        "service.version": os.getenv("HINDSIGHT_OTEL_SERVICE_VERSION", "unknown"),
         "service.instance.id": f"{socket.gethostname()}:{os.getpid()}",
         "host.name": os.getenv("HINDSIGHT_OTEL_HOST_NAME", socket.gethostname()),
         "deployment.environment.name": "production",
@@ -214,7 +214,7 @@ def initialize():
     original_metrics_init = MeterProvider.__init__
 
     def metrics_init(self, *args, **kwargs):
-        # Hindsight 0.9.2 uses keyword arguments and a Prometheus reader.
+        # Keep the existing Prometheus reader.
         readers = list(kwargs.get("metric_readers", ()))
         readers.append(PeriodicExportingMetricReader(
             OTLPMetricExporter(endpoint=endpoint + "/v1/metrics", timeout=3),

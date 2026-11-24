@@ -63,7 +63,7 @@ Retained historical Hindsight failure records do not count as current health fai
 
 ## Hindsight server
 
-Hindsight 0.9.2 has native operation and LLM spans, FastAPI trace-context propagation, and metrics for LLM calls, HTTP requests, operations, process use, and the database pool. Its normal tracing also includes prompts and completions. Do not enable that exporter without the content filter.
+Hindsight 0.10.3 has native operation and LLM spans, FastAPI trace-context propagation, and metrics for LLM calls, HTTP requests, operations, process use, and the database pool. Its normal tracing also includes prompts and completions. Do not enable that exporter without the content filter.
 
 The optional [Compose override](../deploy/telemetry/compose.yaml) mounts [sitecustomize.py](../deploy/telemetry/sitecustomize.py) into the pinned Python runtime. It filters span names, attributes, events, links, status descriptions, and metric labels before SDK storage. The export filter remains as a second check. It adds an OTLP metric reader alongside the existing Prometheus reader and exports content-safe Python logs. Both metric readers receive the filtered labels; numeric measurements are preserved. It does not change the Hindsight image, database, provider, bank, or evidence policy.
 
@@ -80,7 +80,7 @@ docker compose --env-file .env -f compose.yaml -f compose.local.yaml \
 
 Omit `compose.local.yaml` if it does not exist. Stop the importer and let remote operations finish before the app restart. Do not recreate PostgreSQL. Check API health before resuming the importer.
 
-This adapter is tested against the pinned Hindsight 0.9.2 Python SDK. Test it again before an image upgrade. If initialization fails, it disables native trace export to prevent content leakage. Remove the telemetry override and recreate only the app to roll back.
+The override sets `service.version` from `HINDSIGHT_VERSION` in the private Compose `.env`. Preparation sets it for the selected image (0.10.3 by default). For an existing deployment not prepared by the current script, record the verified running release there before recreating the app. Without a known release the adapter reports `unknown`, not the default image version. Check the adapter with the actual Python runtime as part of the [Hindsight upgrade gate](DEPLOYMENT.md#hindsight-upgrade-gate). If initialization fails, it disables native trace export to prevent content leakage. Remove the telemetry override and recreate only the app to roll back.
 
 ## Privacy and failure behavior
 
@@ -118,7 +118,14 @@ The mock-provider test verifies schema, identity, query references, service filt
 
 ### Runtime checks
 
-Run `scripts/checks/telemetry-sdk.py` with the pinned Python SDK `1.44.0` and OTLP HTTP exporter `1.44.0`, or inside the pinned Hindsight image with its argument set to the shim path. CI uses an isolated virtual environment. This checks SDK buffers before export, parent/child context, numeric metrics, and private-field removal without provider calls.
+Run `scripts/checks/telemetry-sdk.py` with the pinned Python SDK `1.44.0` and OTLP HTTP exporter `1.44.0`, or inside the pinned Hindsight image with its argument set to the shim path. CI uses an isolated virtual environment. This checks SDK buffers before export, parent/child context, numeric metrics, and private-field removal without provider calls. For example, from the repository root on the service host with the telemetry mount active:
+
+```bash
+docker exec -i -e HINDSIGHT_OTEL_ADAPTER_ENABLED=0 hindsight-app \
+  /app/api/.venv/bin/python - /opt/hindsight-telemetry/sitecustomize.py < scripts/checks/telemetry-sdk.py
+```
+
+Disabling automatic initialization for this process prevents the startup check from exporting to the live collector. The check initializes the adapter itself with a loopback endpoint. With telemetry enabled, also filter fresh backend data by `service.name=hindsight-api` and confirm the `service.version` matches the running release.
 
 After `npm run build`, run `node --import ./scripts/checks/test-telemetry.mjs scripts/checks/telemetry-overhead.mjs disabled` and repeat with `enabled`. The temporary 100-session workflow uses mocked remote operations and discard exporters. Python SDK hot-path checks use `scripts/checks/telemetry-overhead.py disabled` and `enabled` in the isolated SDK environment. Compare repeated runs. Measurements exclude initialization and shutdown; they do not represent remote-provider latency or collector network cost. Do not make a timing threshold a flaky CI gate.
 
