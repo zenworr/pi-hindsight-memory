@@ -153,3 +153,14 @@ test("doctor rejects a disconnected database despite HTTP 200 and healthy API st
   disconnect();
   assert.equal(await run(), "unhealthy: database is disconnected");
 });
+
+test("status accepts a config object from an older in-process extension version", async (t) => {
+  const { config } = await fixture(t);
+  const state = new StateDatabase(config.stateDatabase);
+  t.after(() => { state.close(); });
+  state.heartbeat("idle");
+  const older = { ...config, importer: { retryDelayMs: 30_000, maxAttempts: 3 } } as unknown as typeof config;
+  const status = await collectHindsightStatus(older);
+  assert.equal(status.importer.available, true);
+  assert.deepEqual(status.issues.filter((issue) => issue.startsWith("Importer state unavailable")), []);
+});
